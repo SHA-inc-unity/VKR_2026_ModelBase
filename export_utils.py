@@ -53,7 +53,7 @@ def export_all_results(output_dir: Path, symbol: str, full_series: pd.Series, al
     run_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    for model_name in ["naive", "arima", "sarima", "ast"]:
+    for model_name in ["naive", "arima", "sarima", "ast", "nbeats", "lstm"]:
         if model_name not in all_results:
             continue
         result = all_results[model_name]
@@ -72,7 +72,7 @@ def export_all_results(output_dir: Path, symbol: str, full_series: pd.Series, al
 
     metrics_df = pd.DataFrame(rows)
     if len(metrics_df) == 0:
-        raise RuntimeError("Нет сохраненных результатов для naive/arima/sarima/ast")
+        raise RuntimeError("Нет сохраненных результатов для naive/arima/sarima/ast/nbeats/lstm")
 
     metric_cols = [c for c in ["MAE", "RMSE", "MAPE"] if c in metrics_df.columns]
     if metric_cols:
