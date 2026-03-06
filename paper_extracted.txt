@@ -1,0 +1,573 @@
+Adversarial Sparse Transformer for Time Series
+Forecasting
+Sifan Wu∗
+Tsinghua University
+wusf18@mails.tsinghua.edu.cn
+Xi Xiao
+Tsinghua University/Peng Cheng Laboratory
+xiaox@sz.tsinghua.edu.cn
+Qianggang Ding∗
+Tsinghua University
+dqg18@mails.tsinghua.edu.cn
+Peilin Zhao†
+Tencent AI Lab
+masonzhao@tencent.com
+Ying Wei
+Tencent AI Lab
+judywei@tencent.com
+Junzhou Huang
+University of Texas at Arlington/Tencent AI Lab
+jzhuang@uta.edu
+Abstract
+Many approaches have been proposed for time series forecasting, in light of its
+signiﬁcance in wide applications including business demand prediction. However,
+the existing methods suffer from two key limitations. Firstly, most point prediction
+models only predict an exact value of each time step without ﬂexibility, which
+can hardly capture the stochasticity of data. Even probabilistic prediction using
+the likelihood estimation suffers these problems in the same way. Besides, most
+of them use the auto-regressive generative mode, where ground-truth is provided
+during training and replaced by the network’s own one-step ahead output during
+inference, causing the error accumulation in inference. Thus they may fail to
+forecast time series for long time horizon due to the error accumulation. To solve
+these issues, in this paper, we propose a new time series forecasting model –
+Adversarial Sparse Transformer (AST), based on Generative Adversarial Networks
+(GANs). Speciﬁcally, AST adopts a Sparse Transformer as the generator to learn
+a sparse attention map for time series forecasting, and uses a discriminator to
+improve the prediction performance at a sequence level. Extensive experiments on
+several real-world datasets show the effectiveness and efﬁciency of our method.
+1 Introduction
+Time series forecasting has demonstrated its wide applications in business and industrial decision-
+making. For example, demand forecasting of energy consumption helps optimize the resource
+allocation and dispatch the power generation. There are many classical approaches to solve time
+series forecasting problems, such as Auto Regressive Integrated Moving Average(ARIMA) [3] models
+or exponential smoothing [ 7]. They incorporate prior knowledge about time series structures such as
+trend, seasonality and so on, and can achieve good performance for single linear time series prediction.
+But they are ineffective in predicting complex time series data, partly because of their inability to
+utilize the time-related features.
+∗This work is done when Sifan Wu and Qianggang Ding work as interns at Tencent AI Lab.
+†Corresponding author
+34th Conference on Neural Information Processing Systems (NeurIPS 2020), Vancouver, Canada.
+
+Recent years, to solve the modern large-scale multiple time series forecasting problems, deep neural
+networks [11, 20, 24, 25, 30, 14] have been applied to model complicated sequential data. Naturally,
+Recurrent Neural Network(RNN)-based [11, 24] and attention-based [14, 30] models are utilized to
+mine complex patterns for time series trends. However, all these models only optimize one speciﬁc
+objective such as the likelihood loss, MSE loss or other losses, while the real-world time series
+datasets have some tend of stochasticity which can hardly be modeled with a speciﬁc non-ﬂexible
+objective. Therefore, it is inappropriate to only optimize a single forecasting objective for time series
+forecasting models.
+Another key issue of existing methods is the error accumulation. Most auto-regressive generator
+models adopt the teacher forcing strategy [12], where the previous target values are known during
+training. While during inference, real previous target values are replaced by previously generated
+values, which causes discrepancy between training and inference. The discrepancy leads to error
+accumulation, since the model can hardly handle the errors which never occur in the training process.
+Recently, some non-autoregressive forecasting models have been proposed to resolve the error
+accumulation. However these models neglect the position information between steps, which is
+essential for time series forecasting, causing an inferior performance. Therefore, it has become one of
+the most important issues to alleviate the error accumulation and meanwhile improve the performance
+via training the time series forecasting model appropriately.
+Generative adversarial networks (GANs) [6] use an adversarial training procedure to directly shape
+the output distribution of the network via back-propagation. Motivated by GANs, in this paper,
+we propose Adversarial Sparse Transformer (AST) for multiple time series forecasting, which is a
+framework that combines a modiﬁed Transformer and Generative Adversarial Networks (GANs).
+The discriminator can regularize the modiﬁed Transformer at the sequence level and make it learn
+a better representation for time series, thereby eliminating the error accumulation and remedying
+the shortcomings of single forecasting objective. Speciﬁcally, the Vanilla Transformer is based on
+the multi-head attention mechanism where the representation of each time step is represented by
+multiple different weighted average of samples of its relevant time steps. The attention distribution
+of each head is typically computed by the softmax normalizing transformation, allocating non-zero
+attention weights to all samples. Considering only a few historical steps have strong correlations with
+the forecasting time step, we use sparse normalizing transforms likeα-entmax [21], which can yield
+exactly zero probability for irrelevant time steps.
+The main contributions of our paper are as follows:
+• We propose an effective time series forecasting model – Adversarial Sparse Transformer
+based on sparse Transformer and Generative Adversarial Networks. Extensive experiments
+on different real-world time series datasets show the effectiveness of our model.
+• We design a Generative Adversarial Encoder-Decoder framework to regularize the forecast-
+ing model which can improve the performance at the sequence level. The experiments show
+that adversarial training improves the robustness and generalization of the model.
+The rest of this paper is organized as follows. Section 2 reviews related works on time series
+forecasting brieﬂy. Section 3 proposes the background of this model. Section 4 describes the model
+we propose. In Section 5, we demonstrate the effectiveness of AST empirically. Finally we conclude
+in Section 6.
+2 Related Work
+Time series forecasting Early literature on time series forecasting mostly relies on statistical
+models. The Box-Jenkins ARIMA [ 15] family of methods develop a model where the prediction
+is a weighted linear sum of recent past observations or lags. Liu et al. [15] applied online learning
+to ARIMA models for time series forecasting. Matrix factorization methods [8, 32] model related
+series data as a matrix and attempt to learn information across time series. However, it is difﬁcult
+to predict the modern time series by traditional statistical models because of the complex structure
+and interdependence between groups of series. Recent years, many researchers have also applied
+neural networks solving time series forecasting [ 1, 13, 25]. Langkvist et al. [ 13] provided an
+overview of the methods modeling time series forecasting by deep learning and unsupervised feature
+learning. Bian et al. [ 1] compared ﬁve different architectures of recurrent neural networks for
+2
+
+time series forecasting. DeepAR [25] presents an encoder-decoder structure by an auto-regression
+RNNs modeling probabilistic distributions in the future. The dual-attention model in [22] can only
+predict one step ahead, which is not suitable for mid-term and long-term time series forecasting.
+For LSTNet [11], the model is based on RNN architecture and Auto-Regressive to catch long- and
+short-term dependencies. However, RNN-based models have been proved to be inefﬁcient in dealing
+with long-term dependencies [27]. However, these models only optimize single objective such as the
+likelihood loss function with auto-regressive generative mode, which suffer the discrepancy between
+training and inference as well as the inﬂexible objective.
+Generative Adversarial Networks Generative Adversarial Networks (GANs) have enjoyed great
+success in computer vision and natural language processing. Several researches use GANs for the
+generation of sequential data. C-RNN-GAN [19] applies the GAN architecture to generate sequential
+melody data, using LSTM networks as the generator and the discriminator. The recent timeGAN [31]
+ﬁrst utilizes GANs to generate time series. However, this model aims to generate realistic-like time
+series which can’t be classiﬁed with the true time series. The generated time series can only model
+the history time series distribution rather than forecast the future steps. As a result, none of these
+researches use GANs for time series forecasting problems. In contrast to all these models, we ﬁrst
+introduce the GANs into time series forecasting networks. Attached to a discriminator, we regularize
+the basic Seq2Seq time series forecasting network to improve the prediction performance of models.
+Attention Mechanism Researchers have also invited attention mechanisms into sequential
+problems[4, 26, 28]. Especially, several recent works [ 5, 18] have developed sparse attention
+mechanisms aiming to learn sparse mapping, mostly applied to NMT. Transformer [27] is a novel
+encoder-decoder model based on the attention mechanism and totally removes recurrent neural
+networks, which can compute the sequence effectively. [ 14] aims to solve time series forecasting by
+a transformer [23] with a decoder only model based on convolutional attention. However, this model
+only optimizes the step-level maximum likelihood and suffers from error accumulation.
+In this work, we introduce adversarial training as a regularization for the sequence-level forecasting
+of time series, which can help remedy the above issues of time series forecasting models.
+(a) Vanilla Transformer prediction
+ (b) Sparse Transformer prediction
+ (c) AST prediction
+Figure 1: (a) The exemplar of electricity time series prediction results of Vanilla Transformer
+when conditioning range length (blue line) is 168 and prediction range(red line) length is 24, where
+we can see the Vanilla Transfomer can hardly predict the shark peaks. (b) The prediction results of
+Sparse Transformer of the same time series, where the Sparse Transformer improves the performance
+of Vanilla Transformer but still struggles to predict the sharp peaks. (c) The prediction result of AST
+of the same time series. AST enjoys the best performance in all shark peaks.
+3 Background
+Problem Deﬁnition Interval prediction is useful in many scenarios such as business decisions and
+risk management. Quantile regression estimates the value of speciﬁc quantile, which is the most
+direct method to predict intervals. Thus we perform quantile regression for our model (e.g. outputting
+the 50th, 90th percentiles at each time step).
+Speciﬁcally, let {yi,1:t0}S
+i=1 denote S related univariate time series, where yi,1:t0 =
+[yi,1,yi,2,...,y i,t0] andyi,t∈ R is the value of time seriesi at timet. Further, Xi,1:t0∈ Rt0×k are
+k-dimensional time-independent (such as car line id) or dynamic time-dependent (such as month of
+3
+
+the year, day of the week and so on) covariates. We aim to predict the values of the nextτ time steps
+of each quantile for all time series given the past:
+ˆYρ,t0+1:t0+τ =fρ(Y1:t0, X1:t0+τ; Φ) (1)
+where ˆYρ,t3 is theρth quantile prediction value in thet time step.fρ is a prediction model forρth
+quantile. Φ∈ R is the learnable parameters of the model learned jointly from all S time series.
+For each time series , we refer to time series {Y1:t0} as target time series, time ranges [1,t 0] as
+conditioning range and [t0 + 1,t 0 +τ] as prediction range, as illustrated in Figure 1(a). The time
+pointt0 + 1 is the forecast start time andτ∈ N is the forecast horizon. Then our model output
+forecasts of different quantiles by the corresponding quantile objectives.
+The Transformer Encoder-decoder based Transformer is a good candidate for time series fore-
+casting, since the attention mechanisms in multi-head attention layers enable the transformer to
+capture long-term dependencies of time series. Brieﬂy, the encoder and decoder both consist
+of N identical layers. Each layer includes two main components: the multi-head self-attention
+layer and the feed-forward network. The multi-head self-attention sub-layer transforms the in-
+put h4 ∈ Rn×d into m distinct query, key and value matrices through linear projections, i.e.,
+Qm = hWQ
+m, Km = hWK
+m, Vm = hWV
+m, where dk = d
+m, WQ
+m, WK
+m ∈ Rd×dk and
+WV
+h ∈ Rd×dv are learnable parameters. Then each head computes a sequence of scores αm
+called scaled dot-product attention, and the output ofm-th head Om is:
+Om =αmVm = softmax( QmKT
+m√dk
+)Vm. (2)
+The output of the multi-head attention layer is the linear projection of the concatenation of
+O1, O2,..., Om. The feed-forward layer is composed of two linear projections with a ReLU
+activation function, i.e.,FFN (O) =max(0, OW1 + b1)W2 + b2, here W1 and W2 are learnable
+weight metrics and b1, b2 are biases. Similarly, the decoder is also composed of multi-head attention
+layers and positional-wise feed-forward layers.
+Generative Adversarial Networks The Generative Adversarial Networks (GANs) [6] framework
+establishes a min-max adversarial game between two neural networks – a generative model G,
+and a discriminative model D. The generator aims to generate fake samples. Concurrently, the
+discriminator model,D(x), is a neural network to distinguish real samples (positive samples) from
+samples generated by the generator model (negative samples).
+4 Model
+Generally speaking, our model is based on the encoder-decoder framework with an auxiliary dis-
+criminator, as illustrated in Figure 2. The encoder encodes the input [Y1:t0, X1:t0] to latent variables
+(h1,..., ht0), which in the next are fed to the decoder together with the corresponding covariates
+Xt0:t0+τ to generate the prediction range step by step.
+4.1 Sparse Transformer
+Considering that only a few historical steps are correlated with the forecasting time step, we should
+pay no attention to those irrelevant steps. However, in the (multi-head) attention layers of Vanilla
+Transformer, the attention scores are computed by the softmax mapping deﬁned in Equation 2, which
+is element-wise proportional to exponent and can never assign an attention score of exactly zero.
+Since all the scores sum to one, this inevitably means less attention is assigned to the relevant steps,
+potentially harming performance of the Transformer according to [9]. This has motivated a line of
+researches on learning networks with sparse mappings [ 18, 5]. In our paper, we focus on a more
+recent and ﬂexible family of transformations, α-entmax, [2, 21], deﬁned as,
+α−entmax(h) = [(α− 1)h−τ1]1/α−1
++ , (3)
+3We omit the ID of time seriesi for simplicity since all time series would be predicted by the same model
+4At each time step the same model is applied, so we simplify the formulation with some abuse of notation.
+Here h is the intermediate feature vector in encoder or decoder before multi-head attention layers.
+4
+
+Sparse
+Self -Attention
+Feed Forward
+Add & Norm
+Add & Norm
+N×
+Sparse
+Self -Attention
+Feed Forward
+Add & Norm
+Add & Norm
+Sparse
+Self -Attention
+Add & Norm
+N×
+𝒚1:𝑡0, 𝒙1:𝑡0 𝒙𝑡0+1:𝑡0+𝜏
+Discriminator
+DecoderEncoder
+𝒚1:𝑡0+𝜏
+𝒚1:𝑡0
+ෝ𝒚𝑡0+1:𝑡0+𝜏
+Concatenate
+Is generated ?
+𝒚𝑡0+1:𝑡0+𝜏
+ℒ𝐺
+ℒ𝐷
+Generator Loss
+Discriminator Loss
+Legend
+𝒙
+𝒚
+ෝ𝒚
+𝑡0 + 1
+𝜏
+1: 𝑡0
+𝑡0 + 1: 𝑡0 + 𝜏
+Covariate
+Observed  value
+Prediction value
+Forecast start
+Forecast horizon
+Conditioning range
+Prediction range
+Figure 2: Architecture of the Adversarial Sparse Transformer Model
+where [·]+ is the ReLU function. 1 is the all-one vector, and τ is the Lagrange multiplier. In our
+proposed sparse Transformer, we simply replace softmax withα-entmax in the attention heads, which
+can lead to sparse attention weights. Whenα = 1, it equals to the softmax function. Whenα = 2,
+it recovers sparsemax mapping [18]. Peters et al. [21] claimed that for allα> 1, it permits sparse
+solutions, andα = 1.5 is a sensible point. Therefore in our paper, we set the parameterα = 1.5 (we
+further compare the performance of differentα in the experiments).
+4.2 Adversarial training
+Algorithm 1 Adversarial Training for Time Series Forecasting
+for each training iteration do
+fork steps do
+• Randomly sample [X1:t0+τ, Y1:t0+τ ] from training dataset. Yreal = Y1:t0+τ .
+• Compute Yfake by the sparse TransformerG:
+Yfake = Y1:t0◦ ˆYt0+1:t0+τ = Y1:t0◦G (X1:t0+τ,Y 1:t0 ).
+• Update the Sparse Transformer by stochastic gradient:
+▽ΘG (Lρ(Yt0+1:t0+τ, Yt0+1:t0+τ ) +λE[log(1−D (Yfake )]).
+• Update the discriminator by stochastic gradient:
+▽ΘD (E[−logD(Yreal)−log(1−D (Yfake ))]).
+end for
+end for
+Most time series forecasting models optimize a speciﬁc objective such as minimizing likelihood loss
+function or quantile loss function. However, such exact loss function enforcing step level accuracy
+is incapable of dealing with the real-world stochasticity in time series, thereby leading to inferior
+performance. Besides, the aforementioned (in Section 1) error accumulation hurts performance badly
+when forecasting a long horizon of time series. To alleviate these problems, we propose an adversarial
+training process to regularize the encoder-decoder network and improve the accuracy at the sequence
+level. Through adversarial training, the encoder-decoder network learns a better representation of
+time series and forecast multiple future steps of time series with more ﬁdelity at the sequence level.
+In order to do so, a discriminator network D is attached on top of the decoder to improve the
+sequence-level accuracy as illustrated in Figure 2. Similar to [16], we use a network of three fully
+connected linear layers with LeakReLu [29] as the activation function, to serve as our discriminator.
+The discriminator then classiﬁes the input series ( ˆY or Y) as either predicted or ground-truth by
+5
+
+minimizing the cross-entropy loss function. Adversarially, the Transformer network, as our generator
+G, attempts to minimize the quantile loss between prediction series and the ground-truth. In this way,
+the quantile loss and adversarial loss can be complementary each other. On the one hand, the quantile
+loss helps the generator to capture the overall pattern of time series and aligns the prediction with the
+ground-truth, which can prevent the discriminator from converging quickly to local optimal. On the
+other hand, the discriminator regularizes the prediction from a global perspective.
+Formally, let ΘG and ΘD be the parameters of the generatorG and the discriminatorD, respectively.
+The functionG(X1:t0+τ, Y1:t0; ΘG) output the prediction range sequences ˆYt0:t0+τ , which then be
+input toG. LetD(Y) be the output of discriminator, which outputs ones if the input is a ground-truth
+time series or zero otherwise. Consequently the AST solves the minmax optimization problem:
+arg min
+G
+max
+D
+λLadv(ΘG, ΘD) +Lρ(ΘG), (4)
+Ladv(ΘG, ΘD) = E[log(D(Yreal)] + E[log(1−D (Yfake ))], (5)
+Lρ(ΘG) = 2
+S∑
+i=0
+t0+τ∑
+t=t0+1
+Pρ(yi,t, ˆyi,t), P ρ(yi,t, ˆyi,t) = ∆yi,t(ρIˆyi,t>yi,t− (1−ρ)Iˆyi,t≤yi,t),
+(6)
+∆yi,t = (ˆyi,t−yi,t), Yfake = (Y1:t0◦ ˆYt0+1:t0+τ), Yreal = (Y1:t0+τ), (7)
+whereλ is the trade-off hyper-parameter that balancesLadv andLρ, and ˆYt0+1:t0+τ is the predicted
+time series by the generator. The discriminator networkD and the generator networkG are trained
+jointly with Adam [10]. The overall training algorithm is illustrated in Algorithm 1.
+5 Experiments
+5.1 Datasets And Evaluation Metrics
+Table 1: Dataset Statistics,where F is the
+frequency of time series,T is the length of
+time series,D is number of variables
+Datasets F T D
+Electricity hourly 32,304 370
+Trafﬁc hourly 4,049 963
+wind daily 10,957 28
+solar hourly 4,832 137
+M4-Hourly hourly 748/1,008 414
+We use ﬁve public datasets: electricity5,
+traffic6, wind7, solar8, M4-Hourly [17] for our
+evaluation. The electricity dataset is an hourly time
+series of electricity consumption of 370 customers. The
+traffic dataset consists of 963 car lanes hourly oc-
+cupancy rates (range [0, 1)) of San Francisco bay area
+freeways. The wind contains hourly estimates of an
+area’s energy potential for 1986-2015. The solar con-
+tains solar power production records from January to
+August in 2006. The M4-Hourly contains 414 hourly
+time series from M4 competition [17], which aims to
+forecast time series in the testing set. Following [ 25],
+we generate multiple training windows by varying the
+start point from the original time series with ﬁxed history lengtht0 and forecasting horizonτ. Table 1
+describes the statistics of these datasets. The input covariatex is a combination of time-dependent fea-
+tures (e.g., a set of dummy variables like day-of-the-week, hour-of-the-day, etc) and time-independent
+features (e.g., car lane id, station id, etc).
+As is in the previous paper [25], we use normalized quantile loss (ρ-risk) to evaluate the quality of
+the forecasting. For a given collection of time series y and the corresponding prediction ˆy, theρ-risk
+forρ∈ (0, 1) is deﬁned as:
+Qρ(y, ˆy) = 2
+∑
+i,tPρ(yi,t, ˆyi,t)∑
+i,t|yi,t| (8)
+To be consistent with previous works [14, 25], we mainly report the results forρ = 0.5 and 0.9 which
+abbreviated asQ50 andQ90, respectively.
+5https://archive.ics.uci.edu/ml/datasets/ElectricityLoadDiagrams 20112014
+6https://archive.ics.uci.edu/ml/datasets/PEMS-SF
+7https://www.kaggle.com/sohier/30-years-of-european-wind-generation
+8https://www.nrel.gov/grid/solar-power-data.html
+6
+
+Table 2:Q50 loss results for the short-term (24-hour ahead, abbreviated as 1d) forecast and long-term
+(7d ahead) forecast scenarios.
+Dataset Reported Metrics From [14]ARIMA ETS TRMF DeepAR DSSM ConvTrans T ST AST
+elect1d 0.154±0.039 0.101±0.022 0.084±0.008 0.075±0.010 0.083±0.009 0.059±0.008 0.064±0.007 0.055±0.005 0.042±0.007elect7d 0.283±0.056 0.121±0.029 0.087±0.011 0.082±0.015 0.085±0.013 0.070±0.011 0.070±0.011 0.058±0.009 0.057±0.010traffic1d 0.223±0.049 0.236±0.036 0.186±0.021 0.161±0.031 0.167±0.033 0.122±0.025 0.120±0.022 0.109±0.019 0.093±0.010traffic7d 0.492±0.079 0.509±0.102 0.202±0.041 0.179±0.035 0.168±0.035 0.139±0.029 0.129±0.021 0.127±0.023 0.125±0.019
+Table 3:Q90 loss results for the short-term (24-hour ahead, abbreviated as 1d) forecast and long-term
+(7d ahead) forecast scenarios.TRMF outputs points predictions, so we only reportQ50 results.
+Dataset Reported Metrics From [14]ARIMA ETS TRMF DeepAR DSSM ConvTrans T ST AST
+elect1d 0.102±0.019 0.077±0.010 - 0.040±0.007 0.056±0.011 0.028±0.005 0.036±0.007 0.029±0.005 0.025±0.006elect7d 0.109±0.020 0.101±0.019 - 0.053±0.010 0.052±0.012 0.044±0.009 0.039±0.007 0.041±0.008 0.036±0.006traffic1d 0.137±0.024 0.148±0.028 - 0.099±0.019 0.113±0.023 0.081±0.014 0.087±0.015 0.084±0.013 0.068±0.010traffic7d 0.280±0.052 0.529±0.14 - 0.105±0.019 0.114±0.023 0.094±0.021 0.096±0.009 0.088±0.008 0.086±0.007
+Table 4: Performance summary (The reported results are in the format ofQ50/Q90) of using different
+α on electricity and traffic.
+sparsemax 1.5-entmax softmax sparsemax 1.5-entmax softmax
+elect1d 0.040/0.026 0.042/0.025 0.040/0.027 traffic1d 0.123/0.090 0.093/0.068 0.120/0.086
+5.2 Accuracy Comparison
+To assess the performance of our model, we compare our model on the electricity and traffic
+datasets with two classical forecasting methods, i.e., ARIMA, ETS, which are effective time series
+forecasting models, and several latest deep learning based models, including DeepAR[25], which
+is a state-of-the-art RNN-based probability forecasting model, DSSM[24], which is an RNN-based
+state space model, TRMF[32], which is a recent matrix factorization method, and ConvTrans[14],
+which is a transformer-based model.
+For the short-term forecasting, we evaluate rolling-day forecasts for seven days after training and the
+length of conditioning range is set to one week of time series (168 observations per series). For the
+long-term forecasting, we directly forecast for 7 days and the length of conditioning range is set to
+two weeks of time series (336 observations per series). The experimental results for electricity
+and traffic datasets are summarized in Table 2 and 3 respectively, where T and ST represent
+Vanilla Transformer and sparse Transformer respectively, andAST is the abbreviation of Adversary
+Sparse Transformer. Finally, our model archives the best results over all the datasets.
+From the results, we can draw the following conclusions. ARIMA and ETS perform the worst
+possibly because of inability to use the important covariates feature and model shared patterns across
+time series. TRMF can only estimate the mean and outperform ARIMA and ETS. Besides, the other
+four methods based on RNN or Transformer achieve better results than the ﬁrst two. This indicates
+deep neural networks can learn shared seasonal patterns from several series and the covariate feature
+help to improve the performance. ST outperform Vanilla Transformer in most experiments (other than
+theQ90 of long-term forecasting), indicating that the dependencies among the steps of time series
+are sparse. AST outperforms ST in all experiments indicating that the sequence-level regularization
+is essential for long-horizon time series forecasting. Speciﬁcally, from Figure 1, we can see that
+AST have a better ability to model the sharp peaks of time series than Vanilla Transformer and
+Sparse Transformer. Especially, compared with ConvTrans, AST improves theQ50 for 26.4% on
+average and improves theQ90 for 15.6% on average, indicating that adversarial training and sparse
+Transformer can better model time series. In a word, the results show that the AST can alleviate the
+limitations of the above methods.
+5.3 Ablation Study
+The effect ofα-entmax To validate the effect of differentα of the attention map on the prediction
+performance, we test AST on electricity withα∈{ 1, 1.5, 2} while ﬁxing other settings, and
+show the results in Figure 3. From the results, we can observe that AST with 1.5−entmax can
+allocate proper attention to the essential ones, thus helping the model to learn the patterns more easily.
+7
+
+Table 6:Q50/Q90-loss of datasets with various granularities, where⋄ denotes a result from [14].
+Model wind solar M4-hourly
+DeepAR 0.288⋄/0.113⋄ 0.222⋄/0.093⋄ 0.090⋄/0.030⋄
+DeepState 0.392⋄/0.189⋄ 1.126⋄/0.517⋄ 0.044⋄/0.026⋄
+TRMF 0.311⋄/− 0.241⋄/− -/-
+Ours 0.272/0.124 0.155/0.054 0.042 /0.028
+Table 7: Performance summary (Q50/Q90) of encoder-decoder based Transformer vs auto-regressive
+decoder-only based Transformer.
+T ST AST T ST AST
+enc-dec elect1d
+0.064/0.036 0.055/0.029 0.042/0.025 traffic1d
+0.120/0.087 0.109/0.084 0.093/0.068
+dec-only 0.053/0.055 0.052/0.026 0.048/0.024 0.154/0.136 0.092/0.079 0.096/0.069
+The test performance of different α on the electricity and traffic is shown in Ta-
+ble 4, which shows that when α = 1 .5, Q50 and Q90 achieve the minimal val-
+ues for both datasets. The results indicate that allocating too sparse attention to
+learn the underlying relationship will deteriorate the performance, and allocating too
+dense attention wastes attention on irrelevant steps which cause a poor performance.
+Figure 3: Illustration of perfor-
+mance with different activation func-
+tions in multi-head attention.
+Attention Weight Density Analysis To visualize the impact
+of sparse attention maps, we compare the empirical attention
+weight density (the average number of tokens receiving non-
+zero attention) within each module of Transformer. Figure 4
+(in supplementary) shows that compared with softmax, entmax
+tends to be sparse and allocate higher scores to important
+items which contribute to the interpretability of the model.
+DeepAR Equipped with Adversarial training To further
+explore the effects of adversarial training to time series
+forecasting networks, we attach the adversarial training to
+the DeepAR [ 25] network, which is a state-of-the-art auto-
+regressive LSTM-based time series forecasting network.
+Similar to our Adversarial Sparse Transformer, we add a dis-
+criminator on the top of the DeepAR network, and train the
+DeepAR and the discriminator iteratively. The results in Ta-
+ble 5 show that adversarial training improves the performance of DeepAR, proving that adversarial
+training can alleviate the error accumulation and the shortcomings of using a speciﬁc loss function.
+5.4 Further Exploration
+Table 5: Performance of DeepAR compared with
+DeepAR equipped with adversarial training
+Model Q50 Q90
+DeepAR elect1d 0.075 0.040
+traffic1d 0.161 0.099
+DeepAR+Adv elect1d 0.067 0.035
+traffic1d 0.155 0.089
+We further explore the performance of our
+model on thewind, solar and M4-Hourly with
+various granularities(e.g. different frequencies
+like daily). The prediction lengths are 8, 30, and
+24 respectively. The Q50 andQ90 test losses
+are reported in Table 6 for all the methods. AST
+signiﬁcantly outperforms other methods on 4/6
+tasks except theQ90 of wind and M4-Hourly.
+Furthermore, we compare the performance
+of the auto-regressive decoder-only Trans-
+former [ 23] and the vanilla encoder-decoder
+Transformer in Table 7. The results indicate that the encoder-decoder based Transformer outperforms
+the auto-regressive decoder-only Transformer.
+8
+
+6 Conclusion
+In this work, we present Adversarial Sparse Transformer(AST), a novel Transformer-based model
+for time series forecasting. By adversarial learning, we improve the contiguous and ﬁdelity at the
+sequence level. We further propose Sparse Transformer to improve the ability to pay more attention
+on relevant steps in time series. Extensive experiments on a series of real-world time series datasets
+have demonstrated the effectiveness of AST for both short-term and long-term time series forecasting.
+According to the experimental results, we argue that (1) adversarial training can improve the time
+series forecasting from a global perspective, and (2) the dependencies among steps of time series
+have some tend of sparsity.
+Broader Impact
+Our proposed new Time series forecasting model– AST improves the time series forecasting by
+adversarial training and Sparse Transformer, and it achieves impressive performance. AST can better
+model time series data and alleviate the error accumulation in inference. We believe our work will
+inspire the related research of time series forecasting. Our work will beneﬁt the application of time
+series forecasting such as business and industrial decision-making. And we think there are no one
+will be disadvantaged by our work. Our model does not take advantage of data bias, it is general and
+scalable.
+Acknowledgments
+This work is supported in part by the National Natural Science Foundation of China (61972219), the
+National Natural Science Foundation of Guangdong Province (2018A030313422), the RD Program
+of Shenzhen (JCYJ20190813174403598,SGDX20190918101201696), the National Key Research
+and Development Program of China (2018YFB1800600, 2018YFB1800204).
+Reference
+[1] Filippo Maria Bianchi, Enrico Maiorino, Michael C Kampffmeyer, Antonello Rizzi, and Robert
+Jenssen. An overview and comparative analysis of recurrent neural networks for short term load
+forecasting. arXiv preprint arXiv:1705.04378, 2017.
+[2] Mathieu Blondel, André FT Martins, and Vlad Niculae. Learning classiﬁers with fenchel-young
+losses: Generalized entropies, margins, and algorithms. arXiv preprint arXiv:1805.09717, 2018.
+[3] George EP Box, Gwilym M Jenkins, Gregory C Reinsel, and Greta M Ljung. Time series
+analysis: forecasting and control. John Wiley & Sons, 2015.
+[4] Yagmur Gizem Cinar, Hamid Mirisaee, Parantapa Goswami, Eric Gaussier, Ali Aït-Bachir, and
+Vadim Strijov. Position-based content attention for time series forecasting with sequence-to-
+sequence rnns. In International Conference on Neural Information Processing, pages 533–544.
+Springer, 2017.
+[5] Gonçalo M Correia, Vlad Niculae, and André FT Martins. Adaptively sparse transformers.
+arXiv preprint arXiv:1909.00015, 2019.
+[6] Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil
+Ozair, Aaron Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in neural
+information processing systems, pages 2672–2680, 2014.
+[7] Rob Hyndman, Anne B Koehler, J Keith Ord, and Ralph D Snyder.Forecasting with exponential
+smoothing: the state space approach. Springer Science & Business Media, 2008.
+[8] Rob J Hyndman, Roman A Ahmed, George Athanasopoulos, and Han Lin Shang. Optimal
+combination forecasts for hierarchical time series. Computational Statistics & Data Analysis,
+55(9):2579–2589, 2011.
+[9] Sarthak Jain and Byron C. Wallace. Attention is not explanation, 2019.
+9
+
+[10] Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+arXiv:1412.6980, 2014.
+[11] Guokun Lai, Wei-Cheng Chang, Yiming Yang, and Hanxiao Liu. Modeling long-and short-term
+temporal patterns with deep neural networks. In The 41st International ACM SIGIR Conference
+on Research & Development in Information Retrieval, pages 95–104. ACM, 2018.
+[12] Alex M Lamb, Anirudh Goyal Alias Parth Goyal, Ying Zhang, Saizheng Zhang, Aaron C
+Courville, and Yoshua Bengio. Professor forcing: A new algorithm for training recurrent
+networks. In Advances In Neural Information Processing Systems, pages 4601–4609, 2016.
+[13] Martin Längkvist, Lars Karlsson, and Amy Loutﬁ. A review of unsupervised feature learning
+and deep learning for time-series modeling. Pattern Recognition Letters, 42:11–24, 2014.
+[14] Shiyang Li, Xiaoyong Jin, Yao Xuan, Xiyou Zhou, Wenhu Chen, Yu-Xiang Wang, and Xifeng
+Yan. Enhancing the locality and breaking the memory bottleneck of transformer on time series
+forecasting, 2019.
+[15] Chenghao Liu, Steven CH Hoi, Peilin Zhao, and Jianling Sun. Online arima algorithms for time
+series prediction. In Thirtieth AAAI conference on artiﬁcial intelligence, 2016.
+[16] Alireza Makhzani, Jonathon Shlens, Navdeep Jaitly, Ian Goodfellow, and Brendan Frey. Adver-
+sarial autoencoders, 2015.
+[17] Spyros Makridakis, Evangelos Spiliotis, and Vassilios Assimakopoulos. The m4 competition:
+Results, ﬁndings, conclusion and way forward.International Journal of Forecasting, 34(4):802–
+808, 2018.
+[18] Andre Martins and Ramon Astudillo. From softmax to sparsemax: A sparse model of attention
+and multi-label classiﬁcation. In International Conference on Machine Learning, pages 1614–
+1623, 2016.
+[19] Olof Mogren. C-rnn-gan: Continuous recurrent neural networks with adversarial training. arXiv
+preprint arXiv:1611.09904, 2016.
+[20] Aaron van den Oord, Sander Dieleman, Heiga Zen, Karen Simonyan, Oriol Vinyals, Alex
+Graves, Nal Kalchbrenner, Andrew Senior, and Koray Kavukcuoglu. Wavenet: A generative
+model for raw audio. arXiv preprint arXiv:1609.03499, 2016.
+[21] Ben Peters, Vlad Niculae, and André FT Martins. Sparse sequence-to-sequence models. arXiv
+preprint arXiv:1905.05702, 2019.
+[22] Yao Qin, Dongjin Song, Haifeng Chen, Wei Cheng, Guofei Jiang, and Garrison Cottrell. A
+dual-stage attention-based recurrent neural network for time series prediction, 2017.
+[23] Alec Radford, Karthik Narasimhan, Tim Salimans, and Ilya Sutskever. Improving language
+understanding by generative pre-training. URL https://s3-us-west-2. amazonaws. com/openai-
+assets/researchcovers/languageunsupervised/language understanding paper. pdf, 2018.
+[24] Syama Sundar Rangapuram, Matthias W Seeger, Jan Gasthaus, Lorenzo Stella, Yuyang Wang,
+and Tim Januschowski. Deep state space models for time series forecasting. In Advances in
+Neural Information Processing Systems, pages 7785–7794, 2018.
+[25] David Salinas, Valentin Flunkert, and Jan Gasthaus. Deepar: Probabilistic forecasting with
+autoregressive recurrent networks, 2017.
+[26] Huan Song, Deepta Rajan, Jayaraman J Thiagarajan, and Andreas Spanias. Attend and diagnose:
+Clinical time series analysis using attention models. In Thirty-Second AAAI Conference on
+Artiﬁcial Intelligence, 2018.
+[27] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. InAdvances in neural information
+processing systems, pages 5998–6008, 2017.
+10
+
+[28] Ruofeng Wen, Kari Torkkola, Balakrishnan Narayanaswamy, and Dhruv Madeka. A multi-
+horizon quantile recurrent forecaster, 2017.
+[29] Bing Xu, Naiyan Wang, Tianqi Chen, and Mu Li. Empirical evaluation of rectiﬁed activations
+in convolutional network. arXiv preprint arXiv:1505.00853, 2015.
+[30] Ke Xu, Yifan Zhang, Deheng Ye, Peilin Zhao, and Mingkui Tan. Relation-aware transformer
+for portfolio policy learning. In IJCAI, 2020.
+[31] Jinsung Yoon, Daniel Jarrett, and Mihaela van der Schaar. Time-series generative adversarial
+networks. In Advances in Neural Information Processing Systems, pages 5509–5519, 2019.
+[32] Hsiang-Fu Yu, Nikhil Rao, and Inderjit S Dhillon. Temporal regularized matrix factorization for
+high-dimensional time series prediction. In Advances in neural information processing systems,
+pages 847–855, 2016.
+11
