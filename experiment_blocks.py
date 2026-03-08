@@ -231,12 +231,6 @@ def run_ast_astmain_style(
     amp_enabled = cuda_exist and bool(use_amp)
     device = torch.device("cuda" if cuda_exist else "cpu")
     amp_device_type = "cuda" if cuda_exist else "cpu"
-    print(f"torch={torch.__version__} | torch.cuda={torch.version.cuda} | cuda_available={torch.cuda.is_available()}")
-    if cuda_exist:
-        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
-    elif bool(use_cuda):
-        print("WARNING: use_cuda=True, но CUDA недоступна в текущем kernel. Проверь установленный torch и выбранный интерпретатор Jupyter.")
-    print(f"AST device: {device} | AMP={amp_enabled} | GAN={gan_enabled} | train_windows={len(train_starts)}")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True, pin_memory=cuda_exist)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, pin_memory=cuda_exist)
@@ -265,7 +259,6 @@ def run_ast_astmain_style(
     scaler_d = torch.amp.GradScaler(device="cuda", enabled=amp_enabled)
 
     warmup_epochs = max(2, epochs // 4)
-    print("AST: 0%")
     for epoch in range(1, epochs + 1):
         gen.train()
         disc.train()
@@ -325,7 +318,6 @@ def run_ast_astmain_style(
         g_sch.step()
         if gan_enabled:
             d_sch.step()
-        print(f"AST: {int((epoch / epochs) * 100)}% | lr={g_opt.param_groups[0]['lr']:.6f}")
 
     gen.eval()
     y_true_chunks, y_pred_chunks = [], []
@@ -610,12 +602,24 @@ def run_weekly_random_validation(
     sarima_fit_window: int = 800,
     sarima_maxiter: int = 40,
     sarima_max_concurrency: int | None = None,
+    enabled_models: list[str] | None = None,
+    fixed_train_series: pd.Series | None = None,
 ):
-    models_to_check = ["naive", "arima", "sarima", "ast"]
+    default_models = ["naive", "arima", "sarima", "ast"]
     if run_nbeats is not None:
-        models_to_check.append("nbeats")
+        default_models.append("nbeats")
     if run_lstm is not None:
-        models_to_check.append("lstm")
+        default_models.append("lstm")
+
+    if enabled_models is None:
+        models_to_check = default_models
+    else:
+        allowed = {"naive", "arima", "sarima", "ast", "nbeats", "lstm"}
+        normalized = [str(m).strip().lower() for m in enabled_models]
+        models_to_check = [m for m in default_models if m in normalized and m in allowed]
+
+    if len(models_to_check) == 0:
+        raise RuntimeError("Не выбрано ни одной модели для weekly validation.")
     print(f"Проверяем модели: {models_to_check}")
     print(f"Скачиваем {n_weeks} случайных недельных датасетов для {run_symbol} ...")
 
@@ -626,6 +630,13 @@ def run_weekly_random_validation(
     sarima_slots = int(sarima_max_concurrency) if sarima_max_concurrency is not None else max(1, min(4, cpu_count // 2))
     sarima_slots = max(1, sarima_slots)
     sarima_sem = threading.BoundedSemaphore(value=sarima_slots)
+
+    if fixed_train_series is not None:
+        fixed_train = pd.to_numeric(fixed_train_series, errors="coerce").dropna().astype(float).reset_index(drop=True)
+        if len(fixed_train) < 80:
+            raise RuntimeError("fixed_train_series слишком короткий для weekly test-only режима")
+    else:
+        fixed_train = None
 
     def _evaluate_week(week_idx: int):
         week_raw = pd.DataFrame()
@@ -676,10 +687,16 @@ def run_weekly_random_validation(
                 "message": f"Week {week_idx + 1}: пропуск (после очистки слишком мало точек: {len(series)})",
             }
 
-        split_idx = int(len(series) * 0.8)
-        split_idx = max(20, min(split_idx, len(series) - 10))
-        train_w = series.iloc[:split_idx].reset_index(drop=True)
-        test_w = series.iloc[split_idx:].reset_index(drop=True)
+        if fixed_train is not None:
+            # Test-only режим: weekly ряд используется целиком как тест,
+            # train остается фиксированным (из основного пайплайна).
+            train_w = fixed_train
+            test_w = series.reset_index(drop=True)
+        else:
+            split_idx = int(len(series) * 0.8)
+            split_idx = max(20, min(split_idx, len(series) - 10))
+            train_w = series.iloc[:split_idx].reset_index(drop=True)
+            test_w = series.iloc[split_idx:].reset_index(drop=True)
 
         info = {
             "week": week_idx + 1,

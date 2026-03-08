@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import warnings
+import pickle
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import product
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -13,16 +15,117 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 try:
     from sklearn.base import BaseEstimator
-    from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+    from sklearn.model_selection import GridSearchCV, ParameterGrid, TimeSeriesSplit
 
     _SKLEARN_AVAILABLE = True
 except Exception:
     BaseEstimator = object
     GridSearchCV = None
+    ParameterGrid = None
     TimeSeriesSplit = None
     _SKLEARN_AVAILABLE = False
 
+try:
+    # Use the base tqdm import to avoid noisy notebook-widget warnings
+    # when ipywidgets is unavailable in some Jupyter/VS Code kernels.
+    from tqdm import tqdm
+except Exception:
+    tqdm = None
+
 from nbeats import GenericBasis, NBeats, NBeatsBlock
+
+
+_PROGRESS_HOOK = None
+
+
+def _progress_step(step: int = 1):
+    """Advance active serial GridSearch progress bar if configured."""
+    hook = _PROGRESS_HOOK
+    if hook is None:
+        return
+    try:
+        hook(max(0, int(step)))
+    except Exception:
+        pass
+
+
+@contextmanager
+def _tqdm_joblib(total: int, desc: str):
+    """Attach tqdm progress bar to joblib backend used by GridSearchCV."""
+    if tqdm is None:
+        yield
+        return
+
+    try:
+        from joblib import parallel
+    except Exception:
+        yield
+        return
+
+    pbar = tqdm(total=max(0, int(total)), desc=desc, unit="fit")
+    old_batch_callback = parallel.BatchCompletionCallBack
+
+    class _TqdmBatchCallback(parallel.BatchCompletionCallBack):
+        def __call__(self, *args, **kwargs):
+            pbar.update(self.batch_size)
+            return super().__call__(*args, **kwargs)
+
+    parallel.BatchCompletionCallBack = _TqdmBatchCallback
+    try:
+        yield
+    finally:
+        parallel.BatchCompletionCallBack = old_batch_callback
+        # In some serial/fallback execution paths callbacks may not fire;
+        # force final state to avoid misleading 0/total display.
+        if pbar.n < pbar.total:
+            pbar.update(pbar.total - pbar.n)
+        pbar.close()
+
+
+def _fit_grid_with_progress(grid, x_train, y_train, param_grid: dict, ts_splits: int, label: str):
+    """Fit GridSearchCV with optional x/total progress output."""
+    if ParameterGrid is None:
+        grid.fit(x_train, y_train)
+        return
+
+    total_fits = int(len(ParameterGrid(param_grid)) * int(ts_splits))
+
+    # tqdm+joblib callback is reliable with parallel backend. In serial mode
+    # (n_jobs=1), use a lightweight explicit hook updated from estimator.score().
+    try:
+        jobs = int(getattr(grid, "n_jobs", 1) or 1)
+    except Exception:
+        jobs = 1
+
+    if jobs == 1:
+        global _PROGRESS_HOOK
+        pbar = tqdm(total=max(0, int(total_fits)), desc=f"{label} GridSearchCV", unit="fit") if tqdm is not None else None
+        old_hook = _PROGRESS_HOOK
+
+        def _hook(step: int = 1):
+            if pbar is not None:
+                pbar.update(step)
+
+        _PROGRESS_HOOK = _hook
+        try:
+            if int(getattr(grid, "verbose", 0) or 0) != 0:
+                grid.verbose = 0
+            grid.fit(x_train, y_train)
+        finally:
+            _PROGRESS_HOOK = old_hook
+            if pbar is not None:
+                if pbar.n < pbar.total:
+                    pbar.update(pbar.total - pbar.n)
+                pbar.close()
+        return
+
+    with _tqdm_joblib(total=total_fits, desc=f"{label} GridSearchCV"):
+        grid.fit(x_train, y_train)
+
+
+def _grid_verbose_level() -> int:
+    # If tqdm is unavailable, use sklearn verbose>1 to show fit-by-fit progress lines.
+    return 1 if tqdm is not None else 2
 
 
 def metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
@@ -43,14 +146,154 @@ def run_naive(train: pd.Series, test: pd.Series) -> Tuple[Dict[str, float], pd.D
     return metrics(y_true, preds), pd.DataFrame({"y_true": y_true, "y_pred": preds})
 
 
-def _print_progress(prefix: str, current: int, total: int, last_shown: int) -> int:
-    if total <= 0:
-        return last_shown
-    percent = int((current / total) * 100)
-    if percent >= last_shown + 5 or percent == 100:
-        print(f"{prefix}: {percent}%")
-        return percent
-    return last_shown
+def fit_naive_inference_model(train: pd.Series) -> Dict[str, Any]:
+    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    if len(train_arr) < 1:
+        raise RuntimeError("Пустой train для naive")
+    return {"model_type": "naive", "last_value": float(train_arr[-1])}
+
+
+def predict_naive_inference(model_obj: Dict[str, Any], test: pd.Series) -> Tuple[Dict[str, float], pd.DataFrame]:
+    test_arr = pd.to_numeric(test, errors="coerce").dropna().astype(float).values
+    last_value = float(model_obj["last_value"])
+    preds = np.empty(len(test_arr), dtype=float)
+    for i, true_val in enumerate(test_arr):
+        preds[i] = last_value
+        last_value = float(true_val)
+    return metrics(test_arr, preds), pd.DataFrame({"y_true": test_arr, "y_pred": preds})
+
+
+def fit_arima_inference_model(train: pd.Series, order=(1, 1, 1)) -> Dict[str, Any]:
+    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    if len(train_arr) < 40:
+        raise RuntimeError("Слишком мало train для ARIMA")
+
+    history_log = np.log(np.clip(train_arr, 1e-8, None)).tolist()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        fitted = ARIMA(history_log, order=order, enforce_stationarity=False, enforce_invertibility=False).fit()
+
+    return {
+        "model_type": "arima",
+        "order": tuple(order),
+        "train_last": float(train_arr[-1]),
+        "fitted_blob": pickle.dumps(fitted),
+    }
+
+
+def predict_arima_inference(model_obj: Dict[str, Any], test: pd.Series) -> Tuple[Dict[str, float], pd.DataFrame]:
+    test_arr = pd.to_numeric(test, errors="coerce").dropna().astype(float).values
+    fitted = pickle.loads(model_obj["fitted_blob"])
+
+    fallback_log = float(np.log(max(float(model_obj["train_last"]), 1e-8)))
+    n_steps = int(len(test_arr))
+    if n_steps == 0:
+        return metrics(test_arr, np.array([], dtype=float)), pd.DataFrame({"y_true": test_arr, "y_pred": np.array([], dtype=float)})
+
+    # ARIMA quality is sensitive to long recursive horizons; default to
+    # one-step walk-forward updates unless explicitly overridden.
+    update_stride = int(max(1, model_obj.get("update_stride", 1)))
+
+    preds_log_parts = []
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        i = 0
+        while i < n_steps:
+            block = int(min(update_stride, n_steps - i))
+
+            try:
+                block_pred = np.asarray(fitted.forecast(steps=block), dtype=float)
+            except Exception:
+                block_pred = np.full(shape=(block,), fill_value=fallback_log, dtype=float)
+            preds_log_parts.append(block_pred)
+
+            true_block = np.log(np.clip(test_arr[i : i + block], 1e-8, None)).tolist()
+            try:
+                fitted = fitted.append(true_block, refit=False)
+            except Exception:
+                pass
+
+            i += block
+
+    preds_log = np.concatenate(preds_log_parts) if preds_log_parts else np.array([], dtype=float)
+    preds_log = np.nan_to_num(preds_log, nan=fallback_log, posinf=fallback_log, neginf=fallback_log)
+    preds = np.exp(preds_log)
+    preds = np.nan_to_num(preds, nan=float(model_obj["train_last"]), posinf=float(model_obj["train_last"]), neginf=float(model_obj["train_last"]))
+    return metrics(test_arr, preds), pd.DataFrame({"y_true": test_arr, "y_pred": preds})
+
+
+def fit_sarima_inference_model(
+    train: pd.Series,
+    order=(1, 1, 0),
+    seasonal_order=(1, 1, 1, 24),
+    maxiter: int = 60,
+) -> Dict[str, Any]:
+    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    if len(train_arr) < 80:
+        raise RuntimeError("Слишком мало train для SARIMA")
+
+    history_log = np.log(np.clip(train_arr, 1e-8, None)).tolist()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        fitted = SARIMAX(
+            history_log,
+            order=order,
+            seasonal_order=seasonal_order,
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+            simple_differencing=False,
+        ).fit(disp=False, maxiter=int(max(10, maxiter)))
+
+    return {
+        "model_type": "sarima",
+        "order": tuple(order),
+        "seasonal_order": tuple(seasonal_order),
+        "train_last": float(train_arr[-1]),
+        "fitted_blob": pickle.dumps(fitted),
+    }
+
+
+def predict_sarima_inference(model_obj: Dict[str, Any], test: pd.Series) -> Tuple[Dict[str, float], pd.DataFrame]:
+    test_arr = pd.to_numeric(test, errors="coerce").dropna().astype(float).values
+    fitted = pickle.loads(model_obj["fitted_blob"])
+
+    fallback_log = float(np.log(max(float(model_obj["train_last"]), 1e-8)))
+    n_steps = int(len(test_arr))
+    if n_steps == 0:
+        return metrics(test_arr, np.array([], dtype=float)), pd.DataFrame({"y_true": test_arr, "y_pred": np.array([], dtype=float)})
+
+    update_stride = int(max(1, model_obj.get("update_stride", 24)))
+
+    preds_log_parts = []
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        i = 0
+        while i < n_steps:
+            block = int(min(update_stride, n_steps - i))
+
+            try:
+                block_pred = np.asarray(fitted.forecast(steps=block), dtype=float)
+            except Exception:
+                block_pred = np.full(shape=(block,), fill_value=fallback_log, dtype=float)
+            preds_log_parts.append(block_pred)
+
+            true_block = np.log(np.clip(test_arr[i : i + block], 1e-8, None)).tolist()
+            try:
+                fitted = fitted.append(true_block, refit=False)
+            except Exception:
+                pass
+
+            i += block
+
+    preds_log = np.concatenate(preds_log_parts) if preds_log_parts else np.array([], dtype=float)
+    preds_log = np.nan_to_num(preds_log, nan=fallback_log, posinf=fallback_log, neginf=fallback_log)
+    preds = np.exp(preds_log)
+    preds = np.nan_to_num(preds, nan=float(model_obj["train_last"]), posinf=float(model_obj["train_last"]), neginf=float(model_obj["train_last"]))
+    return metrics(test_arr, preds), pd.DataFrame({"y_true": test_arr, "y_pred": preds})
 
 
 def run_arima(train: pd.Series, test: pd.Series, order=(1, 1, 1), refit_every: int = 24, show_progress: bool = True):
@@ -63,17 +306,12 @@ def run_arima(train: pd.Series, test: pd.Series, order=(1, 1, 1), refit_every: i
     history = np.log(np.clip(train_arr, 1e-8, None)).tolist()
     preds_log = []
 
-    if show_progress:
-        print("ARIMA: 0%")
-
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning)
         warnings.filterwarnings("ignore", category=RuntimeWarning)
 
         model = ARIMA(history, order=order, enforce_stationarity=False, enforce_invertibility=False).fit()
 
-        last_shown = 0
-        total = len(test_arr)
         for i, true_price in enumerate(test_arr, start=1):
             pred_log = float(model.forecast(steps=1)[0])
             preds_log.append(pred_log)
@@ -84,9 +322,6 @@ def run_arima(train: pd.Series, test: pd.Series, order=(1, 1, 1), refit_every: i
                 model = ARIMA(history, order=order, enforce_stationarity=False, enforce_invertibility=False).fit()
             else:
                 model = model.append([history[-1]], refit=False)
-
-            if show_progress:
-                last_shown = _print_progress("ARIMA", i, total, last_shown)
 
     preds = np.exp(np.asarray(preds_log, dtype=float))
     y_true = test_arr.astype(float)
@@ -115,9 +350,6 @@ def run_sarima(
 
     history_log = np.log(np.clip(train_arr, 1e-8, None)).tolist()
 
-    if show_progress:
-        print("SARIMA: 0%")
-
     def _fit_model(history_values):
         return SARIMAX(
             history_values,
@@ -134,8 +366,6 @@ def run_sarima(
         preds_log = []
         model = _fit_model(history_log[-int(max(200, fit_window)) :])
 
-        last_shown = 0
-        total = len(test_arr)
         for i, true_price in enumerate(test_arr, start=1):
             try:
                 pred_log = float(model.forecast(steps=1)[0])
@@ -157,13 +387,7 @@ def run_sarima(
                 except Exception:
                     model = _fit_model(history_log[-int(max(200, fit_window)) :])
 
-            if show_progress:
-                last_shown = _print_progress("SARIMA", i, total, last_shown)
-
         preds_log = np.asarray(preds_log, dtype=float)
-
-        if show_progress:
-            print("SARIMA: 100%")
 
     fallback_level = float(train_arr[-1])
     preds = np.exp(preds_log)
@@ -211,10 +435,6 @@ def run_nbeats(
     cuda_exist = torch.cuda.is_available() and bool(use_cuda)
     device = torch.device("cuda" if cuda_exist else "cpu")
 
-    if show_progress:
-        print(f"NBEATS device: {device}")
-        print("NBEATS train: 0%")
-
     blocks = []
     for _ in range(max(1, n_blocks)):
         basis = GenericBasis(backcast_size=context, forecast_size=1)
@@ -249,15 +469,9 @@ def run_nbeats(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
-        if show_progress:
-            print(f"NBEATS train: {int((ep / max(1, epochs)) * 100)}%")
-
     model.eval()
     history_norm = list(train_norm.astype(float))
     preds = []
-    last_shown = 0
-    total = len(test_arr)
-
     with torch.no_grad():
         for i, true_price in enumerate(test_arr, start=1):
             if len(history_norm) >= context:
@@ -279,12 +493,149 @@ def run_nbeats(
             true_log = float(np.log(max(true_price, 1e-8)))
             history_norm.append((true_log - mean) / std)
 
-            if show_progress:
-                last_shown = _print_progress("NBEATS infer", i, total, last_shown)
-
     preds = np.asarray(preds, dtype=float)
     y_true = test_arr.astype(float)
     return metrics(y_true, preds), pd.DataFrame({"y_true": y_true, "y_pred": preds})
+
+
+def fit_nbeats_inference_model(
+    train: pd.Series,
+    context_len: int = 168,
+    n_blocks: int = 4,
+    layers: int = 4,
+    layer_size: int = 256,
+    epochs: int = 25,
+    batch_size: int = 128,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    use_cuda: bool = True,
+) -> Dict[str, Any]:
+    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    if len(train_arr) < 120:
+        raise RuntimeError("Слишком мало train для N-BEATS")
+
+    train_log = np.log(np.clip(train_arr, 1e-8, None))
+    mean = float(train_log.mean())
+    std = float(train_log.std() + 1e-8)
+    train_norm = (train_log - mean) / std
+
+    context = int(min(max(24, context_len), max(24, len(train_norm) - 5)))
+    n_samples = len(train_norm) - context
+    if n_samples < 32:
+        raise RuntimeError("Слишком мало окон для обучения N-BEATS")
+
+    x_np = np.stack([train_norm[i : i + context] for i in range(n_samples)]).astype(np.float32)
+    y_np = np.asarray([train_norm[i + context] for i in range(n_samples)], dtype=np.float32)[:, None]
+
+    x_t = torch.from_numpy(x_np)
+    y_t = torch.from_numpy(y_np)
+
+    cuda_exist = torch.cuda.is_available() and bool(use_cuda)
+    device = torch.device("cuda" if cuda_exist else "cpu")
+
+    blocks = []
+    for _ in range(max(1, n_blocks)):
+        basis = GenericBasis(backcast_size=context, forecast_size=1)
+        blocks.append(
+            NBeatsBlock(
+                input_size=context,
+                theta_size=context + 1,
+                basis_function=basis,
+                layers=max(2, layers),
+                layer_size=max(64, layer_size),
+            )
+        )
+
+    model = NBeats(torch.nn.ModuleList(blocks)).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_fn = torch.nn.MSELoss()
+    ds = torch.utils.data.TensorDataset(x_t, y_t)
+    dl = torch.utils.data.DataLoader(ds, batch_size=max(16, batch_size), shuffle=True, pin_memory=cuda_exist)
+
+    model.train()
+    for _ in range(1, max(1, epochs) + 1):
+        for xb, yb in dl:
+            xb = xb.to(device, non_blocking=cuda_exist)
+            yb = yb.to(device, non_blocking=cuda_exist)
+            mask = torch.ones_like(xb)
+
+            opt.zero_grad(set_to_none=True)
+            pred = model(xb, mask)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+    return {
+        "model_type": "nbeats",
+        "context": int(context),
+        "mean": float(mean),
+        "std": float(std),
+        "train_last": float(train_arr[-1]),
+        "state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+        "arch": {
+            "n_blocks": int(max(1, n_blocks)),
+            "layers": int(max(2, layers)),
+            "layer_size": int(max(64, layer_size)),
+        },
+        "use_cuda": bool(cuda_exist),
+    }
+
+
+def predict_nbeats_inference(model_obj: Dict[str, Any], train: pd.Series, test: pd.Series) -> Tuple[Dict[str, float], pd.DataFrame]:
+    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    test_arr = pd.to_numeric(test, errors="coerce").dropna().astype(float).values
+
+    context = int(model_obj["context"])
+    mean = float(model_obj["mean"])
+    std = float(model_obj["std"])
+    cuda_exist = bool(model_obj.get("use_cuda", False)) and torch.cuda.is_available()
+    device = torch.device("cuda" if cuda_exist else "cpu")
+
+    arch = model_obj["arch"]
+    blocks = []
+    for _ in range(int(arch["n_blocks"])):
+        basis = GenericBasis(backcast_size=context, forecast_size=1)
+        blocks.append(
+            NBeatsBlock(
+                input_size=context,
+                theta_size=context + 1,
+                basis_function=basis,
+                layers=int(arch["layers"]),
+                layer_size=int(arch["layer_size"]),
+            )
+        )
+    model = NBeats(torch.nn.ModuleList(blocks)).to(device)
+    model.load_state_dict(model_obj["state_dict"])
+    model.eval()
+
+    train_log = np.log(np.clip(train_arr, 1e-8, None))
+    history_norm = list(((train_log - mean) / std).astype(float))
+
+    preds = []
+    with torch.no_grad():
+        for true_price in test_arr:
+            if len(history_norm) >= context:
+                x_ctx = np.asarray(history_norm[-context:], dtype=np.float32)
+            else:
+                pad = np.full((context - len(history_norm),), history_norm[0], dtype=np.float32)
+                x_ctx = np.concatenate([pad, np.asarray(history_norm, dtype=np.float32)])
+
+            xb = torch.from_numpy(x_ctx[None, :]).to(device)
+            mask = torch.ones_like(xb)
+            pred_norm = float(model(xb, mask).squeeze().item())
+
+            pred_log = pred_norm * std + mean
+            pred_val = float(np.exp(pred_log))
+            if not np.isfinite(pred_val):
+                pred_val = float(model_obj["train_last"])
+            preds.append(pred_val)
+
+            true_log = float(np.log(max(float(true_price), 1e-8)))
+            history_norm.append((true_log - mean) / std)
+
+    preds = np.asarray(preds, dtype=float)
+    return metrics(test_arr, preds), pd.DataFrame({"y_true": test_arr, "y_pred": preds})
 
 
 class _LSTMForecaster(torch.nn.Module):
@@ -334,6 +685,7 @@ class _LSTMGridSearchEstimator(BaseEstimator):
         return self
 
     def score(self, X, y):
+        _progress_step()
         if not hasattr(self, "_train_series_"):
             raise RuntimeError("Estimator is not fitted")
 
@@ -374,6 +726,7 @@ class _ARIMAGridSearchEstimator(BaseEstimator):
         return self
 
     def score(self, X, y):
+        _progress_step()
         if not hasattr(self, "_train_series_"):
             raise RuntimeError("Estimator is not fitted")
 
@@ -420,6 +773,7 @@ class _SARIMAGridSearchEstimator(BaseEstimator):
         return self
 
     def score(self, X, y):
+        _progress_step()
         if not hasattr(self, "_train_series_"):
             raise RuntimeError("Estimator is not fitted")
 
@@ -448,6 +802,7 @@ class _NaiveGridSearchEstimator(BaseEstimator):
         return self
 
     def score(self, X, y):
+        _progress_step()
         if not hasattr(self, "_train_series_"):
             raise RuntimeError("Estimator is not fitted")
         if self.strategy != "last":
@@ -488,6 +843,7 @@ class _NBEATSGridSearchEstimator(BaseEstimator):
         return self
 
     def score(self, X, y):
+        _progress_step()
         if not hasattr(self, "_train_series_"):
             raise RuntimeError("Estimator is not fitted")
 
@@ -551,7 +907,6 @@ def run_lstm(
 
     if show_progress:
         print(f"LSTM device: {device}")
-        print("LSTM train: 0%")
 
     model = _LSTMForecaster(
         input_size=1,
@@ -630,11 +985,8 @@ def run_lstm(
             else:
                 no_improve += 1
 
-        if show_progress:
-            msg = f"LSTM train: {int((ep / total_epochs) * 100)}%"
-            if val_dl is not None:
-                msg += f" | val_loss={best_val:.5f}"
-            print(msg)
+        if show_progress and val_dl is not None:
+            print(f"LSTM val_loss={best_val:.5f}")
 
         if val_dl is not None and no_improve >= patience:
             if show_progress:
@@ -648,9 +1000,6 @@ def run_lstm(
     history_log = list(train_log.astype(float))
     history_ret_norm = list(train_ret_norm.astype(float))
     preds = []
-    last_shown = 0
-    total = len(test_arr)
-
     with torch.no_grad():
         for i, true_price in enumerate(test_arr, start=1):
             if len(history_ret_norm) >= context:
@@ -676,12 +1025,137 @@ def run_lstm(
             history_log.append(true_log)
             history_ret_norm.append((true_ret - ret_mean) / ret_std)
 
-            if show_progress:
-                last_shown = _print_progress("LSTM infer", i, total, last_shown)
-
     preds = np.asarray(preds, dtype=float)
     y_true = test_arr.astype(float)
     return metrics(y_true, preds), pd.DataFrame({"y_true": y_true, "y_pred": preds})
+
+
+def fit_lstm_inference_model(
+    train: pd.Series,
+    context_len: int = 96,
+    hidden_size: int = 64,
+    num_layers: int = 2,
+    dropout: float = 0.1,
+    epochs: int = 20,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    use_cuda: bool = True,
+) -> Dict[str, Any]:
+    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    if len(train_arr) < 80:
+        raise RuntimeError("Слишком мало train для LSTM")
+
+    train_log = np.log(np.clip(train_arr, 1e-8, None))
+    train_ret = np.diff(train_log)
+    ret_mean = float(train_ret.mean())
+    ret_std = float(train_ret.std() + 1e-8)
+    train_ret_norm = (train_ret - ret_mean) / ret_std
+
+    context = int(min(max(24, context_len), max(24, len(train_ret_norm) - 5)))
+    n_samples = len(train_ret_norm) - context
+    if n_samples < 24:
+        raise RuntimeError("Слишком мало окон для обучения LSTM")
+
+    x_np = np.stack([train_ret_norm[i : i + context] for i in range(n_samples)]).astype(np.float32)
+    y_np = np.asarray([train_ret_norm[i + context] for i in range(n_samples)], dtype=np.float32)[:, None]
+    x_t = torch.from_numpy(x_np)[:, :, None]
+    y_t = torch.from_numpy(y_np)
+
+    cuda_exist = torch.cuda.is_available() and bool(use_cuda)
+    device = torch.device("cuda" if cuda_exist else "cpu")
+
+    model = _LSTMForecaster(
+        input_size=1,
+        hidden_size=max(16, int(hidden_size)),
+        num_layers=max(1, int(num_layers)),
+        dropout=float(max(0.0, min(0.5, dropout))),
+    ).to(device)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_fn = torch.nn.SmoothL1Loss()
+    ds = torch.utils.data.TensorDataset(x_t, y_t)
+    dl = torch.utils.data.DataLoader(ds, batch_size=max(16, batch_size), shuffle=True, pin_memory=cuda_exist)
+
+    model.train()
+    for _ in range(1, max(1, int(epochs)) + 1):
+        for xb, yb in dl:
+            xb = xb.to(device, non_blocking=cuda_exist)
+            yb = yb.to(device, non_blocking=cuda_exist)
+            opt.zero_grad(set_to_none=True)
+            pred = model(xb)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+    return {
+        "model_type": "lstm",
+        "context": int(context),
+        "ret_mean": float(ret_mean),
+        "ret_std": float(ret_std),
+        "train_last": float(train_arr[-1]),
+        "state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+        "arch": {
+            "hidden_size": int(max(16, int(hidden_size))),
+            "num_layers": int(max(1, int(num_layers))),
+            "dropout": float(max(0.0, min(0.5, dropout))),
+        },
+        "use_cuda": bool(cuda_exist),
+    }
+
+
+def predict_lstm_inference(model_obj: Dict[str, Any], train: pd.Series, test: pd.Series) -> Tuple[Dict[str, float], pd.DataFrame]:
+    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    test_arr = pd.to_numeric(test, errors="coerce").dropna().astype(float).values
+
+    context = int(model_obj["context"])
+    ret_mean = float(model_obj["ret_mean"])
+    ret_std = float(model_obj["ret_std"])
+    cuda_exist = bool(model_obj.get("use_cuda", False)) and torch.cuda.is_available()
+    device = torch.device("cuda" if cuda_exist else "cpu")
+
+    arch = model_obj["arch"]
+    model = _LSTMForecaster(
+        input_size=1,
+        hidden_size=int(arch["hidden_size"]),
+        num_layers=int(arch["num_layers"]),
+        dropout=float(arch["dropout"]),
+    ).to(device)
+    model.load_state_dict(model_obj["state_dict"])
+    model.eval()
+
+    history_log = list(np.log(np.clip(train_arr, 1e-8, None)).astype(float))
+    history_ret_norm = list(((np.diff(np.log(np.clip(train_arr, 1e-8, None))) - ret_mean) / ret_std).astype(float))
+
+    preds = []
+    with torch.no_grad():
+        for true_price in test_arr:
+            if len(history_ret_norm) >= context:
+                x_ctx = np.asarray(history_ret_norm[-context:], dtype=np.float32)
+            else:
+                first_val = history_ret_norm[0] if len(history_ret_norm) > 0 else 0.0
+                pad = np.full((context - len(history_ret_norm),), first_val, dtype=np.float32)
+                x_ctx = np.concatenate([pad, np.asarray(history_ret_norm, dtype=np.float32)])
+
+            xb = torch.from_numpy(x_ctx[None, :, None]).to(device)
+            pred_ret_norm = float(model(xb).squeeze().item())
+
+            pred_ret = pred_ret_norm * ret_std + ret_mean
+            pred_ret = float(np.clip(pred_ret, -0.20, 0.20))
+            pred_log = float(history_log[-1] + pred_ret)
+            pred_val = float(np.exp(pred_log))
+            if not np.isfinite(pred_val):
+                pred_val = float(model_obj["train_last"])
+            preds.append(pred_val)
+
+            true_log = float(np.log(max(float(true_price), 1e-8)))
+            true_ret = float(true_log - history_log[-1])
+            history_log.append(true_log)
+            history_ret_norm.append((true_ret - ret_mean) / ret_std)
+
+    preds = np.asarray(preds, dtype=float)
+    return metrics(test_arr, preds), pd.DataFrame({"y_true": test_arr, "y_pred": preds})
 
 
 def run_lstm_grid_search(
@@ -1099,12 +1573,12 @@ def run_lstm_gridsearchcv_native_pipeline(
         cv=cv,
         n_jobs=jobs,
         refit=True,
-        verbose=1,
+        verbose=_grid_verbose_level(),
         return_train_score=False,
     )
 
     print(f"LSTM GridSearchCV: train_points={len(train)} | test_points={len(test)} | n_splits={ts_splits}")
-    grid.fit(x_train, y_train)
+    _fit_grid_with_progress(grid, x_train, y_train, param_grid, ts_splits, "LSTM")
 
     cv_results_df = pd.DataFrame(grid.cv_results_)
     cv_results_df["score"] = -cv_results_df["mean_test_score"]
@@ -1186,12 +1660,12 @@ def run_arima_gridsearchcv_native_pipeline(
         cv=cv,
         n_jobs=max(1, int(n_jobs)),
         refit=True,
-        verbose=1,
+        verbose=_grid_verbose_level(),
         return_train_score=False,
     )
 
     print(f"ARIMA GridSearchCV: train_points={len(train)} | test_points={len(test)} | n_splits={ts_splits}")
-    grid.fit(x_train, y_train)
+    _fit_grid_with_progress(grid, x_train, y_train, param_grid, ts_splits, "ARIMA")
 
     cv_results_df = pd.DataFrame(grid.cv_results_)
     cv_results_df["score"] = -cv_results_df["mean_test_score"]
@@ -1246,12 +1720,12 @@ def run_sarima_gridsearchcv_native_pipeline(
         cv=cv,
         n_jobs=max(1, int(n_jobs)),
         refit=True,
-        verbose=1,
+        verbose=_grid_verbose_level(),
         return_train_score=False,
     )
 
     print(f"SARIMA GridSearchCV: train_points={len(train)} | test_points={len(test)} | n_splits={ts_splits}")
-    grid.fit(x_train, y_train)
+    _fit_grid_with_progress(grid, x_train, y_train, param_grid, ts_splits, "SARIMA")
 
     cv_results_df = pd.DataFrame(grid.cv_results_)
     cv_results_df["score"] = -cv_results_df["mean_test_score"]
@@ -1323,12 +1797,12 @@ def run_naive_gridsearchcv_native_pipeline(
         cv=cv,
         n_jobs=max(1, int(n_jobs)),
         refit=True,
-        verbose=1,
+        verbose=_grid_verbose_level(),
         return_train_score=False,
     )
 
     print(f"NAIVE GridSearchCV: train_points={len(train)} | test_points={len(test)} | n_splits={ts_splits}")
-    grid.fit(x_train, y_train)
+    _fit_grid_with_progress(grid, x_train, y_train, param_grid, ts_splits, "NAIVE")
 
     cv_results_df = pd.DataFrame(grid.cv_results_)
     cv_results_df["score"] = -cv_results_df["mean_test_score"]
@@ -1385,12 +1859,12 @@ def run_nbeats_gridsearchcv_native_pipeline(
         cv=cv,
         n_jobs=jobs,
         refit=True,
-        verbose=1,
+        verbose=_grid_verbose_level(),
         return_train_score=False,
     )
 
     print(f"NBEATS GridSearchCV: train_points={len(train)} | test_points={len(test)} | n_splits={ts_splits}")
-    grid.fit(x_train, y_train)
+    _fit_grid_with_progress(grid, x_train, y_train, param_grid, ts_splits, "NBEATS")
 
     cv_results_df = pd.DataFrame(grid.cv_results_)
     cv_results_df["score"] = -cv_results_df["mean_test_score"]
