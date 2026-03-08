@@ -95,11 +95,11 @@ class TrendBasis(t.nn.Module):
         super().__init__()
         self.polynomial_size = degree_of_polynomial + 1  # degree of polynomial with constant term
         self.backcast_time = t.nn.Parameter(
-            t.tensor(np.concatenate([np.power(np.arange(backcast_size, dtype=np.float) / backcast_size, i)[None, :]
+            t.tensor(np.concatenate([np.power(np.arange(backcast_size, dtype=float) / backcast_size, i)[None, :]
                                      for i in range(self.polynomial_size)]), dtype=t.float32),
             requires_grad=False)
         self.forecast_time = t.nn.Parameter(
-            t.tensor(np.concatenate([np.power(np.arange(forecast_size, dtype=np.float) / forecast_size, i)[None, :]
+            t.tensor(np.concatenate([np.power(np.arange(forecast_size, dtype=float) / forecast_size, i)[None, :]
                                      for i in range(self.polynomial_size)]), dtype=t.float32), requires_grad=False)
 
     def forward(self, theta: t.Tensor):

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 
-def plot_result(symbol: str, model_name: str, full_series: pd.Series, result_df: pd.DataFrame):
+def _build_result_figure(symbol: str, model_name: str, full_series: pd.Series, result_df: pd.DataFrame):
     fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=False)
 
     axes[0].plot(full_series.values, label=f"{symbol} close", color="steelblue")
@@ -23,23 +23,17 @@ def plot_result(symbol: str, model_name: str, full_series: pd.Series, result_df:
     axes[1].legend()
 
     plt.tight_layout()
+    return fig
+
+
+def plot_result(symbol: str, model_name: str, full_series: pd.Series, result_df: pd.DataFrame):
+    fig = _build_result_figure(symbol, model_name, full_series, result_df)
     plt.show()
+    plt.close(fig)
 
 
 def save_result_plot(symbol: str, model_name: str, full_series: pd.Series, result_df: pd.DataFrame, output_path: Path):
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=False)
-
-    axes[0].plot(full_series.values, label=f"{symbol} close", color="steelblue")
-    axes[0].set_title(f"{symbol}: очищенный ряд")
-    axes[0].legend()
-
-    n = len(result_df)
-    axes[1].plot(np.arange(n), result_df["y_true"].values, label="y_true", color="black")
-    axes[1].plot(np.arange(n), result_df["y_pred"].values, label="y_pred", color="tomato", alpha=0.9)
-    axes[1].set_title(f"Факт vs прогноз ({model_name})")
-    axes[1].legend()
-
-    plt.tight_layout()
+    fig = _build_result_figure(symbol, model_name, full_series, result_df)
     plt.savefig(output_path, dpi=140)
     plt.close(fig)
 
