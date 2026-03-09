@@ -197,8 +197,24 @@ def metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {"MAE": mae, "RMSE": rmse, "MAPE": mape}
 
 
-def _prepare_catboost_training(train: pd.Series, context_len: int) -> Dict[str, Any]:
-    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+def _to_float_array(values: pd.Series | np.ndarray | list[float]) -> np.ndarray:
+    if isinstance(values, pd.Series):
+        return pd.to_numeric(values, errors="coerce").dropna().astype(float).to_numpy(copy=False)
+
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim != 1:
+        arr = arr.reshape(-1)
+    return arr[np.isfinite(arr)]
+
+
+def _build_sliding_windows(values: np.ndarray, context: int) -> np.ndarray:
+    window_size = int(context) + 1
+    windows = np.lib.stride_tricks.sliding_window_view(values, window_shape=window_size)
+    return np.asarray(windows, dtype=np.float32)
+
+
+def _prepare_catboost_training(train: pd.Series | np.ndarray | list[float], context_len: int) -> Dict[str, Any]:
+    train_arr = _to_float_array(train)
     if len(train_arr) < 40:
         raise RuntimeError("Слишком мало train для CatBoost")
 
@@ -214,8 +230,9 @@ def _prepare_catboost_training(train: pd.Series, context_len: int) -> Dict[str, 
     if n_samples < 8:
         raise RuntimeError("Слишком мало окон для обучения CatBoost")
 
-    x_np = np.stack([train_ret_norm[i : i + context] for i in range(n_samples)]).astype(np.float32)
-    y_np = np.asarray([train_ret_norm[i + context] for i in range(n_samples)], dtype=np.float32)
+    windows = _build_sliding_windows(train_ret_norm, context)
+    x_np = windows[:, :-1]
+    y_np = windows[:, -1]
 
     return {
         "train_arr": train_arr,
@@ -271,13 +288,13 @@ def run_catboost(
     use_cuda: bool = True,
     show_progress: bool = True,
 ) -> Tuple[Dict[str, float], pd.DataFrame]:
-    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
-    test_arr = pd.to_numeric(test, errors="coerce").dropna().astype(float).values
+    train_arr = _to_float_array(train)
+    test_arr = _to_float_array(test)
 
     if len(train_arr) < 40 or len(test_arr) < 5:
         raise RuntimeError("Слишком мало данных для CatBoost")
 
-    prep = _prepare_catboost_training(train=train, context_len=context_len)
+    prep = _prepare_catboost_training(train=train_arr, context_len=context_len)
     ret_mean = float(prep["ret_mean"])
     ret_std = float(prep["ret_std"])
     context = int(prep["context"])
@@ -356,8 +373,8 @@ def fit_catboost_inference_model(
 
 
 def predict_catboost_inference(model_obj: Dict[str, Any], train: pd.Series, test: pd.Series) -> Tuple[Dict[str, float], pd.DataFrame]:
-    train_arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
-    test_arr = pd.to_numeric(test, errors="coerce").dropna().astype(float).values
+    train_arr = _to_float_array(train)
+    test_arr = _to_float_array(test)
 
     context = int(model_obj["context"])
     ret_mean = float(model_obj["ret_mean"])
