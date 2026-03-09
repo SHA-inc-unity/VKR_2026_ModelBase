@@ -549,32 +549,46 @@ def _fetch_week_by_random_end(base_url: str, symbol: str, interval: str, week_ho
     min_end_ms = now_ms - int(max_years_back * 365 * 24 * 3600 * 1000)
 
     rand_end = random.randint(min_end_ms, now_ms - 24 * 3600 * 1000)
-    params = {
-        "category": "linear",
-        "symbol": symbol,
-        "interval": interval,
-        "limit": week_hours,
-        "end": rand_end,
-    }
+    all_rows = []
+    end_ms = rand_end
 
-    resp = requests.get(endpoint, params=params, timeout=30)
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("retCode") != 0:
-        raise RuntimeError(f"Bybit error: {payload}")
+    while len(all_rows) < week_hours:
+        limit = min(1000, max(1, int(week_hours) - len(all_rows)))
+        params = {
+            "category": "linear",
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+            "end": end_ms,
+        }
 
-    batch = payload.get("result", {}).get("list", [])
-    if not batch:
+        resp = requests.get(endpoint, params=params, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("retCode") != 0:
+            raise RuntimeError(f"Bybit error: {payload}")
+
+        batch = payload.get("result", {}).get("list", [])
+        if not batch:
+            break
+
+        all_rows.extend(batch)
+        end_ms = int(batch[-1][0]) - 1
+        time.sleep(0.08)
+
+    if not all_rows:
         return pd.DataFrame()
 
     cols = ["start_ms", "open", "high", "low", "close", "volume", "turnover"]
-    df = pd.DataFrame(batch, columns=cols).drop_duplicates(subset=["start_ms"])
+    df = pd.DataFrame(all_rows, columns=cols).drop_duplicates(subset=["start_ms"])
     df["start_ms"] = pd.to_numeric(df["start_ms"], errors="coerce")
     for c in ["open", "high", "low", "close", "volume", "turnover"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna().copy()
     df["timestamp"] = pd.to_datetime(df["start_ms"], unit="ms", utc=True)
     df = df.sort_values("timestamp").reset_index(drop=True)
+    if len(df) > week_hours:
+        df = df.iloc[-week_hours:].reset_index(drop=True)
     return df[["timestamp", "open", "high", "low", "close", "volume", "turnover"]]
 
 
