@@ -10,6 +10,7 @@ import pandas as pd
 
 
 FitModelFn = Callable[..., dict[str, Any]]
+PredictPathFn = Callable[..., pd.DataFrame]
 SignalThresholdsFn = Callable[[dict[str, float]], dict[str, float]]
 DisplayFn = Callable[[Any], None]
 
@@ -54,6 +55,16 @@ class BacktestConfig:
         live_signal_horizons: Горизонты, на которых строятся признаки сигнала.
         entry_point_c_horizon_minutes: Горизонт поиска точки входа C.
         entry_point_c_move_pct: Минимальный рост в процентах для триггера C.
+        forecast_mode: Режим построения траектории прогноза.
+        recursive: каузальный рекурсивный путь (боевой режим).
+        cell12_teacher_forced: стиль 12-й ячейки с teacher-forcing по фактическим ценам будущих шагов.
+        Этот режим некаузальный и пригоден только для offline-диагностики.
+        multi_horizon_direct: direct multi-horizon прогноз (1/5/10/15/30/60m),
+        путь по минутам восстанавливается интерполяцией между прямыми горизонтами.
+        quick_exit_enabled: Включает быстрый выход из backtest по минуте от старта окна.
+        quick_exit_minute: Минута от старта окна, при достижении которой цикл backtest останавливается.
+        enable_trade_execution: Если False, сделки не исполняются (no open/close actions),
+        но прогнозы и диагностические метрики продолжают считаться.
     """
 
     enabled: bool
@@ -87,6 +98,10 @@ class BacktestConfig:
     live_signal_horizons: tuple[int, ...]
     entry_point_c_horizon_minutes: int = ENTRY_POINT_C_HORIZON_MINUTES
     entry_point_c_move_pct: float = ENTRY_POINT_C_MOVE_PCT
+    forecast_mode: str = 'recursive'
+    quick_exit_enabled: bool = False
+    quick_exit_minute: int | None = None
+    enable_trade_execution: bool = True
 
     @property
     def step_minutes(self) -> int:
@@ -160,6 +175,11 @@ def validate_backtest_inputs(history_df: pd.DataFrame, config: BacktestConfig) -
         raise ValueError('ENTRY_POINT_C_HORIZON_MINUTES должен быть > 0.')
     if float(config.entry_point_c_move_pct) <= 0.0:
         raise ValueError('ENTRY_POINT_C_MOVE_PCT должен быть > 0.')
+    if bool(config.quick_exit_enabled):
+        if config.quick_exit_minute is None:
+            raise ValueError('BACKTEST_QUICK_EXIT_MINUTE должен быть задан при включенном BACKTEST_QUICK_EXIT_ENABLED.')
+        if int(config.quick_exit_minute) < 0:
+            raise ValueError('BACKTEST_QUICK_EXIT_MINUTE должен быть >= 0.')
 
 
 def clip_score(value: float, scale: float) -> float:
@@ -199,10 +219,72 @@ def forecast_catboost_path(model_obj: dict[str, Any], history_series: pd.Series,
     context = int(model_obj['context'])
     ret_mean = float(model_obj['ret_mean'])
     ret_std = float(model_obj['ret_std'])
+    safe_ret_std = ret_std if abs(ret_std) > 1e-12 else 1.0
     model = model_obj['model']
 
     history_log = list(np.log(np.clip(history_arr, 1e-8, None)).astype(float))
-    history_ret_norm = list(((np.diff(np.log(np.clip(history_arr, 1e-8, None))) - ret_mean) / ret_std).astype(float))
+    history_ret_norm = list(((np.diff(np.log(np.clip(history_arr, 1e-8, None))) - ret_mean) / safe_ret_std).astype(float))
+    rows: list[dict[str, float]] = []
+
+    # Dynamic per-minute return clip keeps recursive paths realistic during volatile or regime-shift zones.
+    recent_span = min(len(history_arr), 720)
+    recent_log = np.log(np.clip(history_arr[-recent_span:], 1e-8, None))
+    recent_ret = np.diff(recent_log)
+    recent_ret_std = float(np.nanstd(recent_ret)) if len(recent_ret) > 0 else 0.0
+    adaptive_ret_clip = float(np.clip(6.0 * recent_ret_std, 0.0025, 0.03))
+
+    for step_idx in range(int(horizon)):
+        if len(history_ret_norm) >= context:
+            x_ctx = np.asarray(history_ret_norm[-context:], dtype=np.float32)
+        else:
+            first_val = history_ret_norm[0] if len(history_ret_norm) > 0 else 0.0
+            pad = np.full((context - len(history_ret_norm),), first_val, dtype=np.float32)
+            x_ctx = np.concatenate([pad, np.asarray(history_ret_norm, dtype=np.float32)])
+
+        pred_ret_norm = float(model.predict(x_ctx.reshape(1, -1))[0])
+        pred_ret = float(np.clip(pred_ret_norm * ret_std + ret_mean, -adaptive_ret_clip, adaptive_ret_clip))
+        pred_log = float(history_log[-1] + pred_ret)
+        pred_price = float(np.exp(pred_log))
+
+        rows.append({'step_minute': int(step_idx + 1), 'pred_price': pred_price})
+        history_log.append(pred_log)
+        # Feed back the normalized return that was actually applied after clipping.
+        history_ret_norm.append(float((pred_ret - ret_mean) / safe_ret_std))
+
+    return pd.DataFrame(rows)
+
+
+def forecast_catboost_path_cell12_teacher_forced(
+    model_obj: dict[str, Any],
+    history_series: pd.Series,
+    future_series: pd.Series,
+    horizon: int,
+) -> pd.DataFrame:
+    """Строит путь как в 12-й ячейке: one-step + teacher-forcing по факту.
+
+    Parameters:
+        model_obj: Словарь с моделью и параметрами нормализации.
+        history_series: Исторический ряд цен закрытия до текущей минуты.
+        future_series: Фактические будущие цены (используются только для teacher-forcing).
+        horizon: Горизонт прогноза в минутах.
+
+    Returns:
+        DataFrame с колонками step_minute и pred_price.
+    """
+
+    history_arr = pd.to_numeric(history_series, errors='coerce').dropna().astype(float).to_numpy()
+    future_arr = pd.to_numeric(future_series, errors='coerce').dropna().astype(float).to_numpy()
+    if len(history_arr) < 10:
+        raise RuntimeError('Недостаточно истории для backtest-прогноза.')
+
+    context = int(model_obj['context'])
+    ret_mean = float(model_obj['ret_mean'])
+    ret_std = float(model_obj['ret_std'])
+    safe_ret_std = ret_std if abs(ret_std) > 1e-12 else 1.0
+    model = model_obj['model']
+
+    history_log = list(np.log(np.clip(history_arr, 1e-8, None)).astype(float))
+    history_ret_norm = list(((np.diff(np.log(np.clip(history_arr, 1e-8, None))) - ret_mean) / safe_ret_std).astype(float))
     rows: list[dict[str, float]] = []
 
     for step_idx in range(int(horizon)):
@@ -219,10 +301,78 @@ def forecast_catboost_path(model_obj: dict[str, Any], history_series: pd.Series,
         pred_price = float(np.exp(pred_log))
 
         rows.append({'step_minute': int(step_idx + 1), 'pred_price': pred_price})
-        history_log.append(pred_log)
-        history_ret_norm.append(pred_ret_norm)
+
+        if step_idx < len(future_arr):
+            true_log = float(np.log(max(float(future_arr[step_idx]), 1e-8)))
+            true_ret = float(true_log - history_log[-1])
+            history_log.append(true_log)
+            history_ret_norm.append(float((true_ret - ret_mean) / safe_ret_std))
+        else:
+            history_log.append(pred_log)
+            history_ret_norm.append(float((pred_ret - ret_mean) / safe_ret_std))
 
     return pd.DataFrame(rows)
+
+
+def calculate_forecast_path_diagnostics(forecast_path_df: pd.DataFrame, current_price: float) -> dict[str, float | bool]:
+    """Считает диагностические метрики формы рекурсивного прогноза.
+
+    Parameters:
+        forecast_path_df: Путь прогноза с колонкой pred_price.
+        current_price: Текущая цена, от которой построен прогноз.
+
+    Returns:
+        Словарь с метриками наклона, вариативности и флагом near-linear.
+    """
+
+    if len(forecast_path_df) == 0:
+        return {
+            'forecast_end_move_pct': float('nan'),
+            'forecast_span_pct': float('nan'),
+            'forecast_ret_std': float('nan'),
+            'forecast_accel_std': float('nan'),
+            'forecast_linearity_ratio': float('nan'),
+            'forecast_near_linear': False,
+        }
+
+    pred_prices = pd.to_numeric(forecast_path_df['pred_price'], errors='coerce').dropna().astype(float).to_numpy()
+    if len(pred_prices) == 0:
+        return {
+            'forecast_end_move_pct': float('nan'),
+            'forecast_span_pct': float('nan'),
+            'forecast_ret_std': float('nan'),
+            'forecast_accel_std': float('nan'),
+            'forecast_linearity_ratio': float('nan'),
+            'forecast_near_linear': False,
+        }
+
+    current_price = float(current_price)
+    if not np.isfinite(current_price) or current_price <= 0.0:
+        current_price = float('nan')
+
+    end_move_pct = float((pred_prices[-1] / current_price - 1.0) * 100.0) if np.isfinite(current_price) else float('nan')
+    min_price = float(np.min(pred_prices))
+    max_price = float(np.max(pred_prices))
+    span_pct = float((max_price / min_price - 1.0) * 100.0) if min_price > 0 else float('nan')
+
+    pred_log = np.log(np.clip(pred_prices, 1e-8, None))
+    pred_ret = np.diff(pred_log)
+    ret_std = float(np.std(pred_ret)) if len(pred_ret) > 0 else 0.0
+    pred_accel = np.diff(pred_ret) if len(pred_ret) > 1 else np.asarray([], dtype=float)
+    accel_std = float(np.std(pred_accel)) if len(pred_accel) > 0 else 0.0
+    linearity_ratio = float(accel_std / (ret_std + 1e-12))
+
+    # Flag almost-flat trajectories and nearly constant-step paths.
+    near_linear = bool((np.isfinite(span_pct) and abs(span_pct) <= 0.05) or (ret_std <= 1e-5 and linearity_ratio <= 0.30))
+
+    return {
+        'forecast_end_move_pct': end_move_pct,
+        'forecast_span_pct': span_pct,
+        'forecast_ret_std': ret_std,
+        'forecast_accel_std': accel_std,
+        'forecast_linearity_ratio': linearity_ratio,
+        'forecast_near_linear': near_linear,
+    }
 
 
 def calc_move_pct(predicted_price: float, current_price: float) -> float:
@@ -860,10 +1010,12 @@ def run_backtest_scenario(
     config: BacktestConfig,
     compute_signal_thresholds: SignalThresholdsFn,
     fit_catboost_inference_model: FitModelFn,
+    fit_catboost_multi_horizon_model: FitModelFn | None,
+    predict_catboost_multi_horizon_path: PredictPathFn | None,
     catboost_use_cuda: bool,
     retrain_hours: int,
     display_fn: DisplayFn | None = None,
-) -> tuple[pd.DataFrame, dict[str, Any]]:
+) -> tuple[pd.DataFrame, dict[str, Any], pd.DataFrame]:
     """Запускает один сценарий long-only backtest.
 
     Parameters:
@@ -879,7 +1031,7 @@ def run_backtest_scenario(
         display_fn: Функция отображения графиков.
 
     Returns:
-        DataFrame действий и словарь метаданных сценария.
+        DataFrame действий, словарь метаданных и DataFrame истории прогнозов.
     """
 
     _ = run_symbol
@@ -919,15 +1071,19 @@ def run_backtest_scenario(
     }
     bt_trades: list[dict[str, Any]] = []
     bt_c_hits: list[dict[str, Any]] = []
+    bt_forecast_rows: list[dict[str, Any]] = []
     bt_active_model: dict[str, Any] | None = None
     total_steps = len(range(start_idx, end_idx + 1, config.step_minutes))
     processed_steps = 0
     report_every_steps = 500
+    quick_exit_limit_minute = int(config.quick_exit_minute) if bool(config.quick_exit_enabled) and config.quick_exit_minute is not None else None
 
     print(
         f'Scenario start | mode=long_only | capital={config.initial_capital:.2f} | '
         f'entry_fraction={config.entry_fraction:.2f} | fee_pct={config.execution_fee_pct:.4f} | '
-        f'retrain_every={retrain_hours}h | from={actual_start_ts} | to={actual_end_ts} | steps={total_steps}'
+        f'retrain_every={retrain_hours}h | forecast_mode={config.forecast_mode} | '
+        f'trade_execution={bool(config.enable_trade_execution)} | '
+        f'from={actual_start_ts} | to={actual_end_ts} | steps={total_steps}'
     )
 
     for idx in range(start_idx, end_idx + 1, config.step_minutes):
@@ -935,20 +1091,52 @@ def run_backtest_scenario(
         current_ts = pd.Timestamp(row['timestamp']).floor('min')
         current_price = float(row['close'])
 
+        if quick_exit_limit_minute is not None:
+            elapsed_minutes = int((current_ts - actual_start_ts).total_seconds() // 60)
+            if elapsed_minutes >= quick_exit_limit_minute:
+                print(
+                    f'Quick exit reached at minute={elapsed_minutes} (limit={quick_exit_limit_minute}) | '
+                    f'ts={current_ts} | stopping backtest loop.'
+                )
+                break
+
         train_window = history_df.iloc[idx - int(config.train_minutes) + 1:idx + 1].reset_index(drop=True)
         train_series = train_window['close'].astype(float).reset_index(drop=True)
         needs_refit = bt_active_model is None or current_ts >= bt_active_model['expires_at']
 
         if needs_refit:
-            model_obj = fit_catboost_inference_model(
-                train_series,
-                context_len=int(catboost_best_params['context_len']),
-                depth=int(catboost_best_params['depth']),
-                learning_rate=float(catboost_best_params['learning_rate']),
-                iterations=int(catboost_best_params['iterations']),
-                l2_leaf_reg=float(catboost_best_params.get('l2_leaf_reg', 3.0)),
-                use_cuda=bool(catboost_best_params.get('use_cuda', catboost_use_cuda)) and not config.force_cpu,
-            )
+            if config.forecast_mode == 'multi_horizon_direct':
+                if fit_catboost_multi_horizon_model is None:
+                    raise RuntimeError(
+                        'multi_horizon_direct requested, but fit_catboost_multi_horizon_model is not provided.'
+                    )
+                max_direct_horizon = max(int(config.live_forecast_horizon_minutes), int(config.entry_point_c_horizon_minutes))
+                dense_horizons = [h for h in range(15, max_direct_horizon + 1, 15)]
+                requested_horizons = tuple(sorted({
+                    *[int(h) for h in config.live_signal_horizons if int(h) > 0],
+                    *dense_horizons,
+                    int(max_direct_horizon),
+                }))
+                model_obj = fit_catboost_multi_horizon_model(
+                    train_series,
+                    horizons=requested_horizons,
+                    context_len=int(catboost_best_params['context_len']),
+                    depth=int(catboost_best_params['depth']),
+                    learning_rate=float(catboost_best_params['learning_rate']),
+                    iterations=int(catboost_best_params['iterations']),
+                    l2_leaf_reg=float(catboost_best_params.get('l2_leaf_reg', 3.0)),
+                    use_cuda=bool(catboost_best_params.get('use_cuda', catboost_use_cuda)) and not config.force_cpu,
+                )
+            else:
+                model_obj = fit_catboost_inference_model(
+                    train_series,
+                    context_len=int(catboost_best_params['context_len']),
+                    depth=int(catboost_best_params['depth']),
+                    learning_rate=float(catboost_best_params['learning_rate']),
+                    iterations=int(catboost_best_params['iterations']),
+                    l2_leaf_reg=float(catboost_best_params.get('l2_leaf_reg', 3.0)),
+                    use_cuda=bool(catboost_best_params.get('use_cuda', catboost_use_cuda)) and not config.force_cpu,
+                )
             bt_active_model = {
                 'model_obj': model_obj,
                 'fitted_at': current_ts,
@@ -958,10 +1146,33 @@ def run_backtest_scenario(
 
         forecast_horizon_minutes = max(int(config.live_forecast_horizon_minutes), int(config.entry_point_c_horizon_minutes))
 
-        forecast_path_df = forecast_catboost_path(
-            bt_active_model['model_obj'],
-            history_series=train_series,
-            horizon=forecast_horizon_minutes,
+        if config.forecast_mode == 'cell12_teacher_forced':
+            future_series = history_df['close'].iloc[idx + 1:idx + 1 + forecast_horizon_minutes].reset_index(drop=True)
+            forecast_path_df = forecast_catboost_path_cell12_teacher_forced(
+                bt_active_model['model_obj'],
+                history_series=train_series,
+                future_series=future_series,
+                horizon=forecast_horizon_minutes,
+            )
+        elif config.forecast_mode == 'multi_horizon_direct':
+            if predict_catboost_multi_horizon_path is None:
+                raise RuntimeError(
+                    'multi_horizon_direct requested, but predict_catboost_multi_horizon_path is not provided.'
+                )
+            forecast_path_df = predict_catboost_multi_horizon_path(
+                bt_active_model['model_obj'],
+                history_series=train_series,
+                horizon=forecast_horizon_minutes,
+            )
+        else:
+            forecast_path_df = forecast_catboost_path(
+                bt_active_model['model_obj'],
+                history_series=train_series,
+                horizon=forecast_horizon_minutes,
+            )
+        forecast_path_diag = calculate_forecast_path_diagnostics(
+            forecast_path_df=forecast_path_df,
+            current_price=current_price,
         )
         horizon_forecasts = extract_horizon_forecasts(
             forecast_path_df=forecast_path_df,
@@ -975,6 +1186,25 @@ def run_backtest_scenario(
             config=config,
             compute_signal_thresholds=compute_signal_thresholds,
         )
+        bt_forecast_rows.append(
+            {
+                'retrain_hours': int(retrain_hours),
+                'timestamp': current_ts,
+                'current_price': float(current_price),
+                'model_fitted_at': pd.Timestamp(bt_active_model['fitted_at']),
+                'model_expires_at': pd.Timestamp(bt_active_model['expires_at']),
+                'forecast_horizon_minutes': int(forecast_horizon_minutes),
+                'forecast_mode': str(config.forecast_mode),
+                'forecast_step_minutes': forecast_path_df['step_minute'].astype(int).tolist(),
+                'forecast_pred_prices': forecast_path_df['pred_price'].astype(float).tolist(),
+                'forecast_end_move_pct': float(forecast_path_diag['forecast_end_move_pct']),
+                'forecast_span_pct': float(forecast_path_diag['forecast_span_pct']),
+                'forecast_ret_std': float(forecast_path_diag['forecast_ret_std']),
+                'forecast_accel_std': float(forecast_path_diag['forecast_accel_std']),
+                'forecast_linearity_ratio': float(forecast_path_diag['forecast_linearity_ratio']),
+                'forecast_near_linear': bool(forecast_path_diag['forecast_near_linear']),
+            }
+        )
         bt_state['entry_c_checks'] = int(bt_state['entry_c_checks']) + 1
         if bool(trade_signal.get('entry_c_trigger', False)):
             bt_state['entry_c_hits'] = int(bt_state['entry_c_hits']) + 1
@@ -985,100 +1215,100 @@ def run_backtest_scenario(
                 }
             )
 
-        position = bt_state['position']
-        close_reason = None
+        if bool(config.enable_trade_execution):
+            position = bt_state['position']
+            close_reason = None
 
-        if position is not None:
-            # Временная упрощённая схема: все обычные точки выхода из long отключены.
-            # in_min_hold = current_ts < pd.Timestamp(position['min_hold_until'])
-            # target_allowed = current_ts >= pd.Timestamp(position['target_exit_eligible_at'])
-            # force_exit = current_ts >= pd.Timestamp(position['force_exit_at'])
-            #
-            # if current_price <= float(position['stop_loss']):
-            #     close_reason = 'stop_loss'
-            # elif current_price >= float(position['take_profit']):
-            #     close_reason = 'take_profit'
-            # elif target_allowed and np.isfinite(position['target_exit_price']) and current_price >= float(position['target_exit_price']):
-            #     close_reason = 'target_exit_price'
-            # elif force_exit:
-            #     close_reason = 'max_hold_reached'
-            # elif trade_signal['long_close_sharp_trigger']:
-            #     close_reason = 'sharp_drop_close_long'
-            # elif not in_min_hold and trade_signal['long_exit_trigger']:
-            #     close_reason = 'signal_exit_long'
+            if position is not None:
+                in_min_hold = current_ts < pd.Timestamp(position['min_hold_until'])
+                target_allowed = current_ts >= pd.Timestamp(position['target_exit_eligible_at'])
+                force_exit = current_ts >= pd.Timestamp(position['force_exit_at'])
 
-            if close_reason is not None:
-                released_cash, closed_trade = close_position(
-                    position=position,
+                if current_price <= float(position['stop_loss']):
+                    close_reason = 'stop_loss'
+                elif current_price >= float(position['take_profit']):
+                    close_reason = 'take_profit'
+                elif target_allowed and np.isfinite(position['target_exit_price']) and current_price >= float(position['target_exit_price']):
+                    close_reason = 'target_exit_price'
+                elif force_exit:
+                    close_reason = 'max_hold_reached'
+                elif trade_signal['long_close_sharp_trigger']:
+                    close_reason = 'sharp_drop_close_long'
+                elif not in_min_hold and trade_signal['long_exit_trigger']:
+                    close_reason = 'signal_exit_long'
+
+                if close_reason is not None:
+                    released_cash, closed_trade = close_position(
+                        position=position,
+                        current_price=current_price,
+                        current_ts=current_ts,
+                        reason=close_reason,
+                        config=config,
+                    )
+                    bt_state['free_cash'] = float(bt_state['free_cash'] + released_cash)
+                    bt_state['realized_pnl'] = float(bt_state['realized_pnl'] + closed_trade['realized_pnl'])
+
+                    trade_action_row = create_close_trade_action(
+                        retrain_hours=retrain_hours,
+                        current_ts=current_ts,
+                        position=position,
+                        closed_trade=closed_trade,
+                        released_cash=released_cash,
+                        free_cash_after=float(bt_state['free_cash']),
+                        reason=close_reason,
+                    )
+                    bt_trades.append(trade_action_row)
+                    bt_state['position'] = None
+                    bt_state['last_exit_ts'] = current_ts
+
+                    print_trade_action(
+                        trade_action_row,
+                        free_cash=float(bt_state['free_cash']),
+                        position=None,
+                        realized_pnl_total=float(bt_state['realized_pnl']),
+                        current_price=current_price,
+                        config=config,
+                    )
+
+            cooldown_ready = bt_state['last_exit_ts'] is None or current_ts >= pd.Timestamp(bt_state['last_exit_ts']) + pd.Timedelta(minutes=config.cooldown_minutes)
+
+            if bt_state['position'] is None and cooldown_ready and trade_signal['long_open_trigger']:
+                signal_type = trade_signal['signal_type'] if trade_signal['signal_type'] != 'none' else 'trend_long'
+                new_position = open_position(
+                    signal_type=signal_type,
                     current_price=current_price,
                     current_ts=current_ts,
-                    reason=close_reason,
-                    config=config,
-                )
-                bt_state['free_cash'] = float(bt_state['free_cash'] + released_cash)
-                bt_state['realized_pnl'] = float(bt_state['realized_pnl'] + closed_trade['realized_pnl'])
-
-                trade_action_row = create_close_trade_action(
-                    retrain_hours=retrain_hours,
-                    current_ts=current_ts,
-                    position=position,
-                    closed_trade=closed_trade,
-                    released_cash=released_cash,
-                    free_cash_after=float(bt_state['free_cash']),
-                    reason=close_reason,
-                )
-                bt_trades.append(trade_action_row)
-                bt_state['position'] = None
-                bt_state['last_exit_ts'] = current_ts
-
-                print_trade_action(
-                    trade_action_row,
+                    target_exit_price=float(trade_signal['target_exit_price']),
                     free_cash=float(bt_state['free_cash']),
-                    position=None,
-                    realized_pnl_total=float(bt_state['realized_pnl']),
-                    current_price=current_price,
+                    fraction=float(config.entry_fraction),
                     config=config,
                 )
 
-        cooldown_ready = bt_state['last_exit_ts'] is None or current_ts >= pd.Timestamp(bt_state['last_exit_ts']) + pd.Timedelta(minutes=config.cooldown_minutes)
+                if new_position is not None:
+                    bt_state['free_cash'] = float(bt_state['free_cash'] - new_position['invested_cash_gross'])
+                    bt_state['position'] = new_position
+                    bt_state['open_long_count'] = int(bt_state['open_long_count']) + 1
 
-        if bt_state['position'] is None and cooldown_ready and trade_signal['long_open_trigger']:
-            signal_type = trade_signal['signal_type'] if trade_signal['signal_type'] != 'none' else 'trend_long'
-            new_position = open_position(
-                signal_type=signal_type,
-                current_price=current_price,
-                current_ts=current_ts,
-                target_exit_price=float(trade_signal['target_exit_price']),
-                free_cash=float(bt_state['free_cash']),
-                fraction=float(config.entry_fraction),
-                config=config,
-            )
+                    trade_action_row = create_open_trade_action(
+                        retrain_hours=retrain_hours,
+                        current_ts=current_ts,
+                        position=new_position,
+                        free_cash_after=float(bt_state['free_cash']),
+                        realized_pnl_total=float(bt_state['realized_pnl']),
+                        current_price=current_price,
+                        reason=trade_signal['entry_reason'],
+                        config=config,
+                    )
+                    bt_trades.append(trade_action_row)
 
-            if new_position is not None:
-                bt_state['free_cash'] = float(bt_state['free_cash'] - new_position['invested_cash_gross'])
-                bt_state['position'] = new_position
-                bt_state['open_long_count'] = int(bt_state['open_long_count']) + 1
-
-                trade_action_row = create_open_trade_action(
-                    retrain_hours=retrain_hours,
-                    current_ts=current_ts,
-                    position=new_position,
-                    free_cash_after=float(bt_state['free_cash']),
-                    realized_pnl_total=float(bt_state['realized_pnl']),
-                    current_price=current_price,
-                    reason=trade_signal['entry_reason'],
-                    config=config,
-                )
-                bt_trades.append(trade_action_row)
-
-                print_trade_action(
-                    trade_action_row,
-                    free_cash=float(bt_state['free_cash']),
-                    position=bt_state['position'],
-                    realized_pnl_total=float(bt_state['realized_pnl']),
-                    current_price=current_price,
-                    config=config,
-                )
+                    print_trade_action(
+                        trade_action_row,
+                        free_cash=float(bt_state['free_cash']),
+                        position=bt_state['position'],
+                        realized_pnl_total=float(bt_state['realized_pnl']),
+                        current_price=current_price,
+                        config=config,
+                    )
 
         processed_steps += 1
         invested_cash_now = float(bt_state['position']['invested_cash_gross']) if bt_state['position'] is not None else 0.0
@@ -1103,7 +1333,7 @@ def run_backtest_scenario(
                 display_fn=display_fn,
             )
 
-    if bt_state['position'] is not None:
+    if bool(config.enable_trade_execution) and bt_state['position'] is not None:
         last_row = history_df.iloc[end_idx]
         final_ts = pd.Timestamp(last_row['timestamp']).floor('min')
         final_price = float(last_row['close'])
@@ -1170,10 +1400,14 @@ def run_backtest_scenario(
         'entry_c_hit_rate': float(bt_state['entry_c_hits'] / bt_state['entry_c_checks']) if int(bt_state['entry_c_checks']) > 0 else float('nan'),
         'entry_c_horizon_minutes': int(config.entry_point_c_horizon_minutes),
         'entry_c_move_pct': float(config.entry_point_c_move_pct),
+        'quick_exit_enabled': bool(config.quick_exit_enabled),
+        'quick_exit_minute': int(config.quick_exit_minute) if config.quick_exit_minute is not None else float('nan'),
+        'trade_execution_enabled': bool(config.enable_trade_execution),
         'ending_equity': float(bt_state['free_cash']),
         'ending_realized_pnl': float(bt_state['realized_pnl']),
     }
-    return trades_df, scenario_meta
+    forecast_history_df = pd.DataFrame(bt_forecast_rows)
+    return trades_df, scenario_meta, forecast_history_df
 
 
 def run_backtest_block(
@@ -1185,6 +1419,8 @@ def run_backtest_block(
     compute_signal_thresholds: SignalThresholdsFn,
     fit_catboost_inference_model: FitModelFn,
     catboost_use_cuda: bool,
+    fit_catboost_multi_horizon_model: FitModelFn | None = None,
+    predict_catboost_multi_horizon_path: PredictPathFn | None = None,
     display_fn: DisplayFn | None = None,
 ) -> dict[str, Any]:
     """Запускает весь упрощённый long-only backtest.
@@ -1206,9 +1442,21 @@ def run_backtest_block(
 
     normalized_history = normalize_backtest_history(history_df)
     validate_backtest_inputs(normalized_history, config)
+    if config.forecast_mode not in {'recursive', 'cell12_teacher_forced', 'multi_horizon_direct'}:
+        raise ValueError(
+            'BACKTEST_FORECAST_MODE должен быть одним из: recursive, cell12_teacher_forced, multi_horizon_direct.'
+        )
+    if config.forecast_mode == 'cell12_teacher_forced':
+        print(
+            'WARNING: forecast_mode=cell12_teacher_forced использует будущие фактические цены '
+            'для teacher-forcing (look-ahead). Этот режим только для offline-диагностики.'
+        )
+    if config.forecast_mode == 'multi_horizon_direct':
+        print('INFO: forecast_mode=multi_horizon_direct uses direct horizon models with interpolated minute path.')
 
     backtest_results: list[pd.DataFrame] = []
     backtest_meta_rows: list[dict[str, Any]] = []
+    backtest_forecast_results: list[pd.DataFrame] = []
 
     print(f'Backtest symbol={run_symbol} | start_days_ago={config.start_days_ago} | duration_days={config.duration_days}')
     print(
@@ -1227,7 +1475,7 @@ def run_backtest_block(
         )
 
     for retrain_hours in [int(config.retrain_every_hours)]:
-        scenario_trades_df, scenario_meta = run_backtest_scenario(
+        scenario_trades_df, scenario_meta, scenario_forecast_df = run_backtest_scenario(
             history_df=normalized_history,
             run_symbol=run_symbol,
             output_dir=output_dir,
@@ -1235,14 +1483,22 @@ def run_backtest_block(
             config=config,
             compute_signal_thresholds=compute_signal_thresholds,
             fit_catboost_inference_model=fit_catboost_inference_model,
+            fit_catboost_multi_horizon_model=fit_catboost_multi_horizon_model,
+            predict_catboost_multi_horizon_path=predict_catboost_multi_horizon_path,
             catboost_use_cuda=catboost_use_cuda,
             retrain_hours=int(retrain_hours),
             display_fn=display_fn,
         )
         backtest_results.append(scenario_trades_df)
         backtest_meta_rows.append(scenario_meta)
+        backtest_forecast_results.append(scenario_forecast_df)
 
     backtest_trades_df = pd.concat(backtest_results, ignore_index=True) if len(backtest_results) > 0 else pd.DataFrame()
+    backtest_forecast_history_df = (
+        pd.concat(backtest_forecast_results, ignore_index=True)
+        if len(backtest_forecast_results) > 0
+        else pd.DataFrame()
+    )
     backtest_meta_df = pd.DataFrame(backtest_meta_rows).sort_values('retrain_hours').reset_index(drop=True)
     backtest_trades_path = output_dir / f"{run_symbol}_catboost_backtest_trades_{pd.Timestamp.now(tz='UTC').strftime('%Y%m%d_%H%M%S')}.csv"
 
@@ -1314,6 +1570,7 @@ def run_backtest_block(
         'history_df': normalized_history,
         'backtest_results': backtest_results,
         'backtest_meta_rows': backtest_meta_rows,
+        'backtest_forecast_history_df': backtest_forecast_history_df,
         'backtest_trades_df': backtest_trades_df,
         'backtest_meta_df': backtest_meta_df,
         'backtest_trades_view_df': backtest_trades_view_df,

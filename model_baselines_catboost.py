@@ -411,6 +411,155 @@ def predict_catboost_inference(model_obj: Dict[str, Any], train: pd.Series, test
     return metrics(test_arr, preds), pd.DataFrame({"y_true": test_arr, "y_pred": preds})
 
 
+def fit_catboost_multi_horizon_inference_model(
+    train: pd.Series,
+    horizons: tuple[int, ...] = (1, 5, 10, 15, 30, 60),
+    context_len: int = 120,
+    depth: int = 8,
+    learning_rate: float = 0.05,
+    iterations: int = 400,
+    l2_leaf_reg: float = 3.0,
+    use_cuda: bool = True,
+) -> Dict[str, Any]:
+    """Trains direct multi-horizon CatBoost models on a shared return context."""
+
+    prep = _prepare_catboost_training(train=train, context_len=context_len)
+    train_arr = np.asarray(prep["train_arr"], dtype=float)
+    train_log = np.log(np.clip(train_arr, 1e-8, None))
+    ret_mean = float(prep["ret_mean"])
+    ret_std = float(prep["ret_std"])
+    safe_ret_std = ret_std if abs(ret_std) > 1e-12 else 1.0
+    context = int(prep["context"])
+
+    horizons_clean = sorted({int(h) for h in horizons if int(h) > 0})
+    if len(horizons_clean) == 0:
+        raise ValueError("horizons must contain at least one positive integer")
+
+    ret_norm = ((np.diff(train_log) - ret_mean) / safe_ret_std).astype(np.float32)
+
+    models_by_horizon: Dict[int, Any] = {}
+    target_mean_by_horizon: Dict[int, float] = {}
+    target_std_by_horizon: Dict[int, float] = {}
+
+    for horizon in horizons_clean:
+        x_rows = []
+        y_rows = []
+        max_t = len(train_arr) - int(horizon)
+        for t in range(context, max_t):
+            x_rows.append(ret_norm[t - context:t])
+            y_rows.append(float(train_log[t + horizon] - train_log[t]))
+
+        if len(x_rows) < 16:
+            continue
+
+        x_np = np.asarray(x_rows, dtype=np.float32)
+        y_np = np.asarray(y_rows, dtype=np.float32)
+        y_mean = float(np.mean(y_np))
+        y_std = float(np.std(y_np) + 1e-8)
+        y_norm = (y_np - y_mean) / y_std
+
+        model = _make_catboost_regressor(
+            depth=depth,
+            learning_rate=learning_rate,
+            iterations=iterations,
+            l2_leaf_reg=l2_leaf_reg,
+            use_cuda=use_cuda,
+        )
+        model.fit(x_np, y_norm)
+
+        models_by_horizon[int(horizon)] = model
+        target_mean_by_horizon[int(horizon)] = y_mean
+        target_std_by_horizon[int(horizon)] = y_std
+
+    if len(models_by_horizon) == 0:
+        raise RuntimeError("Failed to train multi-horizon models: insufficient samples for requested horizons")
+
+    trained_horizons = sorted(models_by_horizon.keys())
+    return {
+        "model_type": "catboost_multi_horizon",
+        "context": context,
+        "ret_mean": ret_mean,
+        "ret_std": safe_ret_std,
+        "train_last": float(train_arr[-1]),
+        "horizons": trained_horizons,
+        "models_by_horizon": models_by_horizon,
+        "target_mean_by_horizon": target_mean_by_horizon,
+        "target_std_by_horizon": target_std_by_horizon,
+        "use_cuda": bool(use_cuda) and torch.cuda.is_available(),
+    }
+
+
+def predict_catboost_multi_horizon_path(
+    model_obj: Dict[str, Any],
+    history_series: pd.Series,
+    horizon: int,
+) -> pd.DataFrame:
+    """Builds a minute-level path from direct multi-horizon predictions."""
+
+    history_arr = pd.to_numeric(history_series, errors="coerce").dropna().astype(float).to_numpy()
+    if len(history_arr) < 10:
+        raise RuntimeError("Insufficient history for multi-horizon forecast")
+
+    horizon = int(max(1, horizon))
+    context = int(model_obj["context"])
+    ret_mean = float(model_obj["ret_mean"])
+    ret_std = float(model_obj["ret_std"])
+    safe_ret_std = ret_std if abs(ret_std) > 1e-12 else 1.0
+
+    history_log = np.log(np.clip(history_arr, 1e-8, None)).astype(float)
+    history_ret_norm = ((np.diff(history_log) - ret_mean) / safe_ret_std).astype(np.float32)
+
+    if len(history_ret_norm) >= context:
+        x_ctx = np.asarray(history_ret_norm[-context:], dtype=np.float32)
+    else:
+        first_val = float(history_ret_norm[0]) if len(history_ret_norm) > 0 else 0.0
+        pad = np.full((context - len(history_ret_norm),), first_val, dtype=np.float32)
+        x_ctx = np.concatenate([pad, np.asarray(history_ret_norm, dtype=np.float32)])
+
+    models_by_horizon = dict(model_obj["models_by_horizon"])
+    target_mean_by_horizon = dict(model_obj["target_mean_by_horizon"])
+    target_std_by_horizon = dict(model_obj["target_std_by_horizon"])
+
+    anchor_prices: Dict[int, float] = {0: float(history_arr[-1])}
+    for h in sorted(int(v) for v in models_by_horizon.keys() if int(v) > 0 and int(v) <= horizon):
+        model = models_by_horizon[h]
+        pred_norm = float(model.predict(x_ctx.reshape(1, -1))[0])
+        pred_cum_ret = pred_norm * float(target_std_by_horizon[h]) + float(target_mean_by_horizon[h])
+        clip_bound = float(np.clip(8.0 * safe_ret_std * np.sqrt(max(1.0, float(h))), 0.01, 0.40))
+        pred_cum_ret = float(np.clip(pred_cum_ret, -clip_bound, clip_bound))
+        pred_log = float(history_log[-1] + pred_cum_ret)
+        anchor_prices[h] = float(np.exp(pred_log))
+
+    if len(anchor_prices) <= 1:
+        raise RuntimeError("No multi-horizon anchors available for prediction")
+
+    anchor_steps = sorted(anchor_prices.keys())
+    if anchor_steps[-1] < horizon:
+        anchor_prices[horizon] = float(anchor_prices[anchor_steps[-1]])
+        anchor_steps = sorted(anchor_prices.keys())
+
+    rows = []
+    for step in range(1, horizon + 1):
+        if step in anchor_prices:
+            pred_price = float(anchor_prices[step])
+        else:
+            left_candidates = [s for s in anchor_steps if s < step]
+            right_candidates = [s for s in anchor_steps if s > step]
+            if len(left_candidates) == 0 or len(right_candidates) == 0:
+                pred_price = float(anchor_prices[anchor_steps[-1]])
+            else:
+                left = left_candidates[-1]
+                right = right_candidates[0]
+                left_log = float(np.log(max(anchor_prices[left], 1e-8)))
+                right_log = float(np.log(max(anchor_prices[right], 1e-8)))
+                alpha = float((step - left) / max(1, right - left))
+                interp_log = float(left_log + alpha * (right_log - left_log))
+                pred_price = float(np.exp(interp_log))
+        rows.append({"step_minute": int(step), "pred_price": pred_price})
+
+    return pd.DataFrame(rows)
+
+
 class _CatBoostGridSearchEstimator(BaseEstimator):
     def __init__(
         self,
