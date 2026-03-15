@@ -690,111 +690,155 @@ def print_trade_action(
 def plot_progress_chart(
     history_slice_df: pd.DataFrame,
     trades_df: pd.DataFrame,
+    c_hits_df: pd.DataFrame,
     current_ts: pd.Timestamp,
     retrain_hours: int,
-    display_fn: DisplayFn | None = None,
+    display_fn: callable | None = None,
 ) -> None:
     """Строит график прогресса backtest только для long-сделок.
 
-    Parameters:
-        history_slice_df: Срез истории до текущего момента.
-        trades_df: Журнал торговых действий.
-        current_ts: Текущая временная точка.
-        retrain_hours: Интервал переобучения.
-        display_fn: Функция отображения фигуры.
-
-    Returns:
-        Ничего не возвращает.
+    enter_long_C отображается как прерывающаяся пунктирная линия поверх close.
     """
 
     if len(history_slice_df) == 0:
         return
 
+    # ─── Подготовка истории ──────────────────────────────────────────────────────
     history_view_df = history_slice_df.copy()
-    history_view_df['timestamp'] = pd.to_datetime(history_view_df['timestamp'], errors='coerce', utc=True)
-    history_view_df['close'] = pd.to_numeric(history_view_df['close'], errors='coerce')
+    history_view_df['timestamp'] = pd.to_datetime(history_view_df['timestamp'], errors='coerce')
+    history_view_df['close']     = pd.to_numeric(history_view_df['close'], errors='coerce')
     history_view_df = history_view_df.dropna(subset=['timestamp', 'close'])
     history_view_df = history_view_df.sort_values('timestamp').reset_index(drop=True)
+
     if len(history_view_df) == 0:
         return
 
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(history_view_df['timestamp'], history_view_df['close'], color='steelblue', linewidth=1.1, label='close')
+    # Убираем timezone для стабильности сравнений
+    if getattr(history_view_df['timestamp'].dt, 'tz', None) is not None:
+        history_view_df['timestamp'] = history_view_df['timestamp'].dt.tz_localize(None)
 
-    open_long_count = 0
-    close_long_count = 0
-    open_long_c_count = 0
+    current_ts_parsed = pd.Timestamp(current_ts)
+    current_ts_naive = (
+        current_ts_parsed.tz_localize(None)
+        if current_ts_parsed.tzinfo is not None
+        else current_ts_parsed
+    )
+
+    # ─── График цены ─────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(14, 5))  # чуть выше, чтобы маркеры не налезали
+    ax.plot(
+        history_view_df['timestamp'],
+        history_view_df['close'],
+        color='steelblue',
+        linewidth=1.1,
+        label='close'
+    )
+
+    open_long_count = close_long_count = open_long_c_count = 0
+    entry_c_hits_count = 0
 
     if len(trades_df) > 0:
         trades_view_df = trades_df.copy()
-        trades_view_df['timestamp'] = pd.to_datetime(trades_view_df['timestamp'], errors='coerce', utc=True)
+        trades_view_df['timestamp'] = pd.to_datetime(trades_view_df['timestamp'], errors='coerce')
+        if getattr(trades_view_df['timestamp'].dt, 'tz', None) is not None:
+            trades_view_df['timestamp'] = trades_view_df['timestamp'].dt.tz_localize(None)
         trades_view_df = trades_view_df.dropna(subset=['timestamp'])
-        trades_view_df = trades_view_df.loc[trades_view_df['timestamp'] <= current_ts].copy()
+        trades_view_df = trades_view_df[trades_view_df['timestamp'] <= current_ts_naive].copy()
 
-        open_long_df = trades_view_df.loc[trades_view_df['action'] == 'open_long'].copy()
-        close_long_df = trades_view_df.loc[trades_view_df['action'] == 'close_long'].copy()
-        open_long_c_df = open_long_df.loc[open_long_df['signal_type'].astype(str) == 'enter_long_C'].copy()
+        open_long_df   = trades_view_df[trades_view_df['action'] == 'open_long']
+        close_long_df  = trades_view_df[trades_view_df['action'] == 'close_long']
+        open_long_c_df = open_long_df[open_long_df['signal_type'].astype(str) == 'enter_long_C']
 
-        open_long_count = int(len(open_long_df))
-        close_long_count = int(len(close_long_df))
-        open_long_c_count = int(len(open_long_c_df))
+        open_long_count   = len(open_long_df)
+        close_long_count  = len(close_long_df)
+        open_long_c_count = len(open_long_c_df)
 
-        if len(open_long_df) > 0:
+        # ─── Обычные open/close long ─────────────────────────────────────────────
+        if not open_long_df.empty:
             ax.scatter(
                 open_long_df['timestamp'],
                 open_long_df['price'],
-                color='green',
+                color='limegreen',
                 marker='^',
-                s=70,
+                s=80,
                 label='open long',
-                zorder=3,
+                zorder=5,
+                edgecolor='darkgreen'
             )
 
-        if len(close_long_df) > 0:
+        if not close_long_df.empty:
             ax.scatter(
                 close_long_df['timestamp'],
                 close_long_df['price'],
                 color='crimson',
                 marker='v',
-                s=65,
+                s=75,
                 label='close long',
-                zorder=3,
+                zorder=5,
+                edgecolor='darkred'
             )
 
-        if len(open_long_c_df) > 0:
-            ax.scatter(
-                open_long_c_df['timestamp'],
-                open_long_c_df['price'],
+        # ─── open_long_C (фактически открытые сделки по C) ───────────────────────
+        open_long_c_count = int(len(open_long_c_df))
+
+    # ─── entry_c_hits (все сигнальные C-hit, даже без открытия сделки) ───────────
+    if len(c_hits_df) > 0:
+        c_hits_view_df = c_hits_df.copy()
+        c_hits_view_df['timestamp'] = pd.to_datetime(c_hits_view_df['timestamp'], errors='coerce')
+        if getattr(c_hits_view_df['timestamp'].dt, 'tz', None) is not None:
+            c_hits_view_df['timestamp'] = c_hits_view_df['timestamp'].dt.tz_localize(None)
+        c_hits_view_df = c_hits_view_df.dropna(subset=['timestamp'])
+        c_hits_view_df = c_hits_view_df[c_hits_view_df['timestamp'] <= current_ts_naive].copy()
+        entry_c_hits_count = int(len(c_hits_view_df))
+
+        if not c_hits_view_df.empty:
+            c_hit_ts = set(c_hits_view_df['timestamp'].tolist())
+            x_vals = history_view_df['timestamp'].tolist()
+            y_base = history_view_df['close'].tolist()
+            y_overlay = [
+                y_base[idx] if x_vals[idx] in c_hit_ts else None
+                for idx in range(len(x_vals))
+            ]
+
+            ax.plot(
+                x_vals,
+                y_overlay,
                 color='gold',
-                edgecolors='black',
-                marker='*',
-                s=170,
-                label='enter_long_C',
-                zorder=4,
+                linestyle='--',
+                linewidth=2.0,
+                marker='o',
+                markersize=4,
+                alpha=0.95,
+                label='enter_long_C hits',
+                zorder=10,
             )
 
-    ax.set_title(f'Backtest progress to {current_ts} | retrain={retrain_hours}h')
+    # ─── Оформление ──────────────────────────────────────────────────────────────
+    ax.set_title(f'Backtest progress to {current_ts_naive} | retrain every {retrain_hours}h')
     ax.set_xlabel('timestamp')
     ax.set_ylabel('price')
-    ax.grid(True, alpha=0.25)
-    ax.legend(loc='upper left')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.legend(loc='upper left', fontsize=9)
 
-    ax.text(
-        0.01,
-        0.02,
-        (
-            f'open_long={open_long_count} | close_long={close_long_count} | '
-            f'enter_long_C={open_long_c_count}'
-        ),
-        transform=ax.transAxes,
-        fontsize=9,
-        color='black',
-        bbox={'facecolor': 'white', 'alpha': 0.75, 'edgecolor': 'lightgray', 'boxstyle': 'round,pad=0.25'},
+    stats_text = (
+        f'open_long = {open_long_count}  |  '
+        f'close_long = {close_long_count}  |  '
+        f'open_long_C = {open_long_c_count}  |  '
+        f'entry_c_hits = {entry_c_hits_count}'
     )
 
-    x_min = pd.Timestamp(history_view_df['timestamp'].iloc[0])
-    x_max = pd.Timestamp(history_view_df['timestamp'].iloc[-1])
-    if x_min < x_max:
+    ax.text(
+        0.015, 0.035,
+        stats_text,
+        transform=ax.transAxes,
+        fontsize=9.5,
+        color='black',
+        bbox=dict(facecolor='white', alpha=0.82, edgecolor='gray', boxstyle='round,pad=0.35')
+    )
+
+    x_min = history_view_df['timestamp'].min()
+    x_max = history_view_df['timestamp'].max()
+    if pd.notna(x_min) and pd.notna(x_max) and x_min < x_max:
         ax.set_xlim(x_min, x_max)
 
     fig.autofmt_xdate()
@@ -804,6 +848,7 @@ def plot_progress_chart(
         display_fn(fig)
     else:
         plt.show()
+    
     plt.close(fig)
 
 
@@ -873,10 +918,11 @@ def run_backtest_scenario(
         'entry_c_hits': 0,
     }
     bt_trades: list[dict[str, Any]] = []
+    bt_c_hits: list[dict[str, Any]] = []
     bt_active_model: dict[str, Any] | None = None
     total_steps = len(range(start_idx, end_idx + 1, config.step_minutes))
     processed_steps = 0
-    last_report_day = None
+    report_every_steps = 500
 
     print(
         f'Scenario start | mode=long_only | capital={config.initial_capital:.2f} | '
@@ -932,6 +978,12 @@ def run_backtest_scenario(
         bt_state['entry_c_checks'] = int(bt_state['entry_c_checks']) + 1
         if bool(trade_signal.get('entry_c_trigger', False)):
             bt_state['entry_c_hits'] = int(bt_state['entry_c_hits']) + 1
+            bt_c_hits.append(
+                {
+                    'timestamp': current_ts,
+                    'price': current_price,
+                }
+            )
 
         position = bt_state['position']
         close_reason = None
@@ -1029,16 +1081,14 @@ def run_backtest_scenario(
                 )
 
         processed_steps += 1
-        current_day = current_ts.normalize()
         invested_cash_now = float(bt_state['position']['invested_cash_gross']) if bt_state['position'] is not None else 0.0
         current_pnl_now = float(position_unrealized_pnl(bt_state['position'], current_price, config)) if bt_state['position'] is not None else 0.0
         grid_pnl_now = float(bt_state['realized_pnl'] + current_pnl_now)
         equity_now = float(bt_state['free_cash'] + invested_cash_now + current_pnl_now)
 
-        if last_report_day is None or current_day > last_report_day:
-            last_report_day = current_day
+        if (processed_steps % report_every_steps == 0) or (processed_steps == total_steps):
             print(
-                f'Progress | date={current_day.date()} | '
+            f'Progress | date={current_ts.date()} | '
                 f'step={processed_steps}/{total_steps} | trade_actions={len(bt_trades)} | '
                 f'entry_c_hits={int(bt_state["entry_c_hits"])}/{int(bt_state["entry_c_checks"])} | '
                 f'free_cash={bt_state["free_cash"]:.2f} | invested_cash={invested_cash_now:.2f} | '
@@ -1047,6 +1097,7 @@ def run_backtest_scenario(
             plot_progress_chart(
                 history_slice_df=history_df.iloc[start_idx:idx + 1][['timestamp', 'close']].copy(),
                 trades_df=pd.DataFrame(bt_trades),
+                c_hits_df=pd.DataFrame(bt_c_hits),
                 current_ts=current_ts,
                 retrain_hours=int(retrain_hours),
                 display_fn=display_fn,
