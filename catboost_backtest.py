@@ -231,7 +231,7 @@ def forecast_catboost_path(model_obj: dict[str, Any], history_series: pd.Series,
     recent_log = np.log(np.clip(history_arr[-recent_span:], 1e-8, None))
     recent_ret = np.diff(recent_log)
     recent_ret_std = float(np.nanstd(recent_ret)) if len(recent_ret) > 0 else 0.0
-    adaptive_ret_clip = float(np.clip(6.0 * recent_ret_std, 0.0025, 0.03))
+    adaptive_ret_clip = float(max(6.0 * recent_ret_std, 0.012))  # min ±1.2% per step
 
     for step_idx in range(int(horizon)):
         if len(history_ret_norm) >= context:
@@ -1544,13 +1544,9 @@ def run_backtest_block(
 
     if len(backtest_daily_activity_df) > 0:
         no_trade_days_df = backtest_daily_activity_df.loc[backtest_daily_activity_df['trade_actions'] == 0].reset_index(drop=True)
-        if len(no_trade_days_df) > 0:
-            print('\nДни без торгов:')
-            if display_fn is not None:
-                display_fn(no_trade_days_df)
-            else:
-                print(no_trade_days_df)
-        else:
+        # NOTE: we avoid printing the list of days without trades by default to reduce notebook output.
+        # If you want to inspect them, check the `no_trade_days_df` DataFrame.
+        if len(no_trade_days_df) == 0:
             print('\nВ каждом дне тестового диапазона были торговые действия.')
 
     if len(backtest_trades_view_df) == 0:

@@ -1,9 +1,82 @@
 from __future__ import annotations
 
+import hashlib
+import os
+def fit_catboost_minmax_window_model(
+    train: pd.Series,
+    window: int = 360,
+    context_len: int = 120,
+    depth: int = 8,
+    learning_rate: float = 0.05,
+    iterations: int = 400,
+    l2_leaf_reg: float = 3.0,
+    use_cuda: bool = True,
+) -> dict:
+    """Trains two CatBoost models to predict min and max price in a rolling window."""
+    arr = pd.to_numeric(train, errors="coerce").dropna().astype(float).values
+    min_targets = []
+    max_targets = []
+    x_rows = []
+    for t in range(context_len, len(arr) - window + 1):
+        x_rows.append(arr[t - context_len:t])
+        window_slice = arr[t:t + window]
+        min_targets.append(np.min(window_slice))
+        max_targets.append(np.max(window_slice))
+    if len(x_rows) < 16:
+        raise RuntimeError("Not enough samples for minmax window model")
+    x_np = np.asarray(x_rows, dtype=np.float32)
+    min_targets = np.asarray(min_targets, dtype=np.float32)
+    max_targets = np.asarray(max_targets, dtype=np.float32)
+    min_model = _make_catboost_regressor(
+        depth=depth, learning_rate=learning_rate, iterations=iterations, l2_leaf_reg=l2_leaf_reg, use_cuda=use_cuda
+    )
+    max_model = _make_catboost_regressor(
+        depth=depth, learning_rate=learning_rate, iterations=iterations, l2_leaf_reg=l2_leaf_reg, use_cuda=use_cuda
+    )
+    min_model.fit(x_np, min_targets)
+    max_model.fit(x_np, max_targets)
+    return {
+        "model_type": "catboost_minmax_window",
+        "context": context_len,
+        "window": window,
+        "min_model": min_model,
+        "max_model": max_model,
+        "train_last": float(arr[-1]),
+        "use_cuda": bool(use_cuda) and torch.cuda.is_available(),
+    }
+
+def predict_catboost_minmax_window_path(
+    model_obj: dict,
+    history_series: pd.Series,
+    window: int = 360
+) -> pd.DataFrame:
+    """Predicts min/max window for each minute using trained CatBoost models."""
+    arr = pd.to_numeric(history_series, errors="coerce").dropna().astype(float).values
+    context = int(model_obj["context"])
+    min_model = model_obj["min_model"]
+    max_model = model_obj["max_model"]
+    preds_min = []
+    preds_max = []
+    idxs = []
+    for t in range(context, len(arr)):
+        x = arr[t - context:t].reshape(1, -1)
+        pred_min = float(min_model.predict(x)[0])
+        pred_max = float(max_model.predict(x)[0])
+        preds_min.append(pred_min)
+        preds_max.append(pred_max)
+        idxs.append(t)
+    df = pd.DataFrame({
+        "minute": idxs,
+        "pred_min": preds_min,
+        "pred_max": preds_max
+    })
+    return df
+import json
+import os
+from pathlib import Path
 import time
 from contextlib import contextmanager
 from typing import Any, Dict, Tuple
-
 import numpy as np
 import pandas as pd
 import torch
@@ -33,6 +106,107 @@ except Exception:
 
 
 _PROGRESS_HOOK = None
+_SCORE_CACHE_STATS = {"hits": 0, "misses": 0, "errors": 0}
+
+
+def _reset_score_cache_stats():
+    _SCORE_CACHE_STATS["hits"] = 0
+    _SCORE_CACHE_STATS["misses"] = 0
+    _SCORE_CACHE_STATS["errors"] = 0
+
+
+def _record_score_cache_hit():
+    _SCORE_CACHE_STATS["hits"] += 1
+
+
+def _record_score_cache_miss():
+    _SCORE_CACHE_STATS["misses"] += 1
+
+
+def _record_score_cache_error():
+    _SCORE_CACHE_STATS["errors"] += 1
+
+
+def _score_cache_stats_snapshot() -> dict[str, int]:
+    return {
+        "hits": int(_SCORE_CACHE_STATS["hits"]),
+        "misses": int(_SCORE_CACHE_STATS["misses"]),
+        "errors": int(_SCORE_CACHE_STATS["errors"]),
+    }
+
+
+def _series_size_signature(values: np.ndarray) -> int:
+    arr = np.asarray(values)
+    return int(arr.size)
+
+
+def _score_cache_key(
+    train_values: np.ndarray,
+    test_values: np.ndarray,
+    *,
+    context_len: int,
+    depth: int,
+    learning_rate: float,
+    iterations: int,
+    l2_leaf_reg: float,
+    use_cuda: bool,
+    score_metric: str,
+    time_weight: float,
+    resource_points: int,
+) -> str:
+    payload = {
+        "schema": "catboost_halving_score_cache_v1",
+        "train_size": _series_size_signature(train_values),
+        "test_size": _series_size_signature(test_values),
+        "params": {
+            "context_len": int(context_len),
+            "depth": int(depth),
+            "learning_rate": float(learning_rate),
+            "iterations": int(iterations),
+            "l2_leaf_reg": float(l2_leaf_reg),
+            "use_cuda": bool(use_cuda),
+            "score_metric": str(score_metric),
+            "time_weight": float(time_weight),
+            "resource_points": int(resource_points),
+        },
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _score_cache_load(cache_dir: Path, key: str) -> float | None:
+    cache_path = cache_dir / f"{key}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        score = payload.get("score")
+        if score is None:
+            return None
+        return float(score)
+    except Exception:
+        _record_score_cache_error()
+        return None
+
+
+def _score_cache_save(cache_dir: Path, key: str, score: float) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{key}.json"
+    tmp_path = cache_dir / f"{key}.{os.getpid()}.tmp"
+    payload = {
+        "schema": "catboost_halving_score_cache_v1",
+        "saved_at_utc": pd.Timestamp.now(tz="UTC").isoformat(),
+        "score": float(score),
+    }
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(cache_path)
+    except Exception:
+        _record_score_cache_error()
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
 
 
 def _progress_step(step: int = 1):
@@ -257,7 +431,11 @@ def _make_catboost_regressor(
     if CatBoostRegressor is None:
         raise RuntimeError("CatBoost недоступен: установи пакет catboost")
 
-    cuda_exist = bool(use_cuda) and torch.cuda.is_available()
+    # Принудительный GPU через переменную окружения (даёт возможность обходить отсутствие torch-cuda).
+    force_gpu = os.getenv("CATBOOST_FORCE_GPU", "0").lower() in ("1", "true", "yes")
+    cuda_exist = bool(use_cuda) or force_gpu
+
+    cpu_threads = max(1, int((os.cpu_count() or 4) - 1))
     params = {
         "depth": int(depth),
         "learning_rate": float(learning_rate),
@@ -269,11 +447,19 @@ def _make_catboost_regressor(
         "allow_writing_files": False,
         "verbose": False,
     }
+
     if cuda_exist:
         params["task_type"] = "GPU"
         params["devices"] = "0"
+        # Limit VRAM usage to improve notebook kernel stability on long sessions.
+        params["gpu_ram_part"] = float(max(0.05, min(0.90, float(os.getenv("CATBOOST_GPU_RAM_PART", "0.28")))))
+        params["thread_count"] = 1
+        print("CatBoost: using GPU (task_type=GPU)")
     else:
         params["task_type"] = "CPU"
+        params["thread_count"] = int(cpu_threads)
+        print("CatBoost: using CPU (task_type=CPU)")
+
     return CatBoostRegressor(**params)
 
 
@@ -572,6 +758,8 @@ class _CatBoostGridSearchEstimator(BaseEstimator):
         score_metric: str = "MAE",
         time_weight: float = 0.10,
         resource_points: int = 160,
+        cache_enabled: bool = True,
+        cache_dir: str | None = None,
     ):
         self.context_len = context_len
         self.depth = depth
@@ -582,6 +770,8 @@ class _CatBoostGridSearchEstimator(BaseEstimator):
         self.score_metric = score_metric
         self.time_weight = time_weight
         self.resource_points = resource_points
+        self.cache_enabled = cache_enabled
+        self.cache_dir = cache_dir
 
     def fit(self, X, y):
         self._train_series_ = pd.Series(np.asarray(y, dtype=float))
@@ -598,6 +788,30 @@ class _CatBoostGridSearchEstimator(BaseEstimator):
 
         train_series = _slice_train_for_resource(self._train_series_, self.resource_points, min_points=80)
         test_series = pd.Series(np.asarray(y, dtype=float))
+
+        cache_score: float | None = None
+        cache_key: str | None = None
+        cache_root = Path(self.cache_dir) if self.cache_dir else Path("data/outputs/.catboost_halving_score_cache")
+        if bool(self.cache_enabled):
+            cache_key = _score_cache_key(
+                train_series.to_numpy(dtype=float),
+                test_series.to_numpy(dtype=float),
+                context_len=int(self.context_len),
+                depth=int(self.depth),
+                learning_rate=float(self.learning_rate),
+                iterations=int(self.iterations),
+                l2_leaf_reg=float(self.l2_leaf_reg),
+                use_cuda=bool(self.use_cuda),
+                score_metric=str(self.score_metric),
+                time_weight=float(self.time_weight),
+                resource_points=int(self.resource_points),
+            )
+            cache_score = _score_cache_load(cache_root, cache_key)
+            if cache_score is not None:
+                _record_score_cache_hit()
+                return float(cache_score)
+
+        _record_score_cache_miss()
         t0 = time.perf_counter()
         metric_values, _ = run_catboost(
             train=train_series,
@@ -615,8 +829,14 @@ class _CatBoostGridSearchEstimator(BaseEstimator):
             mae = float(metric_values["MAE"])
             elapsed_per_point = elapsed_sec / max(1, len(test_series))
             composite = mae * (1.0 + float(self.time_weight) * np.log1p(max(0.0, elapsed_per_point)))
-            return -float(composite)
-        return -float(metric_values[self.score_metric])
+            score_value = -float(composite)
+        else:
+            score_value = -float(metric_values[self.score_metric])
+
+        if bool(self.cache_enabled) and cache_key is not None:
+            _score_cache_save(cache_root, cache_key, float(score_value))
+
+        return float(score_value)
 
 
 def _split_series_for_gridsearch(full_series: pd.Series, test_ratio: float, min_train: int = 80, min_test: int = 24):
@@ -647,6 +867,8 @@ def run_catboost_gridsearchcv_native_pipeline(
     halving_factor: int = 3,
     aggressive_elimination: bool = True,
     time_weight: float = 0.10,
+    score_cache_enabled: bool = True,
+    score_cache_dir: str | None = None,
 ):
     if not _SKLEARN_AVAILABLE:
         raise RuntimeError("Для native HalvingGridSearchCV нужен scikit-learn (pip install scikit-learn)")
@@ -687,7 +909,13 @@ def run_catboost_gridsearchcv_native_pipeline(
     max_resources = max(min_resources, min(int(len(train)), requested_max_resources))
 
     factor = max(2, int(halving_factor))
-    estimator = _CatBoostGridSearchEstimator(use_cuda=bool(use_cuda), score_metric=scoring, time_weight=float(time_weight))
+    estimator = _CatBoostGridSearchEstimator(
+        use_cuda=bool(use_cuda),
+        score_metric=scoring,
+        time_weight=float(time_weight),
+        cache_enabled=bool(score_cache_enabled),
+        cache_dir=score_cache_dir,
+    )
 
     grid = _make_halving_search(
         estimator=estimator,
@@ -704,9 +932,16 @@ def run_catboost_gridsearchcv_native_pipeline(
         "CatBoost HalvingGridSearchCV: "
         f"train_points={len(train)} | test_points={len(test)} | n_splits={ts_splits} | "
         f"min_resources={min_resources} | max_resources={max_resources} | factor={factor} | "
-        f"aggressive_elimination={bool(aggressive_elimination)} | scoring={scoring}"
+        f"aggressive_elimination={bool(aggressive_elimination)} | scoring={scoring} | "
+        f"score_cache_enabled={bool(score_cache_enabled)}"
     )
+    _reset_score_cache_stats()
     _fit_grid_with_progress(grid, x_train, y_train, param_grid, ts_splits, "CATBOOST")
+    cache_stats = _score_cache_stats_snapshot()
+    print(
+        "CatBoost HalvingGridSearchCV cache: "
+        f"hits={cache_stats['hits']} | misses={cache_stats['misses']} | errors={cache_stats['errors']}"
+    )
 
     cv_results_df = pd.DataFrame(grid.cv_results_)
     cv_results_df["score"] = -cv_results_df["mean_test_score"]
