@@ -79,6 +79,14 @@ DIRECT_CATBOOST_PARAMS = {
 # Default set to 0.0005 (0.05%). Tune if needed.
 DIRECTION_DEADBAND = 0.0005
 
+# Confidence threshold for discrete direction predictions from the classifier.
+# If the classifier's max class probability < this threshold, the direction is treated as neutral.
+DIRECTION_PRED_THRESHOLD = 0.6
+
+# When anomalies are detected, shrink predicted movement magnitudes by this factor proportional
+# to the anomaly score (e.g. 0.5 reduces magnitude up to ~50% when anomaly_score=1.0).
+ANOMALY_MAGNITUDE_SHRINK = 0.5
+
 RANGE_LOW_CATBOOST_PARAMS = {
     "iterations": 500,
     "learning_rate": 0.05,

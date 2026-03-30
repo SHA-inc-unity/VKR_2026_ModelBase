@@ -224,14 +224,16 @@ def _calibrate_range_model(range_model, direct_model, X_range_val_full: pd.DataF
     best = None
     best_width = np.inf
     target_normal_coverage = 0.9
-    scale_grid = [0.15, 0.2, 0.25, 0.33, 0.5, 0.75, 1.0]
+    # allow tighter scaling factors so we can seek narrower bands
+    scale_grid = [0.05, 0.1, 0.15, 0.2, 0.25, 0.33, 0.5]
 
     for center_mode, center in [("direct_center", direct_center), ("model_center", model_center)]:
         base_half = np.maximum(model_half, np.abs(model_center - center))
         for scale in scale_grid:
             scaled_half = base_half * scale
             residual = np.maximum(np.abs(actual - center) - scaled_half, 0.0)
-            margin_normal = float(residual[normal_mask].max()) if normal_mask.any() else 0.0
+            # Use a high quantile for margins instead of the absolute max to avoid single-outlier blowups
+            margin_normal = float(np.quantile(residual[normal_mask], target_normal_coverage)) if normal_mask.any() else 0.0
             margin_anomaly = float(np.quantile(residual[anomaly_mask], 0.98)) if anomaly_mask.any() else margin_normal
             final_half = scaled_half.copy()
             final_half[normal_mask] += margin_normal

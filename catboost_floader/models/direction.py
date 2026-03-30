@@ -85,6 +85,17 @@ class DirectionModel:
             if sw_mean > 0:
                 sample_weight = sample_weight / sw_mean
 
+            # Also supply class_weights to CatBoost to help with multiclass imbalance.
+            # Normalize class weights to mean ~1.0 to avoid scaling issues inside the estimator.
+            class_weights = inv.copy()
+            cw_mean = float(class_weights[class_weights > 0].mean()) if (class_weights > 0).any() else 1.0
+            if cw_mean > 0:
+                class_weights = [float(w / cw_mean) if w > 0 else 0.0 for w in class_weights]
+            else:
+                class_weights = [1.0, 1.0, 1.0]
+            # attach to params used for model construction
+            params["class_weights"] = class_weights
+
         self.model.fit(X_num, y_labels, verbose=False, sample_weight=sample_weight)
         # Training diagnostics: distribution of true vs mapped labels and simple train performance
         try:

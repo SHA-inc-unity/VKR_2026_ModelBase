@@ -6,7 +6,14 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from catboost_floader.core.config import DIRECT_CATBOOST_PARAMS, MODEL_DIR, MAGNITUDE_CALIBRATION, DIRECTION_DEADBAND
+from catboost_floader.core.config import (
+    DIRECT_CATBOOST_PARAMS,
+    MODEL_DIR,
+    MAGNITUDE_CALIBRATION,
+    DIRECTION_DEADBAND,
+    DIRECTION_PRED_THRESHOLD,
+    ANOMALY_MAGNITUDE_SHRINK,
+)
 from catboost_floader.core.utils import ensure_dirs, get_logger, load_json, save_json
 from catboost_floader.models.direction import DirectionModel
 from catboost_floader.models.movement import MovementModel
@@ -96,7 +103,28 @@ class DirectModel:
         if getattr(self.direction_model, "is_degenerate", False):
             sign = self._fallback_direction_sign(X_orig)
         else:
-            sign = self.direction_model.predict_sign_expectation(X_orig)
+            # Use classifier discrete labels with a confidence threshold to improve sign stability.
+            try:
+                probs = self.direction_model.predict_proba(X_orig)
+                max_p = np.nanmax(probs, axis=1)
+                lbls = self.direction_model.predict_label(X_orig)
+                # if classifier is not confident, treat as neutral
+                thresh = float(DIRECTION_PRED_THRESHOLD)
+                sign = np.where(max_p >= thresh, lbls, 0)
+            except Exception:
+                # fallback to expectation when probabilities unavailable
+                sign = self.direction_model.predict_sign_expectation(X_orig)
+
+        # Shrink magnitude when anomaly score is high to reduce overconfident predictions in shocks
+        try:
+            anomaly_score = pd.to_numeric(X_orig.get("anomaly_score", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            shrink = float(ANOMALY_MAGNITUDE_SHRINK)
+            scale = 1.0 - shrink * np.clip(anomaly_score, 0.0, 1.0)
+            # keep a small lower bound to avoid zeroing predictions
+            scale = np.maximum(scale, 0.2)
+            mag = mag * scale
+        except Exception:
+            pass
         raw = np.asarray(sign * mag, dtype=float)
         # Apply optional global calibration for magnitude (quick experimental knob)
         try:

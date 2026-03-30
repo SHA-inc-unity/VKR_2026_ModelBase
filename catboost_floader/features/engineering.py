@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from catboost_floader.core.utils import get_logger
+from catboost_floader.features.structured import add_structured_features
 
 logger = get_logger("feature_engineering")
 
@@ -145,6 +146,8 @@ def _finalize_features(out: pd.DataFrame, name: str) -> pd.DataFrame:
 
 def build_direct_features(df: pd.DataFrame) -> pd.DataFrame:
     common = _common_feature_frame(df)
+    # add advanced structured features (multi-horizon returns, extrema proximity, interactions)
+    common = add_structured_features(common)
     preferred = [
         "timestamp", "close", "return_1", "log_return_1", "co_spread", "hl_spread",
         "body_size", "upper_wick", "lower_wick", "pct_change_3", "pct_change_6",
@@ -153,6 +156,10 @@ def build_direct_features(df: pd.DataFrame) -> pd.DataFrame:
         "top_spread", "spread_zscore", "top_imbalance", "imbalance_delta_1", "imbalance_delta_5",
         "depth_imbalance", "microprice", "mark_close_div", "index_close_div", "premium_vs_close",
         "oi_delta_3", "oi_delta_12", "oi_pct_change_12", "funding_rate", "funding_rate_change",
+        # Structured features
+        "return_5", "return_15", "return_30", "return_60", "accel_5_15", "accel_15_30",
+        "dist_to_roll_max_12", "dist_to_roll_min_12", "bars_since_max_12", "breakout_dist_12",
+        "wick_to_body", "body_to_range", "r5_x_vol6", "vol_expansion_3_36",
     ]
     existing = [c for c in preferred if c in common.columns]
     return _finalize_features(common[existing].copy(), "direct")
@@ -160,6 +167,8 @@ def build_direct_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_range_features(df: pd.DataFrame) -> pd.DataFrame:
     common = _common_feature_frame(df)
+    # augment with structured features for range modelling
+    common = add_structured_features(common)
     preferred = [
         "timestamp", "close", "log_return_1", "hl_spread", "body_size", "volatility_3", "volatility_6",
         "volatility_12", "volatility_24", "volatility_36", "roll_std_6", "roll_std_12", "roll_std_24",
@@ -167,6 +176,8 @@ def build_range_features(df: pd.DataFrame) -> pd.DataFrame:
         "range_ratio_6_36", "vol_ratio_3_36", "vol_ratio_6_36", "top_spread", "spread_zscore",
         "top_imbalance", "depth_imbalance", "mark_close_div", "index_close_div", "premium_vs_close",
         "oi_delta_3", "oi_delta_12", "oi_pct_change_12", "funding_rate_change",
+        # Structured range features
+        "dist_to_roll_max_36", "dist_to_roll_min_36", "breakout_dist_36", "vol_expansion_3_36",
     ]
     existing = [c for c in preferred if c in common.columns]
     return _finalize_features(common[existing].copy(), "range")
