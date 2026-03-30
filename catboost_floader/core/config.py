@@ -114,6 +114,12 @@ PARALLEL_EVAL_WORKERS = max(1, min(4, CPU_LOGICAL_THREADS))
 PARALLEL_BACKTEST_WORKERS = max(1, min(8, CPU_LOGICAL_THREADS))
 PARALLEL_MULTI_MODEL_WORKERS = max(1, min(8, CPU_LOGICAL_THREADS))
 CATBOOST_THREADS_PER_WORKER = CPU_LOGICAL_THREADS
+STAGE2_PARALLEL_MODE = "adaptive_cpu"
+STAGE2_PARALLEL_GRANULARITY = "adaptive"
+STAGE2_ENABLE_NESTED_PARALLEL = True
+STAGE2_TARGET_CPU_THREADS = max(1, min(32, CPU_LOGICAL_THREADS))
+STAGE2_OUTER_WORKERS = 0
+STAGE2_INNER_THREADS = 0
 CPU_WORKER_THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -211,6 +217,73 @@ def resolve_parallel_cpu_settings(total_tasks: int, configured_workers: int) -> 
     workers = max(1, min(tasks, int(configured_workers or 1), CPU_LOGICAL_THREADS))
     threads = max(1, min(CATBOOST_THREADS_PER_WORKER, max(1, CPU_LOGICAL_THREADS // workers)))
     return workers, threads
+
+
+def resolve_stage2_parallel_policy(candidate_count: int, fold_count: int, *, nested_outer_parallel: bool = False) -> dict:
+    candidates = max(1, int(candidate_count or 1))
+    folds = max(1, int(fold_count or 1))
+    target_threads = max(1, min(STAGE2_TARGET_CPU_THREADS, CPU_LOGICAL_THREADS))
+    configured_outer = max(1, int(STAGE2_OUTER_WORKERS or target_threads))
+    configured_inner = int(STAGE2_INNER_THREADS or 0)
+    requested_mode = str(STAGE2_PARALLEL_MODE or "adaptive_cpu").lower()
+    requested_granularity = str(STAGE2_PARALLEL_GRANULARITY or "adaptive").lower()
+    nested_enabled = bool(STAGE2_ENABLE_NESTED_PARALLEL and not nested_outer_parallel)
+
+    if requested_mode not in {"adaptive_cpu", "candidate_cpu", "candidate_fold_cpu", "sequential_cpu"}:
+        requested_mode = "adaptive_cpu"
+
+    if requested_granularity not in {"adaptive", "candidate", "model", "candidate_fold", "fold"}:
+        requested_granularity = "adaptive"
+
+    granularity = requested_granularity
+    if requested_mode == "candidate_cpu":
+        granularity = "candidate"
+    elif requested_mode == "candidate_fold_cpu":
+        granularity = "candidate_fold"
+    if granularity == "adaptive":
+        granularity = "candidate_fold" if nested_enabled and folds > 1 and candidates < min(configured_outer, target_threads) else "candidate"
+    if granularity == "model":
+        granularity = "candidate"
+    if granularity == "fold":
+        granularity = "candidate_fold"
+
+    parallel_requested = ENABLE_PARALLEL_CPU_FULL_EVALUATION and requested_mode != "sequential_cpu"
+
+    if not parallel_requested or not nested_enabled:
+        outer_workers = 1
+        inner_threads = max(1, configured_inner or target_threads)
+        if nested_outer_parallel:
+            inner_threads = max(1, min(inner_threads, target_threads))
+        parallel_units = candidates
+        mode = "sequential_cpu" if not parallel_requested else "nested_sequential_cpu"
+        granularity = "candidate"
+    else:
+        parallel_units = candidates * folds if granularity == "candidate_fold" else candidates
+        outer_workers = max(1, min(parallel_units, configured_outer, target_threads))
+        if configured_inner > 0:
+            inner_threads = max(1, configured_inner)
+        else:
+            inner_threads = max(1, target_threads // outer_workers)
+        while outer_workers * inner_threads > target_threads and inner_threads > 1:
+            inner_threads -= 1
+        mode = requested_mode
+
+    estimated_threads = max(1, outer_workers * inner_threads)
+    parallel_enabled = bool(parallel_requested and outer_workers > 1 and parallel_units > 1 and nested_enabled)
+
+    return {
+        "mode": mode if parallel_enabled else "sequential_cpu",
+        "parallel_enabled": parallel_enabled,
+        "granularity": granularity,
+        "nested_enabled": nested_enabled and parallel_enabled,
+        "outer_workers": outer_workers if parallel_enabled else 1,
+        "inner_threads": inner_threads,
+        "target_threads": target_threads,
+        "candidate_count": candidates,
+        "fold_count": folds,
+        "parallel_units": parallel_units,
+        "estimated_cpu_budget": estimated_threads if parallel_enabled else inner_threads,
+    }
 
 
 def apply_cpu_worker_limits(thread_count: int, *, mark_outer_parallel: bool = False) -> int:
