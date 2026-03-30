@@ -23,13 +23,44 @@ from catboost_floader.models.movement import MovementModel
 logger = get_logger("model_direct")
 
 
+def _resolve_profile_settings(profile_name: Optional[str], seen: Optional[set[str]] = None) -> Dict[str, Any]:
+    if not profile_name or profile_name == "default":
+        return {}
+    if seen is None:
+        seen = set()
+    if profile_name in seen:
+        logger.warning("Detected recursive direct composition profile inheritance for %s", profile_name)
+        return {}
+    seen.add(profile_name)
+    profile_cfg = dict(DIRECT_COMPOSITION_PROFILES.get(profile_name, {}) or {})
+    parent_name = profile_cfg.pop("inherits", None)
+    resolved = _resolve_profile_settings(parent_name, seen)
+    resolved.update(profile_cfg)
+    return resolved
+
+
 def _resolve_composition_config(profile_name: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = dict(DIRECT_COMPOSITION_DEFAULTS)
-    if profile_name:
-        cfg.update(DIRECT_COMPOSITION_PROFILES.get(profile_name, {}))
+    cfg.update(_resolve_profile_settings(profile_name))
     if overrides:
         cfg.update(overrides)
     return cfg
+
+
+def _weighted_direction_mix(
+    label_signal: np.ndarray,
+    expectation_signal: np.ndarray,
+    *,
+    label_weight: float,
+    expectation_weight: float,
+) -> np.ndarray:
+    label_arr = np.asarray(label_signal, dtype=float)
+    expectation_arr = np.asarray(expectation_signal, dtype=float)
+    total_weight = abs(label_weight) + abs(expectation_weight)
+    if total_weight <= 0:
+        return expectation_arr.copy()
+    mixed = (label_weight * label_arr + expectation_weight * expectation_arr) / total_weight
+    return np.clip(np.asarray(mixed, dtype=float), -1.0, 1.0)
 
 
 class DirectModel:
@@ -59,6 +90,7 @@ class DirectModel:
         self.strategy: Dict[str, Any] = strategy or {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
         self.composition_profile = composition_profile
         self.composition_config: Dict[str, Any] = _resolve_composition_config(composition_profile, composition_config)
+        self._magnitude_calibration = float(MAGNITUDE_CALIBRATION)
         # backward-compatible single-model reference (uses movement model for feature importance)
         self.model = getattr(self.movement_model, "model", None)
 
@@ -84,6 +116,25 @@ class DirectModel:
         if baseline_col is None or baseline_col not in baselines.columns:
             return np.zeros(len(X), dtype=float)
         return pd.to_numeric(baselines[baseline_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+    def _compose_sign_mode(self, mode: str, label_signal: np.ndarray, expectation_signal: np.ndarray, *, prefix: str) -> np.ndarray:
+        mode_name = str(mode or "").lower()
+        label_arr = np.clip(np.asarray(label_signal, dtype=float), -1.0, 1.0)
+        expectation_arr = np.clip(np.asarray(expectation_signal, dtype=float), -1.0, 1.0)
+        if mode_name == "neutral":
+            return np.zeros_like(expectation_arr, dtype=float)
+        if mode_name == "expectation":
+            return expectation_arr
+        if mode_name == "blend":
+            label_weight = float(self.composition_config.get(f"{prefix}_label_weight", 0.0))
+            expectation_weight = float(self.composition_config.get(f"{prefix}_expectation_weight", 1.0))
+            return _weighted_direction_mix(
+                label_arr,
+                expectation_arr,
+                label_weight=label_weight,
+                expectation_weight=expectation_weight,
+            )
+        return label_arr
 
     def _apply_strategy(self, raw_pred: np.ndarray, X_original: pd.DataFrame) -> np.ndarray:
         raw_pred = np.asarray(raw_pred, dtype=float)
@@ -125,6 +176,25 @@ class DirectModel:
             out[np.abs(out) < deadband] = 0.0
         return out
 
+    def _scale_movement_magnitude(self, X: pd.DataFrame, movement_magnitude: np.ndarray) -> np.ndarray:
+        adjusted = np.asarray(movement_magnitude, dtype=float).copy()
+        anomaly_floor = float(self.composition_config.get("anomaly_magnitude_floor", 0.2))
+        try:
+            anomaly_score = pd.to_numeric(X.get("anomaly_score", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            shrink = float(ANOMALY_MAGNITUDE_SHRINK)
+            scale = 1.0 - shrink * np.clip(anomaly_score, 0.0, 1.0)
+            scale = np.maximum(scale, anomaly_floor)
+            adjusted = adjusted * scale
+        except Exception:
+            pass
+
+        movement_scale = float(self.composition_config.get("movement_scale", 1.0))
+        calib = float(getattr(self, "_magnitude_calibration", MAGNITUDE_CALIBRATION))
+        total_scale = movement_scale * calib
+        if total_scale != 1.0:
+            adjusted = adjusted * total_scale
+        return adjusted
+
     def _compose_direction_signal(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
         if getattr(self.direction_model, "is_degenerate", False):
             fallback = self._fallback_direction_sign(X)
@@ -139,15 +209,18 @@ class DirectModel:
         try:
             components = self.direction_model.predict_components(X)
             probs = np.asarray(components["probs"], dtype=float)
-            max_p = np.nanmax(probs, axis=1)
+            if probs.ndim == 2 and probs.shape[1] > 0:
+                max_p = np.nanmax(probs, axis=1)
+            else:
+                max_p = np.full(len(X), np.nan, dtype=float)
             labels = np.asarray(components["label"], dtype=float)
             expectation = self._expectation_sign(components["expectation"])
             threshold = float(self.composition_config.get("label_confidence_threshold", 0.0))
+            high_conf_mode = str(self.composition_config.get("high_confidence_sign_mode", "label"))
             low_conf_mode = str(self.composition_config.get("low_confidence_sign_mode", "neutral"))
-            if low_conf_mode == "expectation":
-                sign = np.where(max_p >= threshold, labels, expectation)
-            else:
-                sign = np.where(max_p >= threshold, labels, 0.0)
+            high_conf_sign = self._compose_sign_mode(high_conf_mode, labels, expectation, prefix="high_confidence")
+            low_conf_sign = self._compose_sign_mode(low_conf_mode, labels, expectation, prefix="low_confidence")
+            sign = np.where(max_p >= threshold, high_conf_sign, low_conf_sign)
             return {
                 "sign": np.clip(np.asarray(sign, dtype=float), -1.0, 1.0),
                 "label": np.asarray(components["label"], dtype=int),
@@ -169,28 +242,14 @@ class DirectModel:
         movement_magnitude = np.asarray(self.movement_model.predict(X_orig), dtype=float)
         direction = self._compose_direction_signal(X_orig)
         sign = np.asarray(direction["sign"], dtype=float)
-
-        adjusted_magnitude = movement_magnitude.copy()
-        try:
-            anomaly_score = pd.to_numeric(X_orig.get("anomaly_score", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float)
-            shrink = float(ANOMALY_MAGNITUDE_SHRINK)
-            scale = 1.0 - shrink * np.clip(anomaly_score, 0.0, 1.0)
-            scale = np.maximum(scale, 0.2)
-            adjusted_magnitude = adjusted_magnitude * scale
-        except Exception:
-            pass
+        adjusted_magnitude = self._scale_movement_magnitude(X_orig, movement_magnitude)
         raw = np.asarray(sign * adjusted_magnitude, dtype=float)
-        try:
-            calib = float(MAGNITUDE_CALIBRATION)
-        except Exception:
-            calib = 1.0
-        if calib != 1.0:
-            raw = raw * calib
         pred_return = self._apply_strategy(raw, X_orig)
         return {
             "pred_return": np.asarray(pred_return, dtype=float),
             "raw_pred_return": raw,
             "movement_pred_magnitude": movement_magnitude,
+            "movement_scaled_magnitude": np.asarray(adjusted_magnitude, dtype=float),
             "direction_sign": sign,
             "direction_label": np.asarray(direction["label"], dtype=int),
             "direction_expectation": np.asarray(direction["expectation"], dtype=float),

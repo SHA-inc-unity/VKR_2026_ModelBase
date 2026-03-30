@@ -86,13 +86,22 @@ DIRECTION_PRED_THRESHOLD = 0.6
 # Direct prediction composition defaults. These control how direction confidence,
 # low-confidence fallback, and strategy blending behave at inference time.
 DIRECT_COMPOSITION_DEFAULTS = {
+    "high_confidence_sign_mode": "label",
+    "high_confidence_label_weight": 1.0,
+    "high_confidence_expectation_weight": 0.0,
     "label_confidence_threshold": DIRECTION_PRED_THRESHOLD,
     "low_confidence_sign_mode": "neutral",
+    "low_confidence_label_weight": 0.0,
+    "low_confidence_expectation_weight": 1.0,
     "expectation_deadband": 0.0,
     "expectation_power": 1.0,
+    "movement_scale": 1.0,
+    "anomaly_magnitude_floor": 0.2,
     "strategy_alpha_grid": [0.25, 0.4, 0.55, 0.7, 0.85],
+    "strategy_baselines": ["persistence", "rolling_mean"],
     "strategy_allow_baseline_only": True,
     "strategy_prefer_model_tolerance": 0.0,
+    "strategy_persistence_guard_tolerance": 0.005,
 }
 
 # Post-screening acceleration flags. These intentionally target only the heavy
@@ -131,16 +140,55 @@ CPU_WORKER_THREAD_ENV_VARS = (
 
 # Focused calibration profile for the current strongest candidate. This keeps
 # more usable directional signal when the classifier is uncertain and avoids
-# persistence-heavy blends unless they are clearly needed.
+# persistence-heavy blends unless they are clearly needed. Profiles support a
+# simple inheritance chain through the optional "inherits" field.
 DIRECT_COMPOSITION_PROFILES = {
-    "60min_3h": {
+    "default": {},
+    "main_direct_pipeline": {
+        "inherits": "default",
+        "label_confidence_threshold": 0.58,
+        "low_confidence_sign_mode": "blend",
+        "low_confidence_label_weight": 0.15,
+        "low_confidence_expectation_weight": 0.85,
+        "expectation_deadband": 0.03,
+        "movement_scale": 1.02,
+        "strategy_alpha_grid": [0.72, 0.85, 0.93],
+        "strategy_baselines": ["persistence", "rolling_mean"],
+        "strategy_allow_baseline_only": False,
+        "strategy_prefer_model_tolerance": 0.0015,
+    },
+    "60min_family": {
+        "inherits": "main_direct_pipeline",
         "label_confidence_threshold": 0.55,
         "low_confidence_sign_mode": "expectation",
+        "low_confidence_label_weight": 0.0,
+        "low_confidence_expectation_weight": 1.0,
         "expectation_deadband": 0.05,
         "expectation_power": 1.0,
-        "strategy_alpha_grid": [0.85, 0.92],
+        "movement_scale": 1.05,
+        "strategy_alpha_grid": [0.82, 0.9, 0.96],
         "strategy_allow_baseline_only": False,
         "strategy_prefer_model_tolerance": 0.0025,
+    },
+    "60min_3h": {
+        "inherits": "60min_family",
+        "movement_scale": 1.08,
+        "strategy_alpha_grid": [0.85, 0.92, 0.97],
+    },
+    "60min_6h": {
+        "inherits": "60min_family",
+        "label_confidence_threshold": 0.56,
+        "expectation_deadband": 0.04,
+        "movement_scale": 1.04,
+        "strategy_alpha_grid": [0.8, 0.88, 0.94],
+    },
+    "60min_12h": {
+        "inherits": "60min_family",
+        "label_confidence_threshold": 0.57,
+        "expectation_deadband": 0.04,
+        "movement_scale": 1.02,
+        "strategy_alpha_grid": [0.78, 0.86, 0.92],
+        "strategy_prefer_model_tolerance": 0.002,
     },
 }
 

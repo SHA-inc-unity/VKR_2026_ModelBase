@@ -160,9 +160,44 @@ def _direct_strategy_model_weight(strategy: Dict[str, object]) -> float:
 
 
 def _direct_composition_profile_for_key(key: str | None) -> str | None:
-    if key == "60min_3h":
+    if key in {"60min_3h", "60min_6h", "60min_12h"}:
         return key
     return None
+
+
+def _main_direct_composition_profile() -> str:
+    return "main_direct_pipeline"
+
+
+def _direct_strategy_alpha_grid(strategy_cfg: Dict[str, Any]) -> list[float]:
+    alpha_grid = []
+    for alpha in strategy_cfg.get("strategy_alpha_grid", [0.25, 0.4, 0.55, 0.7, 0.85]):
+        try:
+            alpha_val = float(alpha)
+        except Exception:
+            continue
+        if 0.0 < alpha_val < 1.0:
+            alpha_grid.append(alpha_val)
+    return sorted(set(alpha_grid)) or [0.25, 0.4, 0.55, 0.7, 0.85]
+
+
+def _direct_strategy_candidates(strategy_cfg: Dict[str, Any]) -> list[Dict[str, object]]:
+    allow_baseline_only = bool(strategy_cfg.get("strategy_allow_baseline_only", True))
+    baselines = []
+    for baseline in strategy_cfg.get("strategy_baselines", ["persistence", "rolling_mean"]):
+        baseline_name = str(baseline)
+        if baseline_name:
+            baselines.append(baseline_name)
+    baselines = baselines or ["persistence", "rolling_mean"]
+    alpha_grid = _direct_strategy_alpha_grid(strategy_cfg)
+
+    candidates: list[Dict[str, object]] = [{"type": "model_only", "alpha": 1.0, "baseline": "persistence"}]
+    for baseline_name in baselines:
+        if allow_baseline_only:
+            candidates.append({"type": "baseline_only", "alpha": 0.0, "baseline": baseline_name})
+        for alpha in alpha_grid:
+            candidates.append({"type": "blend", "alpha": alpha, "baseline": baseline_name})
+    return candidates
 
 
 def _prepare_catboost_params(params: Dict[str, Any] | None, default_params: Dict[str, Any], thread_count: int | None) -> Dict[str, Any] | None:
@@ -208,7 +243,8 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
         return {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
 
     X_model = _drop_non_model_columns(X_val_full)
-    raw_pred = np.asarray(direct_model.predict(X_model.reindex(columns=direct_model.feature_names, fill_value=0.0)), dtype=float)
+    direct_details = direct_model.predict_details(X_model.reindex(columns=direct_model.feature_names, fill_value=0.0))
+    raw_pred = np.asarray(direct_details["raw_pred_return"], dtype=float)
     close = pd.to_numeric(X_val_full["close"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     target_price = pd.to_numeric(y_val["target_future_close"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     baselines = build_direct_baselines(X_val_full)
@@ -219,24 +255,8 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
     }
 
     strategy_cfg = _direct_strategy_config(direct_model)
-    allow_baseline_only = bool(strategy_cfg.get("strategy_allow_baseline_only", True))
     prefer_model_tol = float(strategy_cfg.get("strategy_prefer_model_tolerance", 0.0))
-    alpha_grid = []
-    for alpha in strategy_cfg.get("strategy_alpha_grid", [0.25, 0.4, 0.55, 0.7, 0.85]):
-        try:
-            alpha_val = float(alpha)
-        except Exception:
-            continue
-        if 0.0 < alpha_val < 1.0:
-            alpha_grid.append(alpha_val)
-    alpha_grid = sorted(set(alpha_grid)) or [0.25, 0.4, 0.55, 0.7, 0.85]
-
-    candidates = [{"type": "model_only", "alpha": 1.0, "baseline": "persistence"}]
-    for baseline_name in ["persistence", "rolling_mean"]:
-        if allow_baseline_only:
-            candidates.append({"type": "baseline_only", "alpha": 0.0, "baseline": baseline_name})
-        for alpha in alpha_grid:
-            candidates.append({"type": "blend", "alpha": alpha, "baseline": baseline_name})
+    candidates = _direct_strategy_candidates(strategy_cfg)
 
     best = None
     best_mae = np.inf
@@ -244,9 +264,9 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
         if strategy["type"] == "model_only":
             ret = raw_pred
         elif strategy["type"] == "baseline_only":
-            ret = baseline_map[strategy["baseline"]]
+            ret = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
         else:
-            base = baseline_map[strategy["baseline"]]
+            base = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
             ret = strategy["alpha"] * raw_pred + (1.0 - strategy["alpha"]) * base
         pred_price = close * (1.0 + ret)
         mae = float(np.mean(np.abs(target_price - pred_price)))
@@ -273,7 +293,7 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
         return {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
 
     # если стратегия хуже persistence даже с небольшим допуском — принудительно используем persistence
-    tolerance = 0.005  # допустимое относительное ухудшение (0.5%)
+    tolerance = float(strategy_cfg.get("strategy_persistence_guard_tolerance", 0.005))
     if base_mae > 0 and best_mae > base_mae * (1.0 + tolerance):
         return {
             "type": "baseline_only",
@@ -728,6 +748,7 @@ def main() -> None:
         direct_params=tuned_main["direct"],
         range_low_params=tuned_main["range_low"],
         range_high_params=tuned_main["range_high"],
+        direct_composition_profile=_main_direct_composition_profile(),
         model_dir=MODEL_DIR,
         report_dir=REPORT_DIR,
         backtest_dir=BACKTEST_DIR,
@@ -884,6 +905,8 @@ def main() -> None:
         "features_direct": prepared_main["X_direct_fit_model"].shape[1],
         "features_range": prepared_main["X_range_fit_model"].shape[1],
         "backtest_rows": len(main_result["backtest_df"]),
+        "direct_composition_profile": main_result["direct_composition_profile"],
+        "direct_composition_config": main_result["direct_composition_config"],
         "direct_strategy": main_result["direct_strategy"],
         "range_calibration": main_result["range_calibration"],
         "backtest_summary": main_result["backtest_summary"],
