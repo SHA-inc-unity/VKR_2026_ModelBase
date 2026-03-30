@@ -7,10 +7,16 @@ import numpy as np
 import pandas as pd
 
 from catboost_floader.monitoring.anomaly_cleaning import annotate_anomalies
-from catboost_floader.models.confidence import ErrorCalibrator, compute_confidence, compute_ood_score
+from catboost_floader.models.confidence import (
+    ErrorCalibrator,
+    compute_confidence_batch,
+    compute_ood_scores_batch,
+)
 from sklearn.metrics import precision_recall_fscore_support
 from catboost_floader.core.config import (
     BACKTEST_DIR,
+    ENABLE_GPU_BACKTEST,
+    GPU_BACKTEST_DEVICE,
     RANGE_BASELINE_ZSCORE,
     TEST_SIZE,
     DIRECTION_DEADBAND,
@@ -93,9 +99,19 @@ def _prepare_model_matrix(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, direct_targets: pd.DataFrame, range_targets: pd.DataFrame, direct_model, range_model, error_calibrator: ErrorCalibrator, direct_feature_stats: dict) -> Tuple[pd.DataFrame, dict]:
+def run_backtest(
+    direct_features: pd.DataFrame,
+    range_features: pd.DataFrame,
+    direct_targets: pd.DataFrame,
+    range_targets: pd.DataFrame,
+    direct_model,
+    range_model,
+    error_calibrator: ErrorCalibrator,
+    direct_feature_stats: dict,
+    output_dir: str = BACKTEST_DIR,
+) -> Tuple[pd.DataFrame, dict]:
     logger.info("Running backtest")
-    ensure_dirs([BACKTEST_DIR])
+    ensure_dirs([output_dir])
 
     direct_eval = annotate_anomalies(direct_features.copy()).reset_index(drop=True)
     range_eval = annotate_anomalies(range_features.copy()).reset_index(drop=True)
@@ -111,25 +127,12 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
     direct_X = _prepare_model_matrix(direct_eval)
     range_X = _prepare_model_matrix(range_eval)
 
-    pred_return = pd.Series(direct_model.predict(direct_X))
-    # attempt to extract submodel predictions when available (Direction / Movement)
-    try:
-        direction_label = direct_model.direction_model.predict_label(direct_X)
-    except Exception:
-        direction_label = np.full(len(direct_X), np.nan)
-    try:
-        direction_expectation = direct_model.direction_model.predict_sign_expectation(direct_X)
-    except Exception:
-        direction_expectation = np.full(len(direct_X), np.nan)
-    # attempt to extract class probabilities for debugging
-    try:
-        dir_probas = direct_model.direction_model.predict_proba(direct_X)
-    except Exception:
-        dir_probas = None
-    try:
-        movement_magnitude = direct_model.movement_model.predict(direct_X)
-    except Exception:
-        movement_magnitude = np.full(len(direct_X), np.nan)
+    pred_details = direct_model.predict_details(direct_X)
+    pred_return = pd.Series(pred_details["pred_return"])
+    direction_label = np.asarray(pred_details["direction_label"], dtype=float).reshape(-1)
+    direction_expectation = np.asarray(pred_details["direction_expectation"], dtype=float).reshape(-1)
+    dir_probas = np.asarray(pred_details["direction_proba"], dtype=float)
+    movement_magnitude = np.asarray(pred_details["movement_pred_magnitude"], dtype=float).reshape(-1)
     current_close = pd.to_numeric(direct_eval["close"], errors="coerce").reset_index(drop=True)
     pred_price = current_close * (1.0 + pred_return)
     # Pass direct-model info into range calibration when "direct_center" is selected.
@@ -144,9 +147,49 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
     range_high = pd.Series(range_pred[:, 1])
 
     pred_abs_error = pd.Series(error_calibrator.predict(direct_X))
-    ood_scores = direct_X.apply(lambda row: compute_ood_score(row, direct_feature_stats), axis=1)
+    try:
+        ood_scores, ood_backend = compute_ood_scores_batch(
+            direct_X,
+            direct_feature_stats,
+            prefer_gpu=ENABLE_GPU_BACKTEST,
+        )
+    except Exception as exc:
+        logger.warning("Backtest OOD GPU path failed: %s. Falling back to CPU.", exc)
+        ood_scores, ood_backend = compute_ood_scores_batch(
+            direct_X,
+            direct_feature_stats,
+            prefer_gpu=False,
+        )
     band_width_norm = (range_high - range_low) / (current_close.abs() + 1e-8)
-    confidence = [compute_confidence(e, a, o, w) for e, a, o, w in zip(pred_abs_error, direct_eval["anomaly_score"], ood_scores, band_width_norm)]
+    try:
+        confidence, confidence_backend = compute_confidence_batch(
+            pred_abs_error.to_numpy(dtype=float),
+            pd.to_numeric(direct_eval["anomaly_score"], errors="coerce").fillna(0.0).to_numpy(dtype=float),
+            np.asarray(ood_scores, dtype=float),
+            pd.to_numeric(band_width_norm, errors="coerce").fillna(0.0).to_numpy(dtype=float),
+            prefer_gpu=ENABLE_GPU_BACKTEST,
+        )
+    except Exception as exc:
+        logger.warning("Backtest confidence GPU path failed: %s. Falling back to CPU.", exc)
+        confidence, confidence_backend = compute_confidence_batch(
+            pred_abs_error.to_numpy(dtype=float),
+            pd.to_numeric(direct_eval["anomaly_score"], errors="coerce").fillna(0.0).to_numpy(dtype=float),
+            np.asarray(ood_scores, dtype=float),
+            pd.to_numeric(band_width_norm, errors="coerce").fillna(0.0).to_numpy(dtype=float),
+            prefer_gpu=False,
+        )
+    if ENABLE_GPU_BACKTEST:
+        if ood_backend == "gpu" or confidence_backend == "gpu":
+            logger.info(
+                "GPU backtest enabled on device %s for vectorized evaluation math; CatBoost inference remains batched.",
+                GPU_BACKTEST_DEVICE,
+            )
+        else:
+            logger.warning(
+                "GPU backtest requested but no GPU array backend is available. Falling back to CPU vectorized backtest path."
+            )
+    else:
+        logger.info("GPU backtest disabled; using CPU vectorized backtest path.")
 
     direct_base = build_direct_baselines(direct_eval)
     range_base = build_range_baselines(range_eval)
@@ -310,8 +353,8 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
     # Attach per-model diagnostics to summary (computed earlier)
     summary["per_model_sign_accuracy"] = per_model
 
-    merged.to_csv(os.path.join(BACKTEST_DIR, "backtest_results.csv"), index=False)
-    save_json(summary, os.path.join(BACKTEST_DIR, "backtest_summary.json"))
+    merged.to_csv(os.path.join(output_dir, "backtest_results.csv"), index=False)
+    save_json(summary, os.path.join(output_dir, "backtest_summary.json"))
     save_json(
         {
             "direct_model": direct_summary,
@@ -319,9 +362,9 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
             "range_model": range_summary,
             "range_baseline": range_baseline_summary,
         },
-        os.path.join(BACKTEST_DIR, "comparison_vs_baselines.json"),
+        os.path.join(output_dir, "comparison_vs_baselines.json"),
     )
-    merged[["timestamp", "close", "target_future_close", "target_return", "direct_pred_return", "direct_pred_price", "baseline_persistence_price", "baseline_rolling_price", "confidence", "anomaly_flag", "anomaly_score", "anomaly_type"]].to_csv(os.path.join(BACKTEST_DIR, "direct_backtest_results.csv"), index=False)
-    merged[["timestamp", "close", "target_future_close", "range_pred_low", "range_pred_high", "baseline_range_low", "baseline_range_high", "confidence", "anomaly_flag", "anomaly_score", "anomaly_type"]].to_csv(os.path.join(BACKTEST_DIR, "range_backtest_results.csv"), index=False)
+    merged[["timestamp", "close", "target_future_close", "target_return", "direct_pred_return", "direct_pred_price", "baseline_persistence_price", "baseline_rolling_price", "confidence", "anomaly_flag", "anomaly_score", "anomaly_type"]].to_csv(os.path.join(output_dir, "direct_backtest_results.csv"), index=False)
+    merged[["timestamp", "close", "target_future_close", "range_pred_low", "range_pred_high", "baseline_range_low", "baseline_range_high", "confidence", "anomaly_flag", "anomaly_score", "anomaly_type"]].to_csv(os.path.join(output_dir, "range_backtest_results.csv"), index=False)
     logger.info(f"Backtest summary: {summary}")
     return merged, summary

@@ -451,7 +451,9 @@ def assemble_market_dataset(symbol: str = SYMBOL, interval: str = BASE_TIMEFRAME
 
         for col in ["mark_close", "index_close", "premium_close", "open_interest", "funding_rate"]:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce").ffill()
+                # Fill both forward and backward so exported cached artifacts do not
+                # retain leading NaNs from slower auxiliary feeds.
+                df[col] = pd.to_numeric(df[col], errors="coerce").ffill().bfill()
 
         df = df.sort_values("timestamp").reset_index(drop=True)
         df.to_csv(dataset_path, index=False)

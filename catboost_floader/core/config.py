@@ -83,6 +83,61 @@ DIRECTION_DEADBAND = 0.0005
 # If the classifier's max class probability < this threshold, the direction is treated as neutral.
 DIRECTION_PRED_THRESHOLD = 0.6
 
+# Direct prediction composition defaults. These control how direction confidence,
+# low-confidence fallback, and strategy blending behave at inference time.
+DIRECT_COMPOSITION_DEFAULTS = {
+    "label_confidence_threshold": DIRECTION_PRED_THRESHOLD,
+    "low_confidence_sign_mode": "neutral",
+    "expectation_deadband": 0.0,
+    "expectation_power": 1.0,
+    "strategy_alpha_grid": [0.25, 0.4, 0.55, 0.7, 0.85],
+    "strategy_allow_baseline_only": True,
+    "strategy_prefer_model_tolerance": 0.0,
+}
+
+# Post-screening acceleration flags. These intentionally target only the heavy
+# evaluation stage after fast screening and the backtest math path. GPU is kept
+# for compatibility only and is disabled by default because CPU-parallel
+# evaluation is faster on the current datasets.
+ENABLE_GPU_FULL_EVALUATION = False
+ENABLE_GPU_BACKTEST = False
+GPU_FULL_EVALUATION_DEVICE = GPU_DEVICES
+GPU_BACKTEST_DEVICE = GPU_DEVICES
+
+# CPU-parallel execution policy for the heavy post-screening stage. Defaults are
+# tuned for a 16-core / 32-thread machine while remaining safe on smaller hosts.
+CPU_LOGICAL_THREADS = max(1, os.cpu_count() or 1)
+MAX_CPU_UTILIZATION_MODE = "balanced"
+ENABLE_PARALLEL_CPU_FULL_EVALUATION = True
+ENABLE_PARALLEL_CPU_BACKTEST = True
+PARALLEL_EVAL_WORKERS = max(1, min(4, CPU_LOGICAL_THREADS))
+PARALLEL_BACKTEST_WORKERS = max(1, min(8, CPU_LOGICAL_THREADS))
+PARALLEL_MULTI_MODEL_WORKERS = max(1, min(8, CPU_LOGICAL_THREADS))
+CATBOOST_THREADS_PER_WORKER = CPU_LOGICAL_THREADS
+CPU_WORKER_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "BLIS_NUM_THREADS",
+)
+
+# Focused calibration profile for the current strongest candidate. This keeps
+# more usable directional signal when the classifier is uncertain and avoids
+# persistence-heavy blends unless they are clearly needed.
+DIRECT_COMPOSITION_PROFILES = {
+    "60min_3h": {
+        "label_confidence_threshold": 0.55,
+        "low_confidence_sign_mode": "expectation",
+        "expectation_deadband": 0.05,
+        "expectation_power": 1.0,
+        "strategy_alpha_grid": [0.85, 0.92],
+        "strategy_allow_baseline_only": False,
+        "strategy_prefer_model_tolerance": 0.0025,
+    },
+}
+
 # When anomalies are detected, shrink predicted movement magnitudes by this factor proportional
 # to the anomaly score (e.g. 0.5 reduces magnitude up to ~50% when anomaly_score=1.0).
 ANOMALY_MAGNITUDE_SHRINK = 0.5
@@ -149,3 +204,35 @@ def apply_hardware_params(params: dict) -> dict:
         out.setdefault("devices", GPU_DEVICES)
         out.setdefault("gpu_ram_part", GPU_RAM_PART)
     return out
+
+
+def resolve_parallel_cpu_settings(total_tasks: int, configured_workers: int) -> tuple[int, int]:
+    tasks = max(1, int(total_tasks or 1))
+    workers = max(1, min(tasks, int(configured_workers or 1), CPU_LOGICAL_THREADS))
+    threads = max(1, min(CATBOOST_THREADS_PER_WORKER, max(1, CPU_LOGICAL_THREADS // workers)))
+    return workers, threads
+
+
+def apply_cpu_worker_limits(thread_count: int, *, mark_outer_parallel: bool = False) -> int:
+    safe_threads = max(1, int(thread_count or 1))
+    thread_str = str(safe_threads)
+    for env_var in CPU_WORKER_THREAD_ENV_VARS:
+        os.environ[env_var] = thread_str
+    os.environ["CATBOOST_WORKER_THREADS"] = thread_str
+    if mark_outer_parallel:
+        os.environ["CATBOOST_OUTER_PARALLEL"] = "1"
+    return safe_threads
+
+
+def current_worker_thread_count() -> int | None:
+    raw = os.environ.get("CATBOOST_WORKER_THREADS")
+    if not raw:
+        return None
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return None
+
+
+def is_nested_outer_parallel() -> bool:
+    return os.environ.get("CATBOOST_OUTER_PARALLEL", "0") == "1"

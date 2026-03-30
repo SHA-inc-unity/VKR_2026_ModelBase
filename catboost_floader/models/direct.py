@@ -11,14 +11,25 @@ from catboost_floader.core.config import (
     MODEL_DIR,
     MAGNITUDE_CALIBRATION,
     DIRECTION_DEADBAND,
-    DIRECTION_PRED_THRESHOLD,
     ANOMALY_MAGNITUDE_SHRINK,
+    DIRECT_COMPOSITION_DEFAULTS,
+    DIRECT_COMPOSITION_PROFILES,
 )
 from catboost_floader.core.utils import ensure_dirs, get_logger, load_json, save_json
+from catboost_floader.evaluation.backtest import build_direct_baselines
 from catboost_floader.models.direction import DirectionModel
 from catboost_floader.models.movement import MovementModel
 
 logger = get_logger("model_direct")
+
+
+def _resolve_composition_config(profile_name: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cfg = dict(DIRECT_COMPOSITION_DEFAULTS)
+    if profile_name:
+        cfg.update(DIRECT_COMPOSITION_PROFILES.get(profile_name, {}))
+    if overrides:
+        cfg.update(overrides)
+    return cfg
 
 
 class DirectModel:
@@ -28,7 +39,14 @@ class DirectModel:
     Saves/loads both underlying models as `prefix_direction` and `prefix_movement`.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None, direction_params: Optional[Dict[str, Any]] = None, strategy: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        direction_params: Optional[Dict[str, Any]] = None,
+        strategy: Optional[Dict[str, Any]] = None,
+        composition_profile: Optional[str] = None,
+        composition_config: Optional[Dict[str, Any]] = None,
+    ):
         self.movement_model = MovementModel(params=params or DIRECT_CATBOOST_PARAMS.copy())
         # Derive direction params if not provided
         if direction_params is None:
@@ -39,6 +57,8 @@ class DirectModel:
         self.direction_model = DirectionModel(params=direction_params)
         self.feature_names: list[str] = []
         self.strategy: Dict[str, Any] = strategy or {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
+        self.composition_profile = composition_profile
+        self.composition_config: Dict[str, Any] = _resolve_composition_config(composition_profile, composition_config)
         # backward-compatible single-model reference (uses movement model for feature importance)
         self.model = getattr(self.movement_model, "model", None)
 
@@ -53,17 +73,17 @@ class DirectModel:
         return self
 
     def _baseline_return(self, X: pd.DataFrame) -> np.ndarray:
-        # preserved from previous implementation; kept local here to avoid circular imports
         baseline = str(self.strategy.get("baseline", "persistence"))
-        if baseline == "rolling_mean":
-            if "ret_mean_30" in X.columns:
-                return pd.to_numeric(X["ret_mean_30"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        baselines = build_direct_baselines(X)
+        baseline_cols = {
+            "persistence": "baseline_persistence_return",
+            "rolling_mean": "baseline_rolling_mean_return",
+            "trend": "baseline_trend_return",
+        }
+        baseline_col = baseline_cols.get(baseline)
+        if baseline_col is None or baseline_col not in baselines.columns:
             return np.zeros(len(X), dtype=float)
-        if baseline == "trend":
-            if "ret_mean_60" in X.columns:
-                return pd.to_numeric(X["ret_mean_60"], errors="coerce").fillna(0.0).to_numpy(dtype=float) * 3.0
-            return np.zeros(len(X), dtype=float)
-        return np.zeros(len(X), dtype=float)
+        return pd.to_numeric(baselines[baseline_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
 
     def _apply_strategy(self, raw_pred: np.ndarray, X_original: pd.DataFrame) -> np.ndarray:
         raw_pred = np.asarray(raw_pred, dtype=float)
@@ -94,53 +114,107 @@ class DirectModel:
         signs[np.abs(base) < dead] = 0.0
         return signs.astype(float)
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        # Combined prediction: expected sign * predicted magnitude
-        X_orig = X.copy()
-        # movement magnitude
-        mag = self.movement_model.predict(X_orig)
-        # expected sign in [-1,1]
-        if getattr(self.direction_model, "is_degenerate", False):
-            sign = self._fallback_direction_sign(X_orig)
-        else:
-            # Use classifier discrete labels with a confidence threshold to improve sign stability.
-            try:
-                probs = self.direction_model.predict_proba(X_orig)
-                max_p = np.nanmax(probs, axis=1)
-                lbls = self.direction_model.predict_label(X_orig)
-                # if classifier is not confident, treat as neutral
-                thresh = float(DIRECTION_PRED_THRESHOLD)
-                sign = np.where(max_p >= thresh, lbls, 0)
-            except Exception:
-                # fallback to expectation when probabilities unavailable
-                sign = self.direction_model.predict_sign_expectation(X_orig)
+    def _expectation_sign(self, expectation: np.ndarray) -> np.ndarray:
+        cfg = self.composition_config
+        out = np.clip(np.asarray(expectation, dtype=float), -1.0, 1.0)
+        power = float(cfg.get("expectation_power", 1.0))
+        if power != 1.0:
+            out = np.sign(out) * (np.abs(out) ** power)
+        deadband = float(cfg.get("expectation_deadband", 0.0))
+        if deadband > 0:
+            out[np.abs(out) < deadband] = 0.0
+        return out
 
-        # Shrink magnitude when anomaly score is high to reduce overconfident predictions in shocks
+    def _compose_direction_signal(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
+        if getattr(self.direction_model, "is_degenerate", False):
+            fallback = self._fallback_direction_sign(X)
+            nan_probs = np.full((len(fallback), 3), np.nan, dtype=float)
+            return {
+                "sign": fallback.astype(float),
+                "label": fallback.astype(int),
+                "expectation": fallback.astype(float),
+                "probs": nan_probs,
+            }
+
+        try:
+            components = self.direction_model.predict_components(X)
+            probs = np.asarray(components["probs"], dtype=float)
+            max_p = np.nanmax(probs, axis=1)
+            labels = np.asarray(components["label"], dtype=float)
+            expectation = self._expectation_sign(components["expectation"])
+            threshold = float(self.composition_config.get("label_confidence_threshold", 0.0))
+            low_conf_mode = str(self.composition_config.get("low_confidence_sign_mode", "neutral"))
+            if low_conf_mode == "expectation":
+                sign = np.where(max_p >= threshold, labels, expectation)
+            else:
+                sign = np.where(max_p >= threshold, labels, 0.0)
+            return {
+                "sign": np.clip(np.asarray(sign, dtype=float), -1.0, 1.0),
+                "label": np.asarray(components["label"], dtype=int),
+                "expectation": np.asarray(components["expectation"], dtype=float),
+                "probs": probs,
+            }
+        except Exception:
+            expectation = self._expectation_sign(self.direction_model.predict_sign_expectation(X))
+            nan_probs = np.full((len(expectation), 3), np.nan, dtype=float)
+            return {
+                "sign": expectation.astype(float),
+                "label": np.sign(expectation).astype(int),
+                "expectation": expectation.astype(float),
+                "probs": nan_probs,
+            }
+
+    def predict_details(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
+        X_orig = X.copy()
+        movement_magnitude = np.asarray(self.movement_model.predict(X_orig), dtype=float)
+        direction = self._compose_direction_signal(X_orig)
+        sign = np.asarray(direction["sign"], dtype=float)
+
+        adjusted_magnitude = movement_magnitude.copy()
         try:
             anomaly_score = pd.to_numeric(X_orig.get("anomaly_score", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float)
             shrink = float(ANOMALY_MAGNITUDE_SHRINK)
             scale = 1.0 - shrink * np.clip(anomaly_score, 0.0, 1.0)
-            # keep a small lower bound to avoid zeroing predictions
             scale = np.maximum(scale, 0.2)
-            mag = mag * scale
+            adjusted_magnitude = adjusted_magnitude * scale
         except Exception:
             pass
-        raw = np.asarray(sign * mag, dtype=float)
-        # Apply optional global calibration for magnitude (quick experimental knob)
+        raw = np.asarray(sign * adjusted_magnitude, dtype=float)
         try:
             calib = float(MAGNITUDE_CALIBRATION)
         except Exception:
             calib = 1.0
         if calib != 1.0:
             raw = raw * calib
-        return self._apply_strategy(raw, X_orig)
+        pred_return = self._apply_strategy(raw, X_orig)
+        return {
+            "pred_return": np.asarray(pred_return, dtype=float),
+            "raw_pred_return": raw,
+            "movement_pred_magnitude": movement_magnitude,
+            "direction_sign": sign,
+            "direction_label": np.asarray(direction["label"], dtype=int),
+            "direction_expectation": np.asarray(direction["expectation"], dtype=float),
+            "direction_proba": np.asarray(direction["probs"], dtype=float),
+        }
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self.predict_details(X)["pred_return"]
 
     def save(self, prefix: str):
         ensure_dirs([os.path.dirname(prefix)])
         # save submodels
         self.direction_model.save(prefix)
         self.movement_model.save(prefix)
-        save_json({"feature_names": self.feature_names, "strategy": self.strategy, "magnitude_calibration": MAGNITUDE_CALIBRATION}, prefix + ".json")
+        save_json(
+            {
+                "feature_names": self.feature_names,
+                "strategy": self.strategy,
+                "magnitude_calibration": MAGNITUDE_CALIBRATION,
+                "composition_profile": self.composition_profile,
+                "composition_config": self.composition_config,
+            },
+            prefix + ".json",
+        )
 
     def load(self, prefix: str):
         self.direction_model.load(prefix)
@@ -148,6 +222,8 @@ class DirectModel:
         meta = load_json(prefix + ".json") or {}
         self.feature_names = meta.get("feature_names", self.feature_names)
         self.strategy = meta.get("strategy", self.strategy)
+        self.composition_profile = meta.get("composition_profile", self.composition_profile)
+        self.composition_config = _resolve_composition_config(self.composition_profile, meta.get("composition_config"))
         # if a calibration factor was saved with the model metadata, prefer it
         if isinstance(meta.get("magnitude_calibration"), (int, float)):
             try:
@@ -166,9 +242,16 @@ def train_direct_model(
     targets: pd.DataFrame,
     params: Optional[Dict[str, Any]] = None,
     strategy: Optional[Dict[str, Any]] = None,
+    composition_profile: Optional[str] = None,
+    composition_config: Optional[Dict[str, Any]] = None,
     save: bool = True,
 ) -> DirectModel:
-    model = DirectModel(params=params, strategy=strategy)
+    model = DirectModel(
+        params=params,
+        strategy=strategy,
+        composition_profile=composition_profile,
+        composition_config=composition_config,
+    )
     # targets can be a DataFrame with 'target_return' column, or a Series
     if isinstance(targets, pd.DataFrame) and "target_return" in targets.columns:
         y = targets["target_return"]

@@ -15,6 +15,19 @@ logger = get_logger("model_direction")
 
 
 class DirectionModel:
+    @staticmethod
+    def _normalize_label_map(label_map: Optional[Dict[int, int]]) -> Dict[int, int]:
+        fallback = {-1: 0, 0: 1, 1: 2}
+        if not label_map:
+            return fallback
+        normalized: Dict[int, int] = {}
+        for k, v in label_map.items():
+            try:
+                normalized[int(k)] = int(v)
+            except Exception:
+                continue
+        return normalized or fallback
+
     def __init__(self, params: Optional[Dict[str, Any]] = None, label_map: Optional[Dict[int, int]] = None):
         # params expected to be CatBoost-compatible for classification
         self.model: Optional[CatBoostClassifier] = None
@@ -24,7 +37,7 @@ class DirectionModel:
         self.params.setdefault("eval_metric", "AUC")
         self.feature_names: list[str] = []
         # mapping between original sign labels and class indices (e.g. {-1:0, 0:1, 1:2})
-        self.label_map = label_map or {-1: 0, 0: 1, 1: 2}
+        self.label_map = self._normalize_label_map(label_map)
         # reverse map cached
         self._rev_map = {v: k for k, v in self.label_map.items()}
         self.is_degenerate: bool = False
@@ -152,27 +165,28 @@ class DirectionModel:
         probs = self.model.predict_proba(X_use)
         return np.asarray(probs, dtype=float)
 
-    def predict_sign_expectation(self, X: pd.DataFrame) -> np.ndarray:
-        # returns expected sign in [-1,1]: E[sign] = p_pos*1 + p_zero*0 + p_neg*(-1)
+    def predict_components(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
         probs = self.predict_proba(X)
-        # Align probability columns with actual class labels reported by the CatBoost model.
-        # CatBoost may omit classes (e.g. no neutral class in training), so column order
-        # must be read from `self.model.classes_` instead of assuming 0..n-1.
         if hasattr(self.model, "classes_"):
-            class_labels = list(self.model.classes_)
+            class_labels = np.asarray([int(cl) for cl in list(self.model.classes_)], dtype=int)
         else:
-            class_labels = list(range(probs.shape[1]))
-        signs = np.array([self._rev_map.get(int(cl), 0) for cl in class_labels], dtype=float)
-        return probs.dot(signs)
+            class_labels = np.arange(probs.shape[1], dtype=int)
+        class_signs = np.asarray([self._rev_map.get(int(cl), 0) for cl in class_labels], dtype=float)
+        label = class_signs[np.argmax(probs, axis=1)].astype(int)
+        expectation = probs.dot(class_signs)
+        return {
+            "probs": probs,
+            "class_labels": class_labels,
+            "class_signs": class_signs,
+            "label": label,
+            "expectation": expectation,
+        }
+
+    def predict_sign_expectation(self, X: pd.DataFrame) -> np.ndarray:
+        return self.predict_components(X)["expectation"]
 
     def predict_label(self, X: pd.DataFrame) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("DirectionModel is not trained or loaded")
-        X_orig = self._prepare_inference_frame(X)
-        X_use = X_orig.reindex(columns=self.feature_names, fill_value=0.0) if self.feature_names else X_orig
-        preds = self.model.predict(X_use)
-        # map back to -1/0/1
-        return np.array([self._rev_map.get(int(p), 0) for p in preds], dtype=int)
+        return self.predict_components(X)["label"]
 
     def save(self, prefix: str):
         if self.model is None:
@@ -190,7 +204,7 @@ class DirectionModel:
         meta = load_json(prefix + "_direction.json") or {}
         self.feature_names = meta.get("feature_names", [])
         self.params = meta.get("params", self.params)
-        self.label_map = meta.get("label_map", self.label_map)
+        self.label_map = self._normalize_label_map(meta.get("label_map", self.label_map))
         self._rev_map = {v: k for k, v in self.label_map.items()}
         return self
 

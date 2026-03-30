@@ -68,18 +68,15 @@ class RangeModel:
         else:
             anomaly_flags = np.zeros(len(center), dtype=int)
 
-        low_adj = np.empty_like(center)
-        high_adj = np.empty_like(center)
-        for i in range(len(center)):
-            if anomaly_flags[i] == 1:
-                scale = float(self.calibration.get("scale_anomaly", 1.0))
-                margin = float(self.calibration.get("margin_anomaly", 0.0))
-            else:
-                scale = float(self.calibration.get("scale_normal", 1.0))
-                margin = float(self.calibration.get("margin_normal", 0.0))
-            hw = half[i] * scale + margin
-            low_adj[i] = center[i] - hw
-            high_adj[i] = center[i] + hw
+        scale_normal = float(self.calibration.get("scale_normal", 1.0))
+        scale_anomaly = float(self.calibration.get("scale_anomaly", 1.0))
+        margin_normal = float(self.calibration.get("margin_normal", 0.0))
+        margin_anomaly = float(self.calibration.get("margin_anomaly", 0.0))
+        scale = np.where(anomaly_flags == 1, scale_anomaly, scale_normal)
+        margin = np.where(anomaly_flags == 1, margin_anomaly, margin_normal)
+        hw = half * scale + margin
+        low_adj = center - hw
+        high_adj = center + hw
         low = np.minimum(low_adj, high_adj)
         high = np.maximum(low_adj, high_adj)
         return np.vstack([low, high]).T
@@ -116,18 +113,15 @@ class RangeModel:
         else:
             anomaly_flags = np.zeros(len(center), dtype=int)
 
-        low_adj = np.empty_like(center)
-        high_adj = np.empty_like(center)
-        for i in range(len(center)):
-            if anomaly_flags[i] == 1:
-                scale = float(self.calibration.get("scale_anomaly", 1.0))
-                margin = float(self.calibration.get("margin_anomaly", 0.0))
-            else:
-                scale = float(self.calibration.get("scale_normal", 1.0))
-                margin = float(self.calibration.get("margin_normal", 0.0))
-            hw = half[i] * scale + margin
-            low_adj[i] = center[i] - hw
-            high_adj[i] = center[i] + hw
+        scale_normal = float(self.calibration.get("scale_normal", 1.0))
+        scale_anomaly = float(self.calibration.get("scale_anomaly", 1.0))
+        margin_normal = float(self.calibration.get("margin_normal", 0.0))
+        margin_anomaly = float(self.calibration.get("margin_anomaly", 0.0))
+        scale = np.where(anomaly_flags == 1, scale_anomaly, scale_normal)
+        margin = np.where(anomaly_flags == 1, margin_anomaly, margin_normal)
+        hw = half * scale + margin
+        low_adj = center - hw
+        high_adj = center + hw
 
         low = np.minimum(low_adj, high_adj)
         high = np.maximum(low_adj, high_adj)
