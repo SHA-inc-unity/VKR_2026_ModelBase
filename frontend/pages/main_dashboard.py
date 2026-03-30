@@ -108,3 +108,13 @@ with tab_diagnostics:
     if pipeline_summary:
         st.subheader("Pipeline Summary")
         st.json(pipeline_summary)
+        # Multi-model accuracies (if present)
+        if isinstance(pipeline_summary, dict) and pipeline_summary.get("multi_models"):
+            st.subheader("Multi-model Accuracies")
+            try:
+                import pandas as _pd
+
+                df_multi = _pd.DataFrame.from_dict(pipeline_summary.get("multi_models"), orient="index")
+                st.table(df_multi)
+            except Exception:
+                st.json(pipeline_summary.get("multi_models"))

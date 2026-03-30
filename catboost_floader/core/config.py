@@ -35,6 +35,20 @@ RANGE_BASELINE_ZSCORE = 1.0
 TEST_SIZE = 0.2
 RANDOM_SEED = 42
 
+# Multi-timeframe and multi-horizon configuration
+# Timeframes to aggregate raw minute data to (minutes)
+MULTI_TIMEFRAMES = [1, 5, 15, 60]
+# Forecast horizons to train per timeframe (hours)
+MULTI_HORIZONS_HOURS = [3, 6, 12]
+
+# Multi-timeframe operational options
+# When True, aggregated per-timeframe datasets will be persisted to disk (CSV)
+MULTI_PERSIST_AGGREGATED = False
+# Directory used for persisted aggregated datasets
+MULTI_AGGREGATED_DIR = os.path.join(ARTIFACTS_DIR, "aggregated")
+# Skip expensive hyperparameter tuning for multi-model runs (use sensible defaults / reuse params)
+MULTI_SKIP_TUNING = True
+
 # Quick calibration factor for movement magnitude predictions.
 # Set to >1.0 to scale up movement outputs (useful for quick experiments).
 MAGNITUDE_CALIBRATION = 1.0

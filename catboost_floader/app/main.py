@@ -8,14 +8,24 @@ import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
 from catboost_floader.monitoring.anomaly_cleaning import annotate_anomalies, clean_training_anomalies, persist_anomaly_artifacts
-from catboost_floader.evaluation.backtest import build_direct_baselines, run_backtest, split_train_test
+from catboost_floader.evaluation.backtest import build_direct_baselines, run_backtest, split_train_test, regression_metrics
 from catboost_floader.models.confidence import fit_error_calibrator
-from catboost_floader.core.config import BACKTEST_DIR, MODEL_DIR, REPORT_DIR, TRAIN_LOOKBACK_DAYS
+from catboost_floader.core.config import (
+    BACKTEST_DIR,
+    MODEL_DIR,
+    REPORT_DIR,
+    TRAIN_LOOKBACK_DAYS,
+    MULTI_TIMEFRAMES,
+    MULTI_HORIZONS_HOURS,
+    DIRECTION_DEADBAND,
+    MULTI_PERSIST_AGGREGATED,
+    MULTI_AGGREGATED_DIR,
+    MULTI_SKIP_TUNING,
+)
 from catboost_floader.data.ingestion import assemble_market_dataset
 from catboost_floader.data.preprocessing import preprocess_data
 from catboost_floader.features.engineering import build_direct_features, build_range_features
 from catboost_floader.models.tuning import tune_direct_model, tune_range_high_model, tune_range_low_model
-from catboost_floader.app.live import run_live_test
 from catboost_floader.models.direct import train_direct_model
 from catboost_floader.models.range import train_range_model
 from catboost_floader.targets.generation import generate_direct_targets, generate_range_targets
@@ -157,7 +167,29 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
             best = dict(strategy)
             best["validation_mae"] = mae
 
-    return best or {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
+    # Safety guard: never choose a strategy that is noticeably worse than
+    # pure persistence baseline on validation.
+    try:
+        base_pers = baseline_map["persistence"]
+        base_pers_price = close * (1.0 + base_pers)
+        base_mae = float(np.mean(np.abs(target_price - base_pers_price)))
+    except Exception:
+        base_mae = best_mae
+
+    if best is None:
+        return {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
+
+    # если стратегия хуже persistence даже с небольшим допуском — принудительно используем persistence
+    tolerance = 0.005  # допустимое относительное ухудшение (0.5%)
+    if base_mae > 0 and best_mae > base_mae * (1.0 + tolerance):
+        return {
+            "type": "baseline_only",
+            "alpha": 0.0,
+            "baseline": "persistence",
+            "validation_mae": base_mae,
+        }
+
+    return best
 
 
 def _calibrate_range_model(range_model, direct_model, X_range_val_full: pd.DataFrame, X_direct_val_full: pd.DataFrame, y_direct_val: pd.DataFrame) -> Dict[str, float]:
@@ -191,6 +223,7 @@ def _calibrate_range_model(range_model, direct_model, X_range_val_full: pd.DataF
 
     best = None
     best_width = np.inf
+    target_normal_coverage = 0.9
     scale_grid = [0.15, 0.2, 0.25, 0.33, 0.5, 0.75, 1.0]
 
     for center_mode, center in [("direct_center", direct_center), ("model_center", model_center)]:
@@ -204,8 +237,12 @@ def _calibrate_range_model(range_model, direct_model, X_range_val_full: pd.DataF
             final_half[normal_mask] += margin_normal
             final_half[anomaly_mask] += margin_anomaly
             avg_norm_width = float(np.mean((2.0 * final_half) / (np.abs(actual) + 1e-8)))
-            normal_coverage = float(np.mean(np.abs(actual[normal_mask] - center[normal_mask]) <= final_half[normal_mask])) if normal_mask.any() else 1.0
-            if normal_coverage >= 1.0 and avg_norm_width < best_width:
+            normal_coverage = float(
+                np.mean(
+                    np.abs(actual[normal_mask] - center[normal_mask]) <= final_half[normal_mask]
+                )
+            ) if normal_mask.any() else 1.0
+            if normal_coverage >= target_normal_coverage and avg_norm_width < best_width:
                 best_width = avg_norm_width
                 best = {
                     "scale_normal": float(scale),
@@ -245,6 +282,18 @@ def main() -> None:
     print("Generating branch-specific targets...")
     direct_targets = generate_direct_targets(clean)
     range_targets = generate_range_targets(clean)
+
+    # Log distribution of generated direction labels (for debugging)
+    try:
+        arr = pd.to_numeric(direct_targets["target_return"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        dead = float(DIRECTION_DEADBAND)
+        trues = np.sign(arr)
+        trues[np.abs(arr) < dead] = 0.0
+        counts = {"-1": int((trues == -1).sum()), "0": int((trues == 0).sum()), "1": int((trues == 1).sum())}
+        save_json({"target_counts": counts, "rows": int(len(arr))}, os.path.join(REPORT_DIR, "direction_label_generation.json"))
+        print(f"Saved direction label distribution to {os.path.join(REPORT_DIR, 'direction_label_generation.json')}")
+    except Exception as exc:
+        print("Failed to log direction label distribution:", exc)
 
     print("Aligning direct branch...")
     direct_merged = direct_features.merge(direct_targets, on="timestamp", how="inner").sort_values("timestamp").reset_index(drop=True)
@@ -330,12 +379,142 @@ def main() -> None:
         direct_feature_stats=feature_stats,
     )
 
-    print("Running live test...")
+    # Live inference is intentionally disabled for now:
+    # - it is orthogonal to backtest quality
+    # - it can fail due to runtime data issues / API drift
+    live_result = {"status": "skipped"}
+
+    # Multi-timeframe / multi-horizon models
+    # Prepare raw dataset once for aggregation to multiple timeframes
     try:
-        live_result = run_live_test(range_model=range_model, direct_model=direct_model, calibrator=calibrator, feature_stats=feature_stats)
+        from catboost_floader.data.preprocessing import aggregate_for_modeling
+    except Exception:
+        try:
+            from catboost_floader.data.preprocessing import _aggregate_for_modeling as aggregate_for_modeling
+        except Exception:
+            aggregate_for_modeling = None
+
+    multi_models_summary: dict = {}
+    try:
+        # Prepare raw copy for safe aggregation
+        raw_prep = raw.copy()
+        raw_prep["timestamp"] = pd.to_datetime(raw_prep["timestamp"], utc=True, errors="coerce")
+        raw_prep = raw_prep.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+        for col in [c for c in raw_prep.columns if c != "timestamp"]:
+            raw_prep[col] = pd.to_numeric(raw_prep[col], errors="coerce")
+        raw_prep = raw_prep.dropna(subset=["timestamp"]).ffill().bfill().dropna().reset_index(drop=True)
+
+        if aggregate_for_modeling is not None:
+            for tf in MULTI_TIMEFRAMES:
+                df_tf = aggregate_for_modeling(raw_prep, tf)
+                # Optionally persist aggregated timeframe CSV for faster reproducibility
+                if MULTI_PERSIST_AGGREGATED:
+                    try:
+                        ensure_dirs([MULTI_AGGREGATED_DIR])
+                        csv_path = os.path.join(MULTI_AGGREGATED_DIR, f"market_aggregated_{tf}min.csv")
+                        df_tf.to_csv(csv_path, index=False)
+                    except Exception as _exc:
+                        print(f"Failed to persist aggregated {tf}min dataset: {_exc}")
+                direct_feats_tf = build_direct_features(df_tf)
+                range_feats_tf = build_range_features(df_tf)
+
+                for h in MULTI_HORIZONS_HOURS:
+                    steps = int((h * 60) // tf)
+                    if steps < 1:
+                        continue
+                    key = f"{tf}min_{h}h"
+                    print(f"Multi-model: processing {key}")
+
+                    # generate targets for the desired horizon
+                    direct_targets_tf = generate_direct_targets(df_tf, horizon_steps=steps)
+                    range_targets_tf = generate_range_targets(df_tf, future_window=steps)
+
+                    # align branches
+                    direct_merged = direct_feats_tf.merge(direct_targets_tf, on="timestamp", how="inner").sort_values("timestamp").reset_index(drop=True)
+                    range_merged = range_feats_tf.merge(range_targets_tf, on="timestamp", how="inner").sort_values("timestamp").reset_index(drop=True)
+
+                    direct_target_cols = [c for c in direct_merged.columns if str(c).startswith("target_")]
+                    range_target_cols = [c for c in range_merged.columns if str(c).startswith("target_")]
+
+                    X_direct = direct_merged.drop(columns=direct_target_cols, errors="ignore")
+                    y_direct = direct_merged[["target_future_close", "target_return", "target_log_return"]].copy()
+                    X_range = range_merged.drop(columns=range_target_cols, errors="ignore")
+                    y_range = range_merged[["target_range_low", "target_range_high"]].copy()
+
+                    # Train/test split and sync branches
+                    (X_direct_train, X_direct_test), (y_direct_train, y_direct_test) = split_train_test(X_direct, y_direct)
+                    (X_range_train, X_range_test), (y_range_train, y_range_test) = split_train_test(X_range, y_range)
+
+                    X_direct_train, y_direct_train, X_range_train, y_range_train = _sync_branch_pair(X_direct_train, y_direct_train, X_range_train, y_range_train)
+                    X_direct_test, y_direct_test, X_range_test, y_range_test = _sync_branch_pair(X_direct_test, y_direct_test, X_range_test, y_range_test)
+
+                    if X_direct_train.empty or X_direct_test.empty:
+                        print(f"Skipping {key}: empty splits after sync")
+                        continue
+
+                    X_direct_fit, X_direct_val, y_direct_fit, y_direct_val = _split_train_val(X_direct_train, y_direct_train, val_size=0.15)
+
+                    X_direct_fit_model = _drop_non_model_columns(X_direct_fit)
+                    X_direct_test_model = _drop_non_model_columns(X_direct_test)
+
+                    # Hyperparameter tuning (may be slow)
+                    # Optionally skip tuning to speed up multi-model runs
+                    if MULTI_SKIP_TUNING:
+                        params_tf = None
+                    else:
+                        try:
+                            params_tf = tune_direct_model(X_direct_fit_model, y_direct_fit["target_return"])
+                        except Exception as exc:
+                            print(f"tuning failed for {key}: {exc}")
+                            params_tf = None
+
+                    # Train model
+                    try:
+                        dm = train_direct_model(X_direct_fit_model, y_direct_fit, params=params_tf, save=False)
+                        ensure_dirs([MODEL_DIR])
+                        dm.save(os.path.join(MODEL_DIR, f"direct_model_{key}"))
+                    except Exception as exc:
+                        print(f"training failed for {key}: {exc}")
+                        continue
+
+                    # Evaluate on test set
+                    try:
+                        pred_ret = pd.Series(dm.predict(_drop_non_model_columns(X_direct_test)))
+                        current_close = pd.to_numeric(X_direct_test["close"], errors="coerce").reset_index(drop=True)
+                        pred_price = current_close * (1.0 + pred_ret)
+
+                        metrics_dict = regression_metrics(y_direct_test["target_future_close"].reset_index(drop=True), pred_price)
+                        metrics_dict["return_MAE"] = float(np.mean(np.abs(y_direct_test["target_return"].reset_index(drop=True) - pred_ret)))
+                        metrics_dict["sign_accuracy"] = float(np.mean(np.sign(y_direct_test["target_return"].reset_index(drop=True).to_numpy(dtype=float)) == np.sign(pred_ret.to_numpy(dtype=float))))
+
+                        # submodel diagnostics
+                        sub = {}
+                        try:
+                            dir_lbl = dm.direction_model.predict_label(_drop_non_model_columns(X_direct_test))
+                            y_true_arr = y_direct_test["target_return"].to_numpy(dtype=float)
+                            true_lbl = np.zeros_like(y_true_arr, dtype=int)
+                            dead = float(DIRECTION_DEADBAND)
+                            true_lbl[y_true_arr > dead] = 1
+                            true_lbl[y_true_arr < -dead] = -1
+                            sub["direction_label_accuracy"] = float(np.mean(dir_lbl == true_lbl))
+                        except Exception:
+                            pass
+                        try:
+                            mov = dm.movement_model.predict(_drop_non_model_columns(X_direct_test))
+                            sub["movement_mean_abs_pred"] = float(np.mean(np.abs(mov)))
+                            sub["movement_mean_abs_target"] = float(np.mean(np.abs(y_direct_test["target_return"].to_numpy(dtype=float))))
+                        except Exception:
+                            pass
+                        if sub:
+                            metrics_dict["submodel_diagnostics"] = sub
+
+                        multi_models_summary[key] = {"rows": int(len(X_direct_test)), "metrics": metrics_dict}
+                    except Exception as exc:
+                        print(f"evaluation failed for {key}: {exc}")
+                        continue
     except Exception as exc:
-        live_result = {"status": "failed", "error": str(exc)}
-        print(f"Live test skipped due to error: {exc}")
+        print(f"multi-model pipeline aborted: {exc}")
+
 
     summary = {
         "direct_fit": len(X_direct_fit_model),
@@ -352,6 +531,9 @@ def main() -> None:
         "backtest_summary": backtest_summary,
         "live": live_result,
     }
+    # attach multi-model metrics if computed
+    if multi_models_summary:
+        summary["multi_models"] = multi_models_summary
     save_json(summary, os.path.join(REPORT_DIR, "pipeline_summary.json"))
     print("Done")
 

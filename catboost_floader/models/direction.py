@@ -9,6 +9,7 @@ from catboost import CatBoostClassifier
 
 from catboost_floader.core.config import MODEL_DIR, DIRECT_CATBOOST_PARAMS, RANDOM_SEED, apply_hardware_params, DIRECTION_DEADBAND
 from catboost_floader.core.utils import ensure_dirs, get_logger, load_json, save_json
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
 logger = get_logger("model_direction")
 
@@ -26,6 +27,7 @@ class DirectionModel:
         self.label_map = label_map or {-1: 0, 0: 1, 1: 2}
         # reverse map cached
         self._rev_map = {v: k for k, v in self.label_map.items()}
+        self.is_degenerate: bool = False
 
     def _prepare_labels(self, y: pd.Series) -> pd.Series:
         # Convert continuous returns into sign classes: -1, 0, 1
@@ -40,23 +42,22 @@ class DirectionModel:
 
     def fit(self, X: pd.DataFrame, y: pd.Series):
         # prepare labels first so we can decide binary vs multiclass objective
+        # compute numeric returns and true sign classes for diagnostics
+        y_num = pd.to_numeric(y, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        dead = float(DIRECTION_DEADBAND)
+        true_signs = np.sign(y_num).astype(int)
+        true_signs[np.abs(y_num) < dead] = 0
+
         y_labels = self._prepare_labels(y)
 
         params = dict(self.params)
         params["random_seed"] = RANDOM_SEED
 
-        # if labels contain more than 2 unique values, switch to multiclass loss
-        unique_vals = np.unique(y_labels.to_numpy() if isinstance(y_labels, pd.Series) else y_labels)
-        if len(unique_vals) > 2:
-            # explicitly set multiclass objective when >2 classes present
-            params["loss_function"] = "MultiClass"
-            # prefer F1/accuracy for multiclass evaluation
-            params["eval_metric"] = "TotalF1"
-            logger.info("DirectionModel detected multiclass labels; using MultiClass loss")
-        else:
-            # leave provided loss (default is Logloss), but ensure sensible eval metric
-            params.setdefault("loss_function", "Logloss")
-            params.setdefault("eval_metric", "AUC")
+        # Always train as multiclass over {-1,0,1} mapped to {0,1,2}.
+        # This avoids objective mismatch and helps the model learn the neutral class
+        # instead of collapsing to it under class imbalance.
+        params["loss_function"] = "MultiClass"
+        params["eval_metric"] = "TotalF1"
 
         params = apply_hardware_params(params)
         # Use only numeric columns for training; drop categorical/text columns
@@ -66,7 +67,61 @@ class DirectionModel:
         self.feature_names = list(X_num.columns)
 
         self.model = CatBoostClassifier(**params)
-        self.model.fit(X_num, y_labels, verbose=False)
+
+        # Inverse-frequency sample weights to reduce class collapse.
+        y_arr = y_labels.to_numpy(dtype=int)
+        counts = np.bincount(y_arr, minlength=3).astype(float)
+        if counts.sum() <= 0 or (counts > 0).sum() <= 1:
+            sample_weight = None
+        else:
+            max_count = float(counts[counts > 0].max())
+            inv = np.zeros_like(counts, dtype=float)
+            for i in range(3):
+                if counts[i] > 0:
+                    inv[i] = max_count / counts[i]
+            sample_weight = inv[y_arr]
+            # normalize to keep scale reasonable
+            sw_mean = float(sample_weight.mean())
+            if sw_mean > 0:
+                sample_weight = sample_weight / sw_mean
+
+        self.model.fit(X_num, y_labels, verbose=False, sample_weight=sample_weight)
+        # Training diagnostics: distribution of true vs mapped labels and simple train performance
+        try:
+            ensure_dirs([MODEL_DIR])
+            preds = self.model.predict(X_num)
+            preds = np.asarray(preds, dtype=int)
+            # CatBoost may return labels with extra dimensions (e.g. (n, 1)).
+            preds = preds.reshape(-1)
+            pred_signs = np.array([self._rev_map.get(int(p), 0) for p in preds.tolist()], dtype=int)
+
+            pr, rc, f1, sup = precision_recall_fscore_support(true_signs, pred_signs, labels=[-1, 0, 1], zero_division=0)
+            cm = confusion_matrix(true_signs, pred_signs, labels=[-1, 0, 1]).tolist()
+
+            vals, cnts = np.unique(preds, return_counts=True)
+            predicted_counts = {str(int(v)): int(c) for v, c in zip(vals.tolist(), cnts.tolist())}
+
+            # detect degenerate classifier (predicts effectively one class only)
+            self.is_degenerate = len(vals) <= 1
+
+            diag = {
+                "train_rows": int(len(y_labels)),
+                "true_sign_counts": {"-1": int((true_signs == -1).sum()), "0": int((true_signs == 0).sum()), "1": int((true_signs == 1).sum())},
+                "mapped_label_counts": {str(int(k)): int(v) for k, v in y_labels.value_counts().to_dict().items()},
+                "predicted_mapped_counts": predicted_counts,
+                "per_class": {
+                    "-1": {"precision": float(pr[0]), "recall": float(rc[0]), "f1": float(f1[0]), "support": int(sup[0])},
+                    "0": {"precision": float(pr[1]), "recall": float(rc[1]), "f1": float(f1[1]), "support": int(sup[1])},
+                    "1": {"precision": float(pr[2]), "recall": float(rc[2]), "f1": float(f1[2]), "support": int(sup[2])},
+                },
+                "confusion_matrix": cm,
+                "model_classes": list(getattr(self.model, "classes_", [])),
+            }
+            # Save diagnostics
+            save_json(diag, os.path.join(MODEL_DIR, "direction_training_diagnostics.json"))
+            logger.info(f"Saved Direction training diagnostics to {os.path.join(MODEL_DIR, 'direction_training_diagnostics.json')}")
+        except Exception:
+            logger.exception("Failed to save direction training diagnostics")
         logger.info("Trained DirectionModel")
         return self
 

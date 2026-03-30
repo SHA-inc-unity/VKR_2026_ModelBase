@@ -8,7 +8,15 @@ import pandas as pd
 
 from catboost_floader.monitoring.anomaly_cleaning import annotate_anomalies
 from catboost_floader.models.confidence import ErrorCalibrator, compute_confidence, compute_ood_score
-from catboost_floader.core.config import BACKTEST_DIR, RANGE_BASELINE_ZSCORE, TEST_SIZE, DIRECTION_DEADBAND
+from sklearn.metrics import precision_recall_fscore_support
+from catboost_floader.core.config import (
+    BACKTEST_DIR,
+    RANGE_BASELINE_ZSCORE,
+    TEST_SIZE,
+    DIRECTION_DEADBAND,
+    SHORT_HORIZON,
+    MEDIUM_HORIZON,
+)
 from catboost_floader.core.utils import ensure_dirs, get_logger, save_json
 
 logger = get_logger("backtest")
@@ -34,20 +42,35 @@ def sign_accuracy(y_true, y_pred) -> float:
 
 def build_direct_baselines(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
-    out["baseline_persistence_return"] = 0.0
-    out["baseline_rolling_mean_return"] = df.get("ret_mean_30", pd.Series(np.zeros(len(df)), index=df.index)).fillna(0.0)
-    out["baseline_trend_return"] = df.get("ret_mean_60", pd.Series(np.zeros(len(df)), index=df.index)).fillna(0.0) * 3.0
+    # "Persistence": assume next-horizon return ~= last bar return (for aggregated bars).
+    out["baseline_persistence_return"] = df.get("return_1", pd.Series(np.zeros(len(df)), index=df.index)).fillna(0.0)
+    # "Rolling mean": mean return over short horizon window (for this model's timeframe).
+    out["baseline_rolling_mean_return"] = df.get(
+        f"ret_mean_{SHORT_HORIZON}", pd.Series(np.zeros(len(df)), index=df.index)
+    ).fillna(0.0)
+    # "Trend": mean return over medium horizon, scaled up a bit.
+    out["baseline_trend_return"] = df.get(
+        f"ret_mean_{MEDIUM_HORIZON}", pd.Series(np.zeros(len(df)), index=df.index)
+    ).fillna(0.0) * 3.0
     return out
 
 
 def build_range_baselines(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     current_close = pd.to_numeric(df.get("close", pd.Series(np.zeros(len(df)), index=df.index)), errors="coerce").fillna(0.0)
-    vol = pd.to_numeric(df.get("volatility_60", pd.Series(np.zeros(len(df)), index=df.index)), errors="coerce").fillna(0.0)
+    # base volatility at ~60 minutes horizon (expressed in 5m aggregated bars)
+    vol = pd.to_numeric(
+        df.get(f"volatility_{MEDIUM_HORIZON}", pd.Series(np.zeros(len(df)), index=df.index)),
+        errors="coerce",
+    ).fillna(0.0)
     width = current_close * vol * np.sqrt(180 / 60) * RANGE_BASELINE_ZSCORE
     out["baseline_range_low"] = current_close - width
     out["baseline_range_high"] = current_close + width
-    range_width = pd.to_numeric(df.get("range_width_180", pd.Series(np.zeros(len(df)), index=df.index)), errors="coerce").fillna(0.0)
+    # empirical range width at ~180 minutes horizon (for this model's aggregated bars: 36x5m)
+    range_width = pd.to_numeric(
+        df.get("range_width_36", pd.Series(np.zeros(len(df)), index=df.index)),
+        errors="coerce",
+    ).fillna(0.0)
     out["baseline_hist_quantile_low"] = current_close - range_width / 2.0
     out["baseline_hist_quantile_high"] = current_close + range_width / 2.0
     return out
@@ -98,13 +121,25 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
         direction_expectation = direct_model.direction_model.predict_sign_expectation(direct_X)
     except Exception:
         direction_expectation = np.full(len(direct_X), np.nan)
+    # attempt to extract class probabilities for debugging
+    try:
+        dir_probas = direct_model.direction_model.predict_proba(direct_X)
+    except Exception:
+        dir_probas = None
     try:
         movement_magnitude = direct_model.movement_model.predict(direct_X)
     except Exception:
         movement_magnitude = np.full(len(direct_X), np.nan)
     current_close = pd.to_numeric(direct_eval["close"], errors="coerce").reset_index(drop=True)
     pred_price = current_close * (1.0 + pred_return)
-    range_pred = range_model.predict(range_X)
+    # Pass direct-model info into range calibration when "direct_center" is selected.
+    # This keeps RangeModel._apply_calibration consistent with app/main.py's calibration.
+    range_pred = range_model.predict(
+        range_X,
+        current_close=current_close,
+        direct_pred_return=pred_return,
+        anomaly_flag=pd.to_numeric(direct_eval["anomaly_flag"], errors="coerce").fillna(0).astype(int).reset_index(drop=True),
+    )
     range_low = pd.Series(range_pred[:, 0])
     range_high = pd.Series(range_pred[:, 1])
 
@@ -126,6 +161,9 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
         "direct_pred_return": pred_return,
         "direction_pred_label": pd.Series(direction_label).reset_index(drop=True),
         "direction_pred_expectation": pd.Series(direction_expectation).reset_index(drop=True),
+        "direction_proba_neg": pd.Series(dir_probas[:, 0] if (dir_probas is not None and dir_probas.shape[1] > 0) else np.full(len(direct_X), np.nan)).reset_index(drop=True),
+        "direction_proba_zero": pd.Series(dir_probas[:, 1] if (dir_probas is not None and dir_probas.shape[1] > 1) else np.full(len(direct_X), np.nan)).reset_index(drop=True),
+        "direction_proba_pos": pd.Series(dir_probas[:, 2] if (dir_probas is not None and dir_probas.shape[1] > 2) else np.full(len(direct_X), np.nan)).reset_index(drop=True),
         "movement_pred_magnitude": pd.Series(movement_magnitude).reset_index(drop=True),
         "direct_pred_price": pred_price,
         "range_pred_low": range_low,
@@ -181,6 +219,19 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
             for p in (-1, 0, 1):
                 conf[f"true_{t}_pred_{p}"] = int(np.sum((true_lbl == t) & (dir_lbl == p)))
         dir_summary["confusion"] = conf
+        # per-class precision/recall/f1
+        try:
+            p, r, f, s = precision_recall_fscore_support(true_lbl, dir_lbl, labels=[-1, 0, 1], zero_division=0)
+            dir_summary["prf"] = {
+                "per_class": {
+                    "-1": {"precision": float(p[0]), "recall": float(r[0]), "f1": float(f[0]), "support": int(s[0])},
+                    "0": {"precision": float(p[1]), "recall": float(r[1]), "f1": float(f[1]), "support": int(s[1])},
+                    "1": {"precision": float(p[2]), "recall": float(r[2]), "f1": float(f[2]), "support": int(s[2])},
+                },
+                "macro": {"precision": float(np.mean(p)), "recall": float(np.mean(r)), "f1": float(np.mean(f))},
+            }
+        except Exception:
+            dir_summary["prf"] = {}
     if "direction_pred_expectation" in merged.columns:
         dir_exp = merged["direction_pred_expectation"].to_numpy(dtype=float)
         dir_summary["expectation_sign_accuracy"] = float(np.mean(np.sign(dir_exp) == np.sign(y_true)))
@@ -261,7 +312,15 @@ def run_backtest(direct_features: pd.DataFrame, range_features: pd.DataFrame, di
 
     merged.to_csv(os.path.join(BACKTEST_DIR, "backtest_results.csv"), index=False)
     save_json(summary, os.path.join(BACKTEST_DIR, "backtest_summary.json"))
-    save_json(baseline_summary, os.path.join(BACKTEST_DIR, "comparison_vs_baselines.json"))
+    save_json(
+        {
+            "direct_model": direct_summary,
+            "direct_baselines": baseline_summary,
+            "range_model": range_summary,
+            "range_baseline": range_baseline_summary,
+        },
+        os.path.join(BACKTEST_DIR, "comparison_vs_baselines.json"),
+    )
     merged[["timestamp", "close", "target_future_close", "target_return", "direct_pred_return", "direct_pred_price", "baseline_persistence_price", "baseline_rolling_price", "confidence", "anomaly_flag", "anomaly_score", "anomaly_type"]].to_csv(os.path.join(BACKTEST_DIR, "direct_backtest_results.csv"), index=False)
     merged[["timestamp", "close", "target_future_close", "range_pred_low", "range_pred_high", "baseline_range_low", "baseline_range_high", "confidence", "anomaly_flag", "anomaly_score", "anomaly_type"]].to_csv(os.path.join(BACKTEST_DIR, "range_backtest_results.csv"), index=False)
     logger.info(f"Backtest summary: {summary}")

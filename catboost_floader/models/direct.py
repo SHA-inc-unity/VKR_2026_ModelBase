@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from catboost_floader.core.config import DIRECT_CATBOOST_PARAMS, MODEL_DIR, MAGNITUDE_CALIBRATION
+from catboost_floader.core.config import DIRECT_CATBOOST_PARAMS, MODEL_DIR, MAGNITUDE_CALIBRATION, DIRECTION_DEADBAND
 from catboost_floader.core.utils import ensure_dirs, get_logger, load_json, save_json
 from catboost_floader.models.direction import DirectionModel
 from catboost_floader.models.movement import MovementModel
@@ -70,13 +70,33 @@ class DirectModel:
             return alpha * raw_pred + (1.0 - alpha) * baseline
         return raw_pred
 
+    def _fallback_direction_sign(self, X: pd.DataFrame) -> np.ndarray:
+        """Heuristic sign when DirectionModel is effectively degenerate.
+
+        Uses simple momentum features if доступны, иначе знак последнего ретёрна.
+        """
+        dead = float(DIRECTION_DEADBAND)
+        X_num = X.select_dtypes(include=[np.number])
+        if "ret_mean_6" in X_num.columns:
+            base = pd.to_numeric(X_num["ret_mean_6"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        elif "return_1" in X_num.columns:
+            base = pd.to_numeric(X_num["return_1"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        else:
+            return np.zeros(len(X_num), dtype=float)
+        signs = np.sign(base)
+        signs[np.abs(base) < dead] = 0.0
+        return signs.astype(float)
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         # Combined prediction: expected sign * predicted magnitude
         X_orig = X.copy()
         # movement magnitude
         mag = self.movement_model.predict(X_orig)
         # expected sign in [-1,1]
-        sign = self.direction_model.predict_sign_expectation(X_orig)
+        if getattr(self.direction_model, "is_degenerate", False):
+            sign = self._fallback_direction_sign(X_orig)
+        else:
+            sign = self.direction_model.predict_sign_expectation(X_orig)
         raw = np.asarray(sign * mag, dtype=float)
         # Apply optional global calibration for magnitude (quick experimental knob)
         try:

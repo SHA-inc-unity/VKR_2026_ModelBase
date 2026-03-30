@@ -56,7 +56,10 @@ class RangeModel:
         low_raw = np.asarray(low_raw, dtype=float)
         high_raw = np.asarray(high_raw, dtype=float)
         center_mode = str(self.calibration.get("center_mode", "model_center"))
-        center = (low_raw + high_raw) / 2.0 if center_mode == "model_center" else low_raw + (high_raw - low_raw) / 2.0
+        # NOTE: center_mode can be "direct_center" (calibrated around direct model center)
+        # but direct-center requires direct-model outputs to be supplied at inference time.
+        # If they are missing, we fall back to model-center to keep the model usable.
+        center = (low_raw + high_raw) / 2.0 if center_mode == "model_center" else (low_raw + high_raw) / 2.0
         half = np.maximum((high_raw - low_raw) / 2.0, 0.0)
 
         anomaly_flags = None
@@ -81,14 +84,77 @@ class RangeModel:
         high = np.maximum(low_adj, high_adj)
         return np.vstack([low, high]).T
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
+    def _apply_calibration_with_optional_direct_center(
+        self,
+        X_original: pd.DataFrame,
+        low_raw: np.ndarray,
+        high_raw: np.ndarray,
+        current_close: Optional[pd.Series | np.ndarray] = None,
+        direct_pred_return: Optional[pd.Series | np.ndarray] = None,
+        anomaly_flag: Optional[pd.Series | np.ndarray] = None,
+    ) -> np.ndarray:
+        low_raw = np.asarray(low_raw, dtype=float)
+        high_raw = np.asarray(high_raw, dtype=float)
+        center_mode = str(self.calibration.get("center_mode", "model_center"))
+
+        model_center = (low_raw + high_raw) / 2.0
+        center = model_center
+        if center_mode == "direct_center":
+            if current_close is not None and direct_pred_return is not None:
+                cur = np.asarray(current_close, dtype=float)
+                dpr = np.asarray(direct_pred_return, dtype=float)
+                if cur.shape[0] == center.shape[0] and dpr.shape[0] == center.shape[0]:
+                    center = cur * (1.0 + dpr)
+
+        half = np.maximum((high_raw - low_raw) / 2.0, 0.0)
+
+        if anomaly_flag is not None:
+            anomaly_flags = np.asarray(anomaly_flag, dtype=float)
+            anomaly_flags = np.where(np.isnan(anomaly_flags), 0, anomaly_flags).astype(int)
+        elif "anomaly_flag" in X_original.columns:
+            anomaly_flags = pd.to_numeric(X_original["anomaly_flag"], errors="coerce").fillna(0).to_numpy(dtype=int)
+        else:
+            anomaly_flags = np.zeros(len(center), dtype=int)
+
+        low_adj = np.empty_like(center)
+        high_adj = np.empty_like(center)
+        for i in range(len(center)):
+            if anomaly_flags[i] == 1:
+                scale = float(self.calibration.get("scale_anomaly", 1.0))
+                margin = float(self.calibration.get("margin_anomaly", 0.0))
+            else:
+                scale = float(self.calibration.get("scale_normal", 1.0))
+                margin = float(self.calibration.get("margin_normal", 0.0))
+            hw = half[i] * scale + margin
+            low_adj[i] = center[i] - hw
+            high_adj[i] = center[i] + hw
+
+        low = np.minimum(low_adj, high_adj)
+        high = np.maximum(low_adj, high_adj)
+        return np.vstack([low, high]).T
+
+    def predict(
+        self,
+        X: pd.DataFrame,
+        *,
+        current_close: Optional[pd.Series | np.ndarray] = None,
+        direct_pred_return: Optional[pd.Series | np.ndarray] = None,
+        anomaly_flag: Optional[pd.Series | np.ndarray] = None,
+    ) -> np.ndarray:
         if self.low_model is None or self.high_model is None:
             raise RuntimeError("RangeModel is not trained or loaded")
         X_orig = self._prepare_inference_frame(X)
         X_use = X_orig.reindex(columns=self.feature_names, fill_value=0.0) if self.feature_names else X_orig
         low_raw = self.low_model.predict(X_use)
         high_raw = self.high_model.predict(X_use)
-        return self._apply_calibration(X_orig, low_raw, high_raw)
+        return self._apply_calibration_with_optional_direct_center(
+            X_original=X_orig,
+            low_raw=low_raw,
+            high_raw=high_raw,
+            current_close=current_close,
+            direct_pred_return=direct_pred_return,
+            anomaly_flag=anomaly_flag,
+        )
 
     def save(self, prefix: str):
         if self.low_model is None or self.high_model is None:

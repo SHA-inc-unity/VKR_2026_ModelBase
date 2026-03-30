@@ -10,7 +10,12 @@ logger = get_logger("data_preprocessing")
 REQUIRED_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume", "turnover"]
 
 
-def _aggregate_for_modeling(df: pd.DataFrame, timeframe_min: int) -> pd.DataFrame:
+def aggregate_for_modeling(df: pd.DataFrame, timeframe_min: int) -> pd.DataFrame:
+    """Aggregate minute-level dataframe into `timeframe_min`-minute bars.
+
+    Public helper (previously _aggregate_for_modeling). Returns a dataframe
+    resampled by the requested minute rule.
+    """
     if timeframe_min <= 1:
         return df.copy()
 
@@ -36,6 +41,10 @@ def _aggregate_for_modeling(df: pd.DataFrame, timeframe_min: int) -> pd.DataFram
     return out
 
 
+# Backwards-compatible alias for code still referencing the old private name
+_aggregate_for_modeling = aggregate_for_modeling
+
+
 def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         raise ValueError("Input dataframe is empty.")
@@ -57,7 +66,7 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
 
     out = out.ffill().bfill()
     out = out.dropna().reset_index(drop=True)
-    out = _aggregate_for_modeling(out, MODEL_TIMEFRAME_MINUTES)
+    out = aggregate_for_modeling(out, MODEL_TIMEFRAME_MINUTES)
 
     logger.info(f"Preprocessed dataframe shape: {out.shape}")
     return out
