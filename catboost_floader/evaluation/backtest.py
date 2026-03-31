@@ -14,10 +14,15 @@ from catboost_floader.models.confidence import (
 )
 from sklearn.metrics import precision_recall_fscore_support
 from catboost_floader.core.config import (
+    apply_cpu_worker_limits,
     BACKTEST_DIR,
+    current_worker_thread_count,
     ENABLE_GPU_BACKTEST,
+    format_cpu_stage_policy_log,
     GPU_BACKTEST_DEVICE,
+    is_nested_outer_parallel,
     RANGE_BASELINE_ZSCORE,
+    resolve_cpu_stage_parallel_policy,
     TEST_SIZE,
     DIRECTION_DEADBAND,
     SHORT_HORIZON,
@@ -122,6 +127,25 @@ def run_backtest(
 ) -> Tuple[pd.DataFrame, dict]:
     logger.info("Running backtest")
     ensure_dirs([output_dir])
+
+    nested_outer_parallel = is_nested_outer_parallel()
+    nested_thread_count = current_worker_thread_count()
+    backtest_policy = resolve_cpu_stage_parallel_policy(
+        "backtest",
+        parallel_units=max(1, len(direct_features)),
+        granularity="chunk",
+        nested_outer_parallel=nested_outer_parallel,
+        nested_thread_count=nested_thread_count if nested_outer_parallel else None,
+        allow_parallel=True,
+    )
+    apply_cpu_worker_limits(
+        int(backtest_policy["inner_threads"]),
+        mark_outer_parallel=nested_outer_parallel,
+    )
+    logger.info(
+        "Backtest stage using CPU policy: %s",
+        format_cpu_stage_policy_log(backtest_policy),
+    )
 
     direct_eval = annotate_anomalies(direct_features.copy()).reset_index(drop=True)
     range_eval = annotate_anomalies(range_features.copy()).reset_index(drop=True)
@@ -244,6 +268,7 @@ def run_backtest(
     # Per-model sign accuracy diagnostics
     dead = float(DIRECTION_DEADBAND)
     y_true = merged["target_return"].to_numpy(dtype=float)
+    backtest_points = int(len(merged))
     # true labels with deadband
     true_lbl = np.zeros_like(y_true, dtype=int)
     true_lbl[y_true > dead] = 1
@@ -266,10 +291,14 @@ def run_backtest(
 
     # Direction submodel
     dir_summary = {}
+    direction_points = 0
     if "direction_pred_label" in merged.columns:
-        dir_lbl = pd.to_numeric(merged["direction_pred_label"], errors="coerce").fillna(0).to_numpy(dtype=int)
+        dir_lbl_series = pd.to_numeric(merged["direction_pred_label"], errors="coerce")
+        direction_points = int(dir_lbl_series.notna().sum())
+        dir_lbl = dir_lbl_series.fillna(0).to_numpy(dtype=int)
         dir_summary["label_accuracy"] = float(np.mean(dir_lbl == true_lbl))
         dir_summary["direction_accuracy_pct"] = _accuracy_pct(dir_summary["label_accuracy"])
+        dir_summary["direction_points"] = direction_points
         # confusion
         conf = {}
         for t in (-1, 0, 1):
@@ -348,6 +377,8 @@ def run_backtest(
     elif "direct" in per_model:
         direction_accuracy = float(per_model["direct"]["label"])
     accuracy_metrics = {
+        "backtest_points": backtest_points,
+        "direction_points": direction_points,
         "direction_accuracy": direction_accuracy,
         "direction_accuracy_pct": _accuracy_pct(direction_accuracy),
         "sign_accuracy": float(direct_summary["sign_accuracy"]),
@@ -379,9 +410,11 @@ def run_backtest(
         "range_baseline": range_baseline_summary,
         "regime_summary": regime_summary,
         "accuracy_metrics": accuracy_metrics,
+        "backtest_points": backtest_points,
+        "direction_points": direction_points,
         "direction_accuracy_pct": accuracy_metrics["direction_accuracy_pct"],
         "sign_accuracy_pct": accuracy_metrics["sign_accuracy_pct"],
-        "rows": int(len(merged)),
+        "rows": backtest_points,
     }
 
     # Attach per-model diagnostics to summary (computed earlier)

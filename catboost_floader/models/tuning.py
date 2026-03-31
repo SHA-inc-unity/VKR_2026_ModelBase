@@ -21,6 +21,7 @@ from catboost_floader.core.config import (
     DIRECT_SEARCH_GRID,
     ENABLE_PARALLEL_CPU_FULL_EVALUATION,
     ENABLE_GPU_FULL_EVALUATION,
+    format_cpu_stage_policy_log,
     HALVING_FACTOR,
     HALVING_MAX_ROWS,
     is_nested_outer_parallel,
@@ -29,6 +30,7 @@ from catboost_floader.core.config import (
     RANGE_LOW_CATBOOST_PARAMS,
     RANGE_SEARCH_GRID,
     REPORT_DIR,
+    resolve_cpu_stage_parallel_policy,
     resolve_stage2_parallel_policy,
     TIME_SERIES_SPLITS,
 )
@@ -324,7 +326,6 @@ def _run_stage2_full_evaluation(
     folds: int,
     scorer: str,
     nested_outer_parallel: bool,
-    nested_thread_count: int | None,
 ) -> tuple[float, Dict[str, Any] | None]:
     fold_specs = _build_stage2_fold_specs(X_stage2, folds)
     stage2_candidates: List[Dict[str, Any]] = []
@@ -347,26 +348,12 @@ def _run_stage2_full_evaluation(
         len(fold_specs),
         nested_outer_parallel=nested_outer_parallel,
     )
-    if nested_outer_parallel and nested_thread_count:
-        stage2_policy["inner_threads"] = max(1, min(stage2_policy["inner_threads"], nested_thread_count))
-        stage2_policy["estimated_cpu_budget"] = (
-            stage2_policy["outer_workers"] * stage2_policy["inner_threads"]
-            if stage2_policy["parallel_enabled"]
-            else stage2_policy["inner_threads"]
-        )
 
     stage2_started_at = time.perf_counter()
     logger.info(
-        "Stage 2 full evaluation started for %s using %s CPU parallelism. outer_workers=%s inner_threads=%s granularity=%s nested=%s target_threads=%s parallel_units=%s estimated_cpu_budget=%s",
+        "Stage 2 full evaluation using CPU policy for %s: %s",
         name,
-        stage2_policy["mode"],
-        stage2_policy["outer_workers"],
-        stage2_policy["inner_threads"],
-        stage2_policy["granularity"],
-        stage2_policy["nested_enabled"],
-        stage2_policy["target_threads"],
-        stage2_policy["parallel_units"],
-        stage2_policy["estimated_cpu_budget"],
+        format_cpu_stage_policy_log(stage2_policy),
     )
 
     if not stage2_candidates or not fold_specs:
@@ -617,14 +604,22 @@ def _run_search(name, base_params, grid, X, y, scorer):
     scores = []
     nested_outer_parallel = is_nested_outer_parallel()
     nested_thread_count = current_worker_thread_count()
-    default_workers = max(1, min(4, (os.cpu_count() or 1) - 1))
-    workers = int(os.environ.get("CATBOOST_SEARCH_WORKERS", default_workers))
-    if nested_outer_parallel:
-        workers = 1
-        logger.info(
-            "Stage 1 fast screening for %s is running inside an outer CPU-parallel worker; forcing worker_count=1 to avoid oversubscription.",
-            name,
-        )
+    stage1_policy = resolve_cpu_stage_parallel_policy(
+        "fast_screening",
+        parallel_units=len(param_grid),
+        granularity="candidate",
+        nested_outer_parallel=nested_outer_parallel,
+        nested_thread_count=nested_thread_count if nested_outer_parallel else None,
+        allow_parallel=ENABLE_PARALLEL_CPU_FULL_EVALUATION,
+    )
+    workers = int(stage1_policy["outer_workers"])
+    stage1_inner_threads = int(stage1_policy["inner_threads"])
+    apply_cpu_worker_limits(stage1_inner_threads, mark_outer_parallel=nested_outer_parallel)
+    logger.info(
+        "Stage 1 fast screening using CPU policy for %s: %s",
+        name,
+        format_cpu_stage_policy_log(stage1_policy),
+    )
 
     def _eval_candidate(idx, params):
         try:
@@ -634,7 +629,7 @@ def _run_search(name, base_params, grid, X, y, scorer):
             p["iterations"] = max(10, int(orig_iter // max(1, HALVING_FACTOR * 2)))
             p["depth"] = min(int(p.get("depth", 8)), 6)
 
-            model = _make_estimator(p, thread_count=nested_thread_count if nested_outer_parallel else None)
+            model = _make_estimator(p, thread_count=stage1_inner_threads)
             model.fit(X_fast, y_fast)
             preds = model.predict(X_fast)
             score = _score_predictions(y_fast.to_numpy(), np.asarray(preds), scorer)
@@ -711,7 +706,6 @@ def _run_search(name, base_params, grid, X, y, scorer):
         folds=stage2_folds,
         scorer=scorer,
         nested_outer_parallel=nested_outer_parallel,
-        nested_thread_count=nested_thread_count,
     )
     print(f"\n{name}: best_score = {best_score}")
     print(f"{name}: best_params = {best_params}")
