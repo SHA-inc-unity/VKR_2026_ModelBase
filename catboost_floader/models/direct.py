@@ -47,6 +47,10 @@ def _resolve_composition_config(profile_name: Optional[str], overrides: Optional
     return cfg
 
 
+def resolve_direct_composition_config(profile_name: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return _resolve_composition_config(profile_name, overrides)
+
+
 def _weighted_direction_mix(
     label_signal: np.ndarray,
     expectation_signal: np.ndarray,
@@ -117,7 +121,17 @@ class DirectModel:
             return np.zeros(len(X), dtype=float)
         return pd.to_numeric(baselines[baseline_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
 
-    def _compose_sign_mode(self, mode: str, label_signal: np.ndarray, expectation_signal: np.ndarray, *, prefix: str) -> np.ndarray:
+    def _compose_sign_mode(
+        self,
+        mode: str,
+        label_signal: np.ndarray,
+        expectation_signal: np.ndarray,
+        *,
+        prefix: str,
+        cfg: Optional[Dict[str, Any]] = None,
+    ) -> np.ndarray:
+        if cfg is None:
+            cfg = self.composition_config
         mode_name = str(mode or "").lower()
         label_arr = np.clip(np.asarray(label_signal, dtype=float), -1.0, 1.0)
         expectation_arr = np.clip(np.asarray(expectation_signal, dtype=float), -1.0, 1.0)
@@ -126,8 +140,8 @@ class DirectModel:
         if mode_name == "expectation":
             return expectation_arr
         if mode_name == "blend":
-            label_weight = float(self.composition_config.get(f"{prefix}_label_weight", 0.0))
-            expectation_weight = float(self.composition_config.get(f"{prefix}_expectation_weight", 1.0))
+            label_weight = float(cfg.get(f"{prefix}_label_weight", 0.0))
+            expectation_weight = float(cfg.get(f"{prefix}_expectation_weight", 1.0))
             return _weighted_direction_mix(
                 label_arr,
                 expectation_arr,
@@ -165,8 +179,9 @@ class DirectModel:
         signs[np.abs(base) < dead] = 0.0
         return signs.astype(float)
 
-    def _expectation_sign(self, expectation: np.ndarray) -> np.ndarray:
-        cfg = self.composition_config
+    def _expectation_sign(self, expectation: np.ndarray, cfg: Optional[Dict[str, Any]] = None) -> np.ndarray:
+        if cfg is None:
+            cfg = self.composition_config
         out = np.clip(np.asarray(expectation, dtype=float), -1.0, 1.0)
         power = float(cfg.get("expectation_power", 1.0))
         if power != 1.0:
@@ -176,9 +191,16 @@ class DirectModel:
             out[np.abs(out) < deadband] = 0.0
         return out
 
-    def _scale_movement_magnitude(self, X: pd.DataFrame, movement_magnitude: np.ndarray) -> np.ndarray:
+    def _scale_movement_magnitude(
+        self,
+        X: pd.DataFrame,
+        movement_magnitude: np.ndarray,
+        cfg: Optional[Dict[str, Any]] = None,
+    ) -> np.ndarray:
+        if cfg is None:
+            cfg = self.composition_config
         adjusted = np.asarray(movement_magnitude, dtype=float).copy()
-        anomaly_floor = float(self.composition_config.get("anomaly_magnitude_floor", 0.2))
+        anomaly_floor = float(cfg.get("anomaly_magnitude_floor", 0.2))
         try:
             anomaly_score = pd.to_numeric(X.get("anomaly_score", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float)
             shrink = float(ANOMALY_MAGNITUDE_SHRINK)
@@ -188,14 +210,16 @@ class DirectModel:
         except Exception:
             pass
 
-        movement_scale = float(self.composition_config.get("movement_scale", 1.0))
+        movement_scale = float(cfg.get("movement_scale", 1.0))
         calib = float(getattr(self, "_magnitude_calibration", MAGNITUDE_CALIBRATION))
         total_scale = movement_scale * calib
         if total_scale != 1.0:
             adjusted = adjusted * total_scale
         return adjusted
 
-    def _compose_direction_signal(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
+    def _compose_direction_signal(self, X: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
+        if cfg is None:
+            cfg = self.composition_config
         if getattr(self.direction_model, "is_degenerate", False):
             fallback = self._fallback_direction_sign(X)
             nan_probs = np.full((len(fallback), 3), np.nan, dtype=float)
@@ -214,12 +238,12 @@ class DirectModel:
             else:
                 max_p = np.full(len(X), np.nan, dtype=float)
             labels = np.asarray(components["label"], dtype=float)
-            expectation = self._expectation_sign(components["expectation"])
-            threshold = float(self.composition_config.get("label_confidence_threshold", 0.0))
-            high_conf_mode = str(self.composition_config.get("high_confidence_sign_mode", "label"))
-            low_conf_mode = str(self.composition_config.get("low_confidence_sign_mode", "neutral"))
-            high_conf_sign = self._compose_sign_mode(high_conf_mode, labels, expectation, prefix="high_confidence")
-            low_conf_sign = self._compose_sign_mode(low_conf_mode, labels, expectation, prefix="low_confidence")
+            expectation = self._expectation_sign(components["expectation"], cfg=cfg)
+            threshold = float(cfg.get("label_confidence_threshold", 0.0))
+            high_conf_mode = str(cfg.get("high_confidence_sign_mode", "label"))
+            low_conf_mode = str(cfg.get("low_confidence_sign_mode", "neutral"))
+            high_conf_sign = self._compose_sign_mode(high_conf_mode, labels, expectation, prefix="high_confidence", cfg=cfg)
+            low_conf_sign = self._compose_sign_mode(low_conf_mode, labels, expectation, prefix="low_confidence", cfg=cfg)
             sign = np.where(max_p >= threshold, high_conf_sign, low_conf_sign)
             return {
                 "sign": np.clip(np.asarray(sign, dtype=float), -1.0, 1.0),
@@ -228,7 +252,7 @@ class DirectModel:
                 "probs": probs,
             }
         except Exception:
-            expectation = self._expectation_sign(self.direction_model.predict_sign_expectation(X))
+            expectation = self._expectation_sign(self.direction_model.predict_sign_expectation(X), cfg=cfg)
             nan_probs = np.full((len(expectation), 3), np.nan, dtype=float)
             return {
                 "sign": expectation.astype(float),
@@ -237,12 +261,24 @@ class DirectModel:
                 "probs": nan_probs,
             }
 
-    def predict_details(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
+    def predict_details(
+        self,
+        X: pd.DataFrame,
+        *,
+        composition_profile: Optional[str] = None,
+        composition_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, np.ndarray]:
         X_orig = X.copy()
+        active_profile = self.composition_profile if composition_profile is None else composition_profile
+        active_cfg = (
+            self.composition_config
+            if composition_profile is None and composition_config is None
+            else _resolve_composition_config(active_profile, composition_config)
+        )
         movement_magnitude = np.asarray(self.movement_model.predict(X_orig), dtype=float)
-        direction = self._compose_direction_signal(X_orig)
+        direction = self._compose_direction_signal(X_orig, cfg=active_cfg)
         sign = np.asarray(direction["sign"], dtype=float)
-        adjusted_magnitude = self._scale_movement_magnitude(X_orig, movement_magnitude)
+        adjusted_magnitude = self._scale_movement_magnitude(X_orig, movement_magnitude, cfg=active_cfg)
         raw = np.asarray(sign * adjusted_magnitude, dtype=float)
         pred_return = self._apply_strategy(raw, X_orig)
         return {
@@ -256,8 +292,18 @@ class DirectModel:
             "direction_proba": np.asarray(direction["probs"], dtype=float),
         }
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return self.predict_details(X)["pred_return"]
+    def predict(
+        self,
+        X: pd.DataFrame,
+        *,
+        composition_profile: Optional[str] = None,
+        composition_config: Optional[Dict[str, Any]] = None,
+    ) -> np.ndarray:
+        return self.predict_details(
+            X,
+            composition_profile=composition_profile,
+            composition_config=composition_config,
+        )["pred_return"]
 
     def save(self, prefix: str):
         ensure_dirs([os.path.dirname(prefix)])

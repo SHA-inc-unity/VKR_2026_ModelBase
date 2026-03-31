@@ -36,7 +36,7 @@ from catboost_floader.data.ingestion import assemble_market_dataset
 from catboost_floader.data.preprocessing import preprocess_data
 from catboost_floader.features.engineering import build_direct_features, build_range_features
 from catboost_floader.models.tuning import tune_direct_model, tune_range_high_model, tune_range_low_model
-from catboost_floader.models.direct import train_direct_model
+from catboost_floader.models.direct import resolve_direct_composition_config, train_direct_model
 from catboost_floader.models.range import train_range_model
 from catboost_floader.targets.generation import generate_direct_targets, generate_range_targets
 from catboost_floader.core.utils import ensure_dirs, get_logger, save_json
@@ -169,6 +169,32 @@ def _main_direct_composition_profile() -> str:
     return "main_direct_pipeline"
 
 
+def _direct_profile_sequence(direct_model) -> list[str | None]:
+    active_profile = getattr(direct_model, "composition_profile", None)
+    active_cfg = _direct_strategy_config(direct_model)
+    profile_sequence: list[str | None] = [active_profile]
+    for fallback in active_cfg.get("profile_fallbacks", []):
+        fallback_name = str(fallback).strip()
+        if fallback_name:
+            profile_sequence.append(fallback_name)
+    if None not in profile_sequence:
+        profile_sequence.append(None)
+
+    unique_profiles: list[str | None] = []
+    seen: set[str] = set()
+    for profile_name in profile_sequence:
+        key = "default" if profile_name in (None, "", "default") else str(profile_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_profiles.append(None if key == "default" else key)
+    return unique_profiles
+
+
+def _direct_profile_key(profile_name: str | None) -> str:
+    return "default" if profile_name in (None, "", "default") else str(profile_name)
+
+
 def _direct_strategy_alpha_grid(strategy_cfg: Dict[str, Any]) -> list[float]:
     alpha_grid = []
     for alpha in strategy_cfg.get("strategy_alpha_grid", [0.25, 0.4, 0.55, 0.7, 0.85]):
@@ -191,12 +217,13 @@ def _direct_strategy_candidates(strategy_cfg: Dict[str, Any]) -> list[Dict[str, 
     baselines = baselines or ["persistence", "rolling_mean"]
     alpha_grid = _direct_strategy_alpha_grid(strategy_cfg)
 
-    candidates: list[Dict[str, object]] = [{"type": "model_only", "alpha": 1.0, "baseline": "persistence"}]
+    candidates: list[Dict[str, object]] = []
     for baseline_name in baselines:
         if allow_baseline_only:
             candidates.append({"type": "baseline_only", "alpha": 0.0, "baseline": baseline_name})
         for alpha in alpha_grid:
             candidates.append({"type": "blend", "alpha": alpha, "baseline": baseline_name})
+    candidates.append({"type": "model_only", "alpha": 1.0, "baseline": "persistence"})
     return candidates
 
 
@@ -243,8 +270,7 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
         return {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
 
     X_model = _drop_non_model_columns(X_val_full)
-    direct_details = direct_model.predict_details(X_model.reindex(columns=direct_model.feature_names, fill_value=0.0))
-    raw_pred = np.asarray(direct_details["raw_pred_return"], dtype=float)
+    X_model_aligned = X_model.reindex(columns=direct_model.feature_names, fill_value=0.0)
     close = pd.to_numeric(X_val_full["close"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     target_price = pd.to_numeric(y_val["target_future_close"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     baselines = build_direct_baselines(X_val_full)
@@ -254,31 +280,66 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
         "trend": pd.to_numeric(baselines["baseline_trend_return"], errors="coerce").fillna(0.0).to_numpy(dtype=float),
     }
 
-    strategy_cfg = _direct_strategy_config(direct_model)
-    prefer_model_tol = float(strategy_cfg.get("strategy_prefer_model_tolerance", 0.0))
-    candidates = _direct_strategy_candidates(strategy_cfg)
+    profile_sequence_keys: list[str] = []
+    profile_results: dict[str, Dict[str, Any]] = {}
+    for profile_name in _direct_profile_sequence(direct_model):
+        strategy_cfg = resolve_direct_composition_config(profile_name)
+        profile_key = _direct_profile_key(profile_name)
+        profile_sequence_keys.append(profile_key)
+        if not bool(strategy_cfg.get("profile_enabled", True)):
+            profile_results[profile_key] = {
+                "profile": profile_key,
+                "config": dict(strategy_cfg),
+                "validation_mae": None,
+                "status": "config_disabled",
+                "selected": None,
+                "candidate_count": 0,
+            }
+            continue
+        direct_details = direct_model.predict_details(
+            X_model_aligned,
+            composition_profile=profile_name,
+            composition_config=strategy_cfg,
+        )
+        raw_pred = np.asarray(direct_details["raw_pred_return"], dtype=float)
+        prefer_model_tol = float(strategy_cfg.get("strategy_prefer_model_tolerance", 0.0))
+        candidates = _direct_strategy_candidates(strategy_cfg)
+        profile_best = None
+        profile_best_mae = np.inf
 
-    best = None
-    best_mae = np.inf
-    for strategy in candidates:
-        if strategy["type"] == "model_only":
-            ret = raw_pred
-        elif strategy["type"] == "baseline_only":
-            ret = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
-        else:
-            base = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
-            ret = strategy["alpha"] * raw_pred + (1.0 - strategy["alpha"]) * base
-        pred_price = close * (1.0 + ret)
-        mae = float(np.mean(np.abs(target_price - pred_price)))
-        is_better = mae < best_mae - 1e-12
-        if not is_better and best is not None and prefer_model_tol > 0:
-            mae_tol = max(best_mae, 1e-8) * prefer_model_tol
-            if abs(mae - best_mae) <= mae_tol and _direct_strategy_model_weight(strategy) > _direct_strategy_model_weight(best):
-                is_better = True
-        if is_better:
-            best_mae = mae
-            best = dict(strategy)
-            best["validation_mae"] = mae
+        for strategy in candidates:
+            if strategy["type"] == "model_only":
+                ret = raw_pred
+            elif strategy["type"] == "baseline_only":
+                ret = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
+            else:
+                base = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
+                ret = strategy["alpha"] * raw_pred + (1.0 - strategy["alpha"]) * base
+            pred_price = close * (1.0 + ret)
+            mae = float(np.mean(np.abs(target_price - pred_price)))
+            is_better = mae < profile_best_mae - 1e-12
+            if not is_better and profile_best is not None:
+                mae_gap = abs(mae - profile_best_mae)
+                if prefer_model_tol > 0:
+                    mae_tol = max(profile_best_mae, 1e-8) * prefer_model_tol
+                    if mae_gap <= mae_tol and _direct_strategy_model_weight(strategy) > _direct_strategy_model_weight(profile_best):
+                        is_better = True
+                elif mae_gap <= 1e-12 and _direct_strategy_model_weight(strategy) < _direct_strategy_model_weight(profile_best):
+                    is_better = True
+            if is_better:
+                profile_best_mae = mae
+                profile_best = dict(strategy)
+                profile_best["validation_mae"] = mae
+                profile_best["composition_profile"] = profile_key
+
+        profile_results[profile_key] = {
+            "profile": profile_key,
+            "config": dict(strategy_cfg),
+            "validation_mae": None if profile_best is None else float(profile_best_mae),
+            "status": "candidate",
+            "selected": profile_best,
+            "candidate_count": len(candidates),
+        }
 
     # Safety guard: never choose a strategy that is noticeably worse than
     # pure persistence baseline on validation.
@@ -287,21 +348,101 @@ def _select_direct_strategy(direct_model, X_val_full: pd.DataFrame, y_val: pd.Da
         base_pers_price = close * (1.0 + base_pers)
         base_mae = float(np.mean(np.abs(target_price - base_pers_price)))
     except Exception:
-        base_mae = best_mae
+        base_mae = np.inf
 
-    if best is None:
+    default_result = profile_results.get("default")
+    default_mae = None if default_result is None else default_result.get("validation_mae")
+    evaluation_log: list[Dict[str, Any]] = []
+    selectable_results: list[Dict[str, Any]] = []
+    for profile_key in profile_sequence_keys:
+        result = profile_results.get(profile_key)
+        if not result:
+            continue
+        record = {
+            "profile": profile_key,
+            "validation_mae": result.get("validation_mae"),
+            "status": result.get("status", "candidate"),
+            "candidate_count": result.get("candidate_count", 0),
+        }
+        if result.get("selected") is not None:
+            record["strategy"] = dict(result["selected"])
+
+        if profile_key == "default" and result.get("validation_mae") is not None:
+            result["status"] = "default_candidate"
+        elif result.get("selected") is not None and default_mae is not None:
+            mae_val = float(result["validation_mae"])
+            delta_mae = float(default_mae - mae_val)
+            rel_improvement = delta_mae / max(abs(default_mae), 1e-8)
+            cfg = result["config"]
+            min_improvement = float(cfg.get("profile_min_relative_improvement_vs_default", 0.0))
+            disable_gap = float(cfg.get("profile_disable_relative_gap_vs_default", 0.0))
+            result["delta_mae_vs_default"] = delta_mae
+            result["relative_improvement_vs_default"] = rel_improvement
+            record["delta_mae_vs_default"] = delta_mae
+            record["relative_improvement_vs_default"] = rel_improvement
+            if mae_val > default_mae * (1.0 + disable_gap) + 1e-12:
+                result["status"] = "inactive_default_dominates"
+            elif rel_improvement <= min_improvement + 1e-12:
+                result["status"] = "fallback_default"
+            else:
+                result["status"] = "eligible"
+
+        record["status"] = result.get("status", record["status"])
+        evaluation_log.append(record)
+
+        if result.get("selected") is None:
+            continue
+        if profile_key == "default" or result.get("status") == "eligible":
+            selectable_results.append(result)
+
+    if not selectable_results:
         return {"type": "model_only", "alpha": 1.0, "baseline": "persistence"}
 
+    best_result = selectable_results[0]
+    for candidate in selectable_results[1:]:
+        candidate_mae = float(candidate["validation_mae"])
+        best_mae = float(best_result["validation_mae"])
+        if candidate_mae < best_mae - 1e-12:
+            best_result = candidate
+            continue
+        if abs(candidate_mae - best_mae) <= 1e-12:
+            candidate_weight = _direct_strategy_model_weight(candidate["selected"])
+            best_weight = _direct_strategy_model_weight(best_result["selected"])
+            if candidate_weight < best_weight:
+                best_result = candidate
+
+    best = dict(best_result["selected"])
+    best["profile_selection_mode"] = "validation_driven_fallback"
+    best["profile_evaluations"] = evaluation_log
+    best["default_validation_mae"] = default_mae
+    best["selected_profile_status"] = best_result.get("status", "eligible")
+    best_cfg = dict(best_result["config"])
+    best_profile = best_result["profile"]
+    best_mae = float(best_result["validation_mae"])
+
     # если стратегия хуже persistence даже с небольшим допуском — принудительно используем persistence
-    tolerance = float(strategy_cfg.get("strategy_persistence_guard_tolerance", 0.005))
+    tolerance = float((best_cfg or {}).get("strategy_persistence_guard_tolerance", 0.005))
     if base_mae > 0 and best_mae > base_mae * (1.0 + tolerance):
-        return {
+        safe_strategy = {
             "type": "baseline_only",
             "alpha": 0.0,
             "baseline": "persistence",
             "validation_mae": base_mae,
+            "composition_profile": best_profile,
+            "profile_selection_mode": "validation_driven_fallback",
+            "profile_evaluations": evaluation_log,
+            "default_validation_mae": default_mae,
+            "selected_profile_status": best_result.get("status", "eligible"),
         }
+        direct_model.composition_profile = best_profile
+        if best_cfg is not None:
+            direct_model.composition_config = dict(best_cfg)
+        direct_model.strategy = safe_strategy
+        return safe_strategy
 
+    direct_model.composition_profile = best_profile
+    if best_cfg is not None:
+        direct_model.composition_config = dict(best_cfg)
     return best
 
 
@@ -601,10 +742,12 @@ def _run_pipeline_bundle(
         direct_feature_stats=feature_stats,
         output_dir=backtest_dir,
     )
+    accuracy_metrics = dict(backtest_summary.get("accuracy_metrics", {}) or {})
     _export_raw_model_artifacts(backtest_df, backtest_dir)
     save_json(
         {
             "direct_strategy": direct_strategy,
+            "direct_profile_selection": direct_strategy.get("profile_evaluations", []),
             "range_calibration": range_calibration,
             "rows": {
                 "direct_fit": int(len(prepared["X_direct_fit_model"])),
@@ -618,8 +761,11 @@ def _run_pipeline_bundle(
                 "direct": int(prepared["X_direct_fit_model"].shape[1]),
                 "range": int(prepared["X_range_fit_model"].shape[1]),
             },
-            "direct_composition_profile": direct_composition_profile,
+            "direct_composition_profile": getattr(direct_model, "composition_profile", direct_composition_profile),
             "direct_composition_config": getattr(direct_model, "composition_config", {}),
+            "accuracy_metrics": accuracy_metrics,
+            "direction_accuracy_pct": accuracy_metrics.get("direction_accuracy_pct"),
+            "sign_accuracy_pct": accuracy_metrics.get("sign_accuracy_pct"),
         },
         os.path.join(backtest_dir, "pipeline_metadata.json"),
     )
@@ -633,7 +779,8 @@ def _run_pipeline_bundle(
         "error_calibrator": calibrator,
         "backtest_df": backtest_df,
         "backtest_summary": backtest_summary,
-        "direct_composition_profile": direct_composition_profile,
+        "accuracy_metrics": accuracy_metrics,
+        "direct_composition_profile": getattr(direct_model, "composition_profile", direct_composition_profile),
         "direct_composition_config": getattr(direct_model, "composition_config", {}),
     }
 
@@ -694,6 +841,9 @@ def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "direct_strategy": result_tf["direct_strategy"],
         "range_calibration": result_tf["range_calibration"],
         "metrics": result_tf["backtest_summary"],
+        "accuracy_metrics": result_tf.get("accuracy_metrics", {}),
+        "direction_accuracy_pct": result_tf.get("accuracy_metrics", {}).get("direction_accuracy_pct"),
+        "sign_accuracy_pct": result_tf.get("accuracy_metrics", {}).get("sign_accuracy_pct"),
         "artifacts": artifacts,
     }
     logger.info("CPU-parallel multi-model worker finished for %s", key)
@@ -910,6 +1060,9 @@ def main() -> None:
         "direct_strategy": main_result["direct_strategy"],
         "range_calibration": main_result["range_calibration"],
         "backtest_summary": main_result["backtest_summary"],
+        "accuracy_metrics": main_result.get("accuracy_metrics", {}),
+        "direction_accuracy_pct": main_result.get("accuracy_metrics", {}).get("direction_accuracy_pct"),
+        "sign_accuracy_pct": main_result.get("accuracy_metrics", {}).get("sign_accuracy_pct"),
         "live": live_result,
     }
     # attach multi-model metrics if computed

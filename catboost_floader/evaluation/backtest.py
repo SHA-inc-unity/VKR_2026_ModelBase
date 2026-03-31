@@ -46,6 +46,16 @@ def sign_accuracy(y_true, y_pred) -> float:
     return float(np.mean(np.sign(y_true) == np.sign(y_pred)))
 
 
+def _accuracy_pct(value) -> float | None:
+    try:
+        value_f = float(value)
+    except Exception:
+        return None
+    if np.isnan(value_f):
+        return None
+    return round(value_f * 100.0, 2)
+
+
 def build_direct_baselines(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     # "Persistence": assume next-horizon return ~= last bar return (for aggregated bars).
@@ -228,6 +238,7 @@ def run_backtest(
     direct_summary = regression_metrics(merged["target_future_close"], merged["direct_pred_price"])
     direct_summary["return_MAE"] = float(np.mean(np.abs(merged["target_return"] - merged["direct_pred_return"])))
     direct_summary["sign_accuracy"] = sign_accuracy(merged["target_return"], merged["direct_pred_return"])
+    direct_summary["sign_accuracy_pct"] = _accuracy_pct(direct_summary["sign_accuracy"])
     direct_summary["corr"] = float(merged[["target_return", "direct_pred_return"]].corr().iloc[0, 1]) if len(merged) > 2 else np.nan
 
     # Per-model sign accuracy diagnostics
@@ -250,12 +261,15 @@ def run_backtest(
             "label": float(np.mean(pred_lbl == true_lbl)),
             "label_counts": {"-1": int((pred_lbl == -1).sum()), "0": int((pred_lbl == 0).sum()), "1": int((pred_lbl == 1).sum())},
         }
+        per_model["direct"]["sign_accuracy_pct"] = _accuracy_pct(per_model["direct"]["sign"])
+        per_model["direct"]["label_accuracy_pct"] = _accuracy_pct(per_model["direct"]["label"])
 
     # Direction submodel
     dir_summary = {}
     if "direction_pred_label" in merged.columns:
         dir_lbl = pd.to_numeric(merged["direction_pred_label"], errors="coerce").fillna(0).to_numpy(dtype=int)
         dir_summary["label_accuracy"] = float(np.mean(dir_lbl == true_lbl))
+        dir_summary["direction_accuracy_pct"] = _accuracy_pct(dir_summary["label_accuracy"])
         # confusion
         conf = {}
         for t in (-1, 0, 1):
@@ -278,6 +292,7 @@ def run_backtest(
     if "direction_pred_expectation" in merged.columns:
         dir_exp = merged["direction_pred_expectation"].to_numpy(dtype=float)
         dir_summary["expectation_sign_accuracy"] = float(np.mean(np.sign(dir_exp) == np.sign(y_true)))
+        dir_summary["expectation_sign_accuracy_pct"] = _accuracy_pct(dir_summary["expectation_sign_accuracy"])
     if dir_summary:
         per_model["direction"] = dir_summary
 
@@ -313,6 +328,8 @@ def run_backtest(
             "sign": float(np.mean(np.sign(base_p_ret) == np.sign(y_true))),
             "label": float(np.mean(((base_p_ret > dead).astype(int) - (base_p_ret < -dead).astype(int)) == true_lbl)),
         }
+        baselines_ps["persistence"]["sign_accuracy_pct"] = _accuracy_pct(baselines_ps["persistence"]["sign"])
+        baselines_ps["persistence"]["label_accuracy_pct"] = _accuracy_pct(baselines_ps["persistence"]["label"])
     if "baseline_rolling_price" in merged.columns:
         base_r = merged["baseline_rolling_price"].to_numpy(dtype=float)
         base_r_ret = (base_r - merged["close"].to_numpy(dtype=float)) / (np.abs(merged["close"].to_numpy(dtype=float)) + 1e-8)
@@ -320,8 +337,22 @@ def run_backtest(
             "sign": float(np.mean(np.sign(base_r_ret) == np.sign(y_true))),
             "label": float(np.mean(((base_r_ret > dead).astype(int) - (base_r_ret < -dead).astype(int)) == true_lbl)),
         }
+        baselines_ps["rolling_mean"]["sign_accuracy_pct"] = _accuracy_pct(baselines_ps["rolling_mean"]["sign"])
+        baselines_ps["rolling_mean"]["label_accuracy_pct"] = _accuracy_pct(baselines_ps["rolling_mean"]["label"])
     if baselines_ps:
         per_model["baselines"] = baselines_ps
+
+    direction_accuracy = None
+    if dir_summary.get("label_accuracy") is not None:
+        direction_accuracy = float(dir_summary["label_accuracy"])
+    elif "direct" in per_model:
+        direction_accuracy = float(per_model["direct"]["label"])
+    accuracy_metrics = {
+        "direction_accuracy": direction_accuracy,
+        "direction_accuracy_pct": _accuracy_pct(direction_accuracy),
+        "sign_accuracy": float(direct_summary["sign_accuracy"]),
+        "sign_accuracy_pct": _accuracy_pct(direct_summary["sign_accuracy"]),
+    }
 
     baseline_summary = {
         "persistence": regression_metrics(merged["target_future_close"], merged["baseline_persistence_price"]),
@@ -347,6 +378,9 @@ def run_backtest(
         "range_model": range_summary,
         "range_baseline": range_baseline_summary,
         "regime_summary": regime_summary,
+        "accuracy_metrics": accuracy_metrics,
+        "direction_accuracy_pct": accuracy_metrics["direction_accuracy_pct"],
+        "sign_accuracy_pct": accuracy_metrics["sign_accuracy_pct"],
         "rows": int(len(merged)),
     }
 
