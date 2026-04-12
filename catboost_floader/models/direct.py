@@ -95,6 +95,7 @@ class DirectModel:
         self.composition_profile = composition_profile
         self.composition_config: Dict[str, Any] = _resolve_composition_config(composition_profile, composition_config)
         self._magnitude_calibration = float(MAGNITUDE_CALIBRATION)
+        self.direction_calibration: Dict[str, Any] = {}
         # backward-compatible single-model reference (uses movement model for feature importance)
         self.model = getattr(self.movement_model, "model", None)
 
@@ -191,6 +192,38 @@ class DirectModel:
             out[np.abs(out) < deadband] = 0.0
         return out
 
+    def _resolve_direction_runtime_thresholds(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        active_profile: Optional[str],
+    ) -> tuple[float, float]:
+        confidence_threshold = float(cfg.get("label_confidence_threshold", 0.0))
+        direction_deadband = max(0.0, float(cfg.get("direction_deadband", DIRECTION_DEADBAND)))
+
+        calibration = dict(getattr(self, "direction_calibration", {}) or {})
+        if not bool(calibration.get("applied", False)):
+            return confidence_threshold, direction_deadband
+
+        applies_to_profiles = calibration.get("applies_to_profiles")
+        profile_key = "default" if active_profile in (None, "", "default") else str(active_profile)
+        if isinstance(applies_to_profiles, list) and profile_key not in {str(p) for p in applies_to_profiles}:
+            return confidence_threshold, direction_deadband
+
+        calibrated_threshold = calibration.get("selected_confidence_threshold")
+        calibrated_deadband = calibration.get("selected_deadband")
+        if calibrated_threshold is not None:
+            try:
+                confidence_threshold = float(calibrated_threshold)
+            except Exception:
+                pass
+        if calibrated_deadband is not None:
+            try:
+                direction_deadband = max(0.0, float(calibrated_deadband))
+            except Exception:
+                pass
+        return confidence_threshold, direction_deadband
+
     def _scale_movement_magnitude(
         self,
         X: pd.DataFrame,
@@ -217,17 +250,29 @@ class DirectModel:
             adjusted = adjusted * total_scale
         return adjusted
 
-    def _compose_direction_signal(self, X: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
+    def _compose_direction_signal(
+        self,
+        X: pd.DataFrame,
+        cfg: Optional[Dict[str, Any]] = None,
+        *,
+        active_profile: Optional[str] = None,
+    ) -> Dict[str, np.ndarray]:
         if cfg is None:
             cfg = self.composition_config
         if getattr(self.direction_model, "is_degenerate", False):
             fallback = self._fallback_direction_sign(X)
             nan_probs = np.full((len(fallback), 3), np.nan, dtype=float)
+            confidence_threshold, direction_deadband = self._resolve_direction_runtime_thresholds(
+                cfg=cfg,
+                active_profile=active_profile,
+            )
             return {
                 "sign": fallback.astype(float),
                 "label": fallback.astype(int),
                 "expectation": fallback.astype(float),
                 "probs": nan_probs,
+                "confidence_threshold": float(confidence_threshold),
+                "direction_deadband": float(direction_deadband),
             }
 
         try:
@@ -238,8 +283,14 @@ class DirectModel:
             else:
                 max_p = np.full(len(X), np.nan, dtype=float)
             labels = np.asarray(components["label"], dtype=float)
-            expectation = self._expectation_sign(components["expectation"], cfg=cfg)
-            threshold = float(cfg.get("label_confidence_threshold", 0.0))
+            raw_expectation = np.asarray(components["expectation"], dtype=float)
+            threshold, direction_deadband = self._resolve_direction_runtime_thresholds(
+                cfg=cfg,
+                active_profile=active_profile,
+            )
+            expectation = self._expectation_sign(raw_expectation, cfg=cfg)
+            if direction_deadband > 0.0:
+                labels[np.abs(raw_expectation) < direction_deadband] = 0.0
             high_conf_mode = str(cfg.get("high_confidence_sign_mode", "label"))
             low_conf_mode = str(cfg.get("low_confidence_sign_mode", "neutral"))
             high_conf_sign = self._compose_sign_mode(high_conf_mode, labels, expectation, prefix="high_confidence", cfg=cfg)
@@ -247,18 +298,26 @@ class DirectModel:
             sign = np.where(max_p >= threshold, high_conf_sign, low_conf_sign)
             return {
                 "sign": np.clip(np.asarray(sign, dtype=float), -1.0, 1.0),
-                "label": np.asarray(components["label"], dtype=int),
-                "expectation": np.asarray(components["expectation"], dtype=float),
+                "label": np.asarray(labels, dtype=int),
+                "expectation": np.asarray(expectation, dtype=float),
                 "probs": probs,
+                "confidence_threshold": float(threshold),
+                "direction_deadband": float(direction_deadband),
             }
         except Exception:
             expectation = self._expectation_sign(self.direction_model.predict_sign_expectation(X), cfg=cfg)
             nan_probs = np.full((len(expectation), 3), np.nan, dtype=float)
+            confidence_threshold, direction_deadband = self._resolve_direction_runtime_thresholds(
+                cfg=cfg,
+                active_profile=active_profile,
+            )
             return {
                 "sign": expectation.astype(float),
                 "label": np.sign(expectation).astype(int),
                 "expectation": expectation.astype(float),
                 "probs": nan_probs,
+                "confidence_threshold": float(confidence_threshold),
+                "direction_deadband": float(direction_deadband),
             }
 
     def predict_details(
@@ -276,7 +335,7 @@ class DirectModel:
             else _resolve_composition_config(active_profile, composition_config)
         )
         movement_magnitude = np.asarray(self.movement_model.predict(X_orig), dtype=float)
-        direction = self._compose_direction_signal(X_orig, cfg=active_cfg)
+        direction = self._compose_direction_signal(X_orig, cfg=active_cfg, active_profile=active_profile)
         sign = np.asarray(direction["sign"], dtype=float)
         adjusted_magnitude = self._scale_movement_magnitude(X_orig, movement_magnitude, cfg=active_cfg)
         raw = np.asarray(sign * adjusted_magnitude, dtype=float)
@@ -290,6 +349,8 @@ class DirectModel:
             "direction_label": np.asarray(direction["label"], dtype=int),
             "direction_expectation": np.asarray(direction["expectation"], dtype=float),
             "direction_proba": np.asarray(direction["probs"], dtype=float),
+            "direction_confidence_threshold": float(direction.get("confidence_threshold", active_cfg.get("label_confidence_threshold", 0.0))),
+            "direction_deadband": float(direction.get("direction_deadband", active_cfg.get("direction_deadband", DIRECTION_DEADBAND))),
         }
 
     def predict(
@@ -317,6 +378,7 @@ class DirectModel:
                 "magnitude_calibration": MAGNITUDE_CALIBRATION,
                 "composition_profile": self.composition_profile,
                 "composition_config": self.composition_config,
+                "direction_calibration": self.direction_calibration,
             },
             prefix + ".json",
         )
@@ -329,6 +391,9 @@ class DirectModel:
         self.strategy = meta.get("strategy", self.strategy)
         self.composition_profile = meta.get("composition_profile", self.composition_profile)
         self.composition_config = _resolve_composition_config(self.composition_profile, meta.get("composition_config"))
+        self.direction_calibration = dict(meta.get("direction_calibration", {}) or {})
+        if not self.direction_calibration:
+            self.direction_calibration = dict(getattr(self.direction_model, "calibration", {}) or {})
         # if a calibration factor was saved with the model metadata, prefer it
         if isinstance(meta.get("magnitude_calibration"), (int, float)):
             try:

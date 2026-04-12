@@ -34,8 +34,8 @@ from catboost_floader.core.config import (
     ROBUSTNESS_STATUS_SNAPSHOT_WINNER_MIN_SNAPSHOT_DELTA,
 )
 
-from catboost_floader.app.direct_robustness import _extract_robustness_metrics, _safe_float
-from catboost_floader.app.holdout_safeguard import _extract_snapshot_metrics
+from catboost_floader.selection.direct_robustness import _extract_robustness_metrics, _safe_float
+from catboost_floader.selection.holdout_safeguard import _extract_snapshot_metrics
 
 
 def _robustness_regime_policy() -> Dict[str, Any]:

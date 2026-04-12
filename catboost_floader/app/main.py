@@ -22,11 +22,11 @@ from catboost_floader.data.preprocessing import preprocess_data
 from catboost_floader.features.engineering import build_direct_features, build_range_features
 from catboost_floader.targets.generation import generate_direct_targets, generate_range_targets
 
-from catboost_floader.app.composition_profiles import _main_direct_composition_profile
 from catboost_floader.app.multi_model_orchestration import _run_multi_models
 from catboost_floader.app.pipeline_execution import _run_pipeline_bundle
 from catboost_floader.app.pipeline_preparation import _prepare_pipeline_splits, _tune_pipeline_models
 from catboost_floader.app.pipeline_summary import _build_pipeline_summary
+from catboost_floader.selection.composition_profiles import _main_direct_composition_profile
 
 logger = get_logger("app_main")
 

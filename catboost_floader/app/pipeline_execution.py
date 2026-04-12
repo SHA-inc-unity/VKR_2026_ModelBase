@@ -18,27 +18,58 @@ from catboost_floader.core.config import (
     REPORT_DIR,
     apply_cpu_worker_limits,
 )
-from catboost_floader.core.utils import ensure_dirs, save_json
+from catboost_floader.core.utils import _prepare_catboost_params, ensure_dirs, save_json
+from catboost_floader.diagnostics.overfitting_diagnostics import (
+    compute_direct_overfitting_diagnostics,
+    overfitting_flat_fields,
+)
 from catboost_floader.evaluation.backtest import run_backtest
 from catboost_floader.evaluation.multi_window import evaluate_model_multi_window
 from catboost_floader.models.confidence import fit_error_calibrator
 from catboost_floader.models.direct import train_direct_model
 from catboost_floader.models.range import train_range_model
 
-from catboost_floader.app.direct_robustness import _direct_strategy_robustness_payload
-from catboost_floader.app.direct_strategy import _select_direct_strategy
-from catboost_floader.app.holdout_safeguard import _apply_main_holdout_safeguard
 from catboost_floader.app.pipeline_preparation import (
     _calibrate_range_model,
     _export_raw_model_artifacts,
     _save_feature_importance,
 )
-from catboost_floader.app.pipeline_utils import _prepare_catboost_params
-from catboost_floader.app.robustness_regime import _classify_robustness_regime
+from catboost_floader.selection.direct_robustness import _direct_strategy_robustness_payload
+from catboost_floader.selection.direct_strategy import _select_direct_strategy
+from catboost_floader.selection.holdout_safeguard import _apply_main_holdout_safeguard
+from catboost_floader.selection.robustness_regime import _classify_robustness_regime
 
 
 def _initialize_multi_model_worker(thread_count: int) -> None:
     apply_cpu_worker_limits(thread_count, mark_outer_parallel=True)
+
+
+def _build_raw_vs_guarded_trace_fields(
+    *,
+    direct_strategy: Dict[str, Any],
+    holdout_safeguard: Dict[str, Any],
+) -> Dict[str, Any]:
+    strategy_out = dict(direct_strategy or {})
+    safeguard = dict(holdout_safeguard or {})
+
+    before_guard = dict(safeguard.get("final_holdout_candidate_before_guard", {}) or {})
+    after_guard = dict(safeguard.get("final_holdout_candidate_after_guard", {}) or {})
+
+    before_type = str(before_guard.get("type", strategy_out.get("type", "model_only")))
+    after_type = str(after_guard.get("type", strategy_out.get("type", "model_only")))
+    guard_applied = bool(
+        safeguard.get(
+            "final_holdout_guard_applied",
+            safeguard.get("applied", False),
+        )
+    )
+
+    return {
+        "raw_model_candidate_type": "model_only",
+        "raw_model_used_before_guard": before_type != "baseline_only",
+        "guarded_candidate_type": after_type,
+        "guarded_candidate_after_guard": guard_applied,
+    }
 
 
 def _run_pipeline_bundle(
@@ -74,7 +105,12 @@ def _run_pipeline_bundle(
         composition_profile=direct_composition_profile,
         save=False,
     )
-    direct_strategy = _select_direct_strategy(direct_model, prepared["X_direct_val"], prepared["y_direct_val"])
+    direct_strategy = _select_direct_strategy(
+        direct_model,
+        prepared["X_direct_val"],
+        prepared["y_direct_val"],
+        model_key=model_key,
+    )
     direct_model.strategy = direct_strategy
 
     range_model = train_range_model(
@@ -101,8 +137,25 @@ def _run_pipeline_bundle(
         y_holdout=prepared["y_direct_test"],
     )
     direct_model.strategy = direct_strategy
+    direction_calibration = dict(getattr(direct_model, "direction_calibration", {}) or {})
     direct_strategy_robustness = _direct_strategy_robustness_payload(direct_strategy)
     direct_strategy_robustness["final_holdout_safeguard"] = holdout_safeguard
+    main_selection_relaxed_rule_applied = bool(direct_strategy.get("main_selection_relaxed_rule_applied", False))
+    main_selection_final_ranking_reason = str(direct_strategy.get("main_selection_final_ranking_reason", ""))
+    main_selection_baseline_overridden = bool(direct_strategy.get("main_selection_baseline_overridden", False))
+    main_selection_candidate_type = str(
+        direct_strategy.get("main_selection_candidate_type", direct_strategy.get("type", "model_only"))
+    )
+    main_persistence_promotion_applied = bool(direct_strategy.get("main_persistence_promotion_applied", False))
+    main_persistence_promotable_candidate_count = int(
+        direct_strategy.get("main_persistence_promotable_candidate_count", 0) or 0
+    )
+    main_persistence_promotable_non_baseline_count = int(
+        direct_strategy.get("main_persistence_promotable_non_baseline_count", 0) or 0
+    )
+    main_persistence_baseline_excluded_from_promotion = bool(
+        direct_strategy.get("main_persistence_baseline_excluded_from_promotion", False)
+    )
 
     direct_model.save(os.path.join(model_dir, "direct_model"))
     range_model.save(os.path.join(model_dir, "range_model"))
@@ -135,6 +188,7 @@ def _run_pipeline_bundle(
     )
     backtest_summary["direct_strategy"] = direct_strategy
     backtest_summary["direct_profile_selection"] = direct_strategy.get("profile_evaluations", [])
+    backtest_summary["direction_calibration"] = direction_calibration
     backtest_summary["direct_strategy_robustness"] = direct_strategy_robustness
     accuracy_metrics = dict(backtest_summary.get("accuracy_metrics", {}) or {})
     _export_raw_model_artifacts(backtest_df, backtest_dir)
@@ -170,18 +224,69 @@ def _run_pipeline_bundle(
         final_holdout_safeguard=holdout_safeguard,
     )
 
+    final_holdout_guard_applied = bool(
+        holdout_safeguard.get(
+            "final_holdout_guard_applied",
+            holdout_safeguard.get("applied", False),
+        )
+    )
+    final_holdout_guard_reason = holdout_safeguard.get(
+        "final_holdout_guard_reason",
+        holdout_safeguard.get("reason"),
+    )
+    final_holdout_delta_vs_baseline = holdout_safeguard.get("final_holdout_delta_vs_baseline")
+    final_holdout_candidate_before_guard = holdout_safeguard.get("final_holdout_candidate_before_guard", {})
+    final_holdout_candidate_after_guard = holdout_safeguard.get("final_holdout_candidate_after_guard", {})
+    raw_model_metrics = dict(backtest_summary.get("raw_model_metrics", {}) or {})
+    raw_vs_guarded_trace = _build_raw_vs_guarded_trace_fields(
+        direct_strategy=direct_strategy,
+        holdout_safeguard=holdout_safeguard,
+    )
+    overfitting_diagnostics = compute_direct_overfitting_diagnostics(
+        direct_model=direct_model,
+        X_train_full=prepared["X_direct_fit"],
+        y_train=prepared["y_direct_fit"],
+        X_val_full=prepared["X_direct_val"],
+        y_val=prepared["y_direct_val"],
+        holdout_backtest_summary=backtest_summary,
+    )
+    overfitting_metrics = overfitting_flat_fields(overfitting_diagnostics)
+
     backtest_summary["robustness_classification"] = robustness_classification
     backtest_summary["robustness_status"] = robustness_classification.get("robustness_status")
     backtest_summary["disabled_by_robustness"] = bool(robustness_classification.get("disabled_by_robustness", False))
     backtest_summary["robustness_disable_reason"] = robustness_classification.get("robustness_disable_reason")
     backtest_summary["selection_eligibility"] = bool(robustness_classification.get("selection_eligibility", True))
     backtest_summary["final_holdout_safeguard_applied"] = bool(robustness_classification.get("final_holdout_safeguard_applied", False))
+    backtest_summary["final_holdout_guard_applied"] = final_holdout_guard_applied
+    backtest_summary["final_holdout_guard_reason"] = final_holdout_guard_reason
+    backtest_summary["final_holdout_delta_vs_baseline"] = final_holdout_delta_vs_baseline
+    backtest_summary["final_holdout_candidate_before_guard"] = final_holdout_candidate_before_guard
+    backtest_summary["final_holdout_candidate_after_guard"] = final_holdout_candidate_after_guard
+    backtest_summary["main_selection_relaxed_rule_applied"] = main_selection_relaxed_rule_applied
+    backtest_summary["main_selection_final_ranking_reason"] = main_selection_final_ranking_reason
+    backtest_summary["main_selection_baseline_overridden"] = main_selection_baseline_overridden
+    backtest_summary["main_selection_candidate_type"] = main_selection_candidate_type
+    backtest_summary["main_persistence_promotion_applied"] = main_persistence_promotion_applied
+    backtest_summary["main_persistence_promotable_candidate_count"] = main_persistence_promotable_candidate_count
+    backtest_summary["main_persistence_promotable_non_baseline_count"] = (
+        main_persistence_promotable_non_baseline_count
+    )
+    backtest_summary["main_persistence_baseline_excluded_from_promotion"] = (
+        main_persistence_baseline_excluded_from_promotion
+    )
+    backtest_summary["raw_model_metrics"] = raw_model_metrics
+    backtest_summary.update(raw_model_metrics)
+    backtest_summary.update(raw_vs_guarded_trace)
+    backtest_summary["overfitting_diagnostics"] = overfitting_diagnostics
+    backtest_summary.update(overfitting_metrics)
     save_json(backtest_summary, os.path.join(backtest_dir, "backtest_summary.json"))
 
     save_json(
         {
             "direct_strategy": direct_strategy,
             "direct_profile_selection": direct_strategy.get("profile_evaluations", []),
+            "direction_calibration": direction_calibration,
             "direct_strategy_robustness": direct_strategy_robustness,
             "robustness_classification": robustness_classification,
             "robustness_status": robustness_classification.get("robustness_status"),
@@ -189,6 +294,24 @@ def _run_pipeline_bundle(
             "robustness_disable_reason": robustness_classification.get("robustness_disable_reason"),
             "selection_eligibility": bool(robustness_classification.get("selection_eligibility", True)),
             "final_holdout_safeguard_applied": bool(robustness_classification.get("final_holdout_safeguard_applied", False)),
+            "final_holdout_guard_applied": final_holdout_guard_applied,
+            "final_holdout_guard_reason": final_holdout_guard_reason,
+            "final_holdout_delta_vs_baseline": final_holdout_delta_vs_baseline,
+            "final_holdout_candidate_before_guard": final_holdout_candidate_before_guard,
+            "final_holdout_candidate_after_guard": final_holdout_candidate_after_guard,
+            "main_selection_relaxed_rule_applied": main_selection_relaxed_rule_applied,
+            "main_selection_final_ranking_reason": main_selection_final_ranking_reason,
+            "main_selection_baseline_overridden": main_selection_baseline_overridden,
+            "main_selection_candidate_type": main_selection_candidate_type,
+            "main_persistence_promotion_applied": main_persistence_promotion_applied,
+            "main_persistence_promotable_candidate_count": main_persistence_promotable_candidate_count,
+            "main_persistence_promotable_non_baseline_count": main_persistence_promotable_non_baseline_count,
+            "main_persistence_baseline_excluded_from_promotion": main_persistence_baseline_excluded_from_promotion,
+            "raw_model_metrics": raw_model_metrics,
+            **raw_model_metrics,
+            **raw_vs_guarded_trace,
+            "overfitting_diagnostics": overfitting_diagnostics,
+            **overfitting_metrics,
             "range_calibration": range_calibration,
             "rows": {
                 "direct_fit": int(len(prepared["X_direct_fit_model"])),
@@ -218,8 +341,28 @@ def _run_pipeline_bundle(
         "feature_stats": feature_stats,
         "direct_model": direct_model,
         "direct_strategy": direct_strategy,
+        "direction_calibration": direction_calibration,
         "direct_strategy_robustness": direct_strategy_robustness,
         "robustness_classification": robustness_classification,
+        "final_holdout_safeguard": holdout_safeguard,
+        "final_holdout_guard_applied": final_holdout_guard_applied,
+        "final_holdout_guard_reason": final_holdout_guard_reason,
+        "final_holdout_delta_vs_baseline": final_holdout_delta_vs_baseline,
+        "final_holdout_candidate_before_guard": final_holdout_candidate_before_guard,
+        "final_holdout_candidate_after_guard": final_holdout_candidate_after_guard,
+        "main_selection_relaxed_rule_applied": main_selection_relaxed_rule_applied,
+        "main_selection_final_ranking_reason": main_selection_final_ranking_reason,
+        "main_selection_baseline_overridden": main_selection_baseline_overridden,
+        "main_selection_candidate_type": main_selection_candidate_type,
+        "main_persistence_promotion_applied": main_persistence_promotion_applied,
+        "main_persistence_promotable_candidate_count": main_persistence_promotable_candidate_count,
+        "main_persistence_promotable_non_baseline_count": main_persistence_promotable_non_baseline_count,
+        "main_persistence_baseline_excluded_from_promotion": main_persistence_baseline_excluded_from_promotion,
+        "raw_model_metrics": raw_model_metrics,
+        **raw_model_metrics,
+        **raw_vs_guarded_trace,
+        "overfitting_diagnostics": overfitting_diagnostics,
+        **overfitting_metrics,
         "range_model": range_model,
         "range_calibration": range_calibration,
         "error_calibrator": calibrator,

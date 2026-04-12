@@ -10,12 +10,13 @@ from catboost_floader.core.config import (
     apply_cpu_worker_limits,
 )
 from catboost_floader.core.utils import get_logger
+from catboost_floader.diagnostics.artifact_registry import _multi_model_artifact_paths
+from catboost_floader.diagnostics.overfitting_diagnostics import overfitting_flat_fields
 from catboost_floader.targets.generation import generate_direct_targets, generate_range_targets
 
-from catboost_floader.app.composition_profiles import _direct_composition_profile_for_key
 from catboost_floader.app.pipeline_execution import _run_pipeline_bundle
 from catboost_floader.app.pipeline_preparation import _prepare_pipeline_splits, _tune_pipeline_models
-from catboost_floader.app.pipeline_utils import _multi_model_artifact_paths
+from catboost_floader.selection.composition_profiles import _direct_composition_profile_for_key
 
 logger = get_logger("multi_model_task")
 
@@ -73,6 +74,15 @@ def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
         report_dir=artifacts["report_dir"],
         backtest_dir=artifacts["backtest_dir"],
     )
+    overfitting_diagnostics = dict(result_tf.get("overfitting_diagnostics", {}) or {})
+    overfitting_metrics = overfitting_flat_fields(result_tf)
+    raw_model_metrics = dict(
+        result_tf.get(
+            "raw_model_metrics",
+            dict(result_tf.get("backtest_summary", {}) or {}).get("raw_model_metrics", {}),
+        )
+        or {}
+    )
 
     summary = {
         "rows": int(len(prepared_tf["X_direct_test_model"])),
@@ -86,6 +96,14 @@ def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "robustness_disable_reason": dict(result_tf.get("robustness_classification", {}) or {}).get("robustness_disable_reason"),
         "selection_eligibility": bool(dict(result_tf.get("robustness_classification", {}) or {}).get("selection_eligibility", True)),
         "final_holdout_safeguard_applied": bool(dict(result_tf.get("robustness_classification", {}) or {}).get("final_holdout_safeguard_applied", False)),
+        "overfitting_diagnostics": overfitting_diagnostics,
+        **overfitting_metrics,
+        "raw_model_metrics": raw_model_metrics,
+        **raw_model_metrics,
+        "raw_model_candidate_type": result_tf.get("raw_model_candidate_type"),
+        "raw_model_used_before_guard": result_tf.get("raw_model_used_before_guard"),
+        "guarded_candidate_type": result_tf.get("guarded_candidate_type"),
+        "guarded_candidate_after_guard": result_tf.get("guarded_candidate_after_guard"),
         "range_calibration": result_tf["range_calibration"],
         "metrics": result_tf["backtest_summary"],
         "backtest_points": result_tf["backtest_summary"].get("backtest_points"),

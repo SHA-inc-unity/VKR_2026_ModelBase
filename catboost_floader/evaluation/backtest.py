@@ -61,6 +61,77 @@ def _accuracy_pct(value) -> float | None:
     return round(value_f * 100.0, 2)
 
 
+def _compute_raw_model_observability_metrics(
+    *,
+    close: pd.Series,
+    target_future_close: pd.Series,
+    target_return: pd.Series,
+    raw_pred_return: pd.Series,
+    baseline_persistence_price: pd.Series,
+    deadband: float,
+) -> Dict[str, float | None]:
+    close_np = pd.to_numeric(close, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    target_price_np = pd.to_numeric(target_future_close, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    target_return_np = pd.to_numeric(target_return, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    raw_pred_return_np = pd.to_numeric(raw_pred_return, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    baseline_price_np = pd.to_numeric(baseline_persistence_price, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+    min_len = min(
+        len(close_np),
+        len(target_price_np),
+        len(target_return_np),
+        len(raw_pred_return_np),
+        len(baseline_price_np),
+    )
+    if min_len <= 0:
+        return {
+            "raw_model_MAE": None,
+            "raw_model_sign_acc": None,
+            "raw_model_sign_acc_pct": None,
+            "raw_model_direction_acc": None,
+            "raw_model_direction_acc_pct": None,
+            "raw_model_delta_vs_baseline": None,
+            "raw_model_mean_delta_vs_baseline": None,
+            "raw_model_std_delta_vs_baseline": None,
+            "raw_model_win_rate_vs_baseline": None,
+        }
+
+    close_np = close_np[:min_len]
+    target_price_np = target_price_np[:min_len]
+    target_return_np = target_return_np[:min_len]
+    raw_pred_return_np = raw_pred_return_np[:min_len]
+    baseline_price_np = baseline_price_np[:min_len]
+
+    raw_pred_price_np = close_np * (1.0 + raw_pred_return_np)
+    raw_abs_err = np.abs(target_price_np - raw_pred_price_np)
+    baseline_abs_err = np.abs(target_price_np - baseline_price_np)
+    per_row_delta = baseline_abs_err - raw_abs_err
+
+    raw_mae = float(np.mean(raw_abs_err))
+    baseline_mae = float(np.mean(baseline_abs_err))
+    raw_sign_acc = float(np.mean(np.sign(target_return_np) == np.sign(raw_pred_return_np)))
+
+    pred_lbl = np.zeros_like(raw_pred_return_np, dtype=int)
+    pred_lbl[raw_pred_return_np > float(deadband)] = 1
+    pred_lbl[raw_pred_return_np < -float(deadband)] = -1
+    true_lbl = np.zeros_like(target_return_np, dtype=int)
+    true_lbl[target_return_np > float(deadband)] = 1
+    true_lbl[target_return_np < -float(deadband)] = -1
+    raw_direction_acc = float(np.mean(pred_lbl == true_lbl))
+
+    return {
+        "raw_model_MAE": raw_mae,
+        "raw_model_sign_acc": raw_sign_acc,
+        "raw_model_sign_acc_pct": _accuracy_pct(raw_sign_acc),
+        "raw_model_direction_acc": raw_direction_acc,
+        "raw_model_direction_acc_pct": _accuracy_pct(raw_direction_acc),
+        "raw_model_delta_vs_baseline": float(baseline_mae - raw_mae),
+        "raw_model_mean_delta_vs_baseline": float(np.mean(per_row_delta)),
+        "raw_model_std_delta_vs_baseline": float(np.std(per_row_delta, ddof=0)),
+        "raw_model_win_rate_vs_baseline": float(np.mean(per_row_delta > 0.0)),
+    }
+
+
 def build_direct_baselines(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     # "Persistence": assume next-horizon return ~= last bar return (for aggregated bars).
@@ -163,6 +234,7 @@ def run_backtest(
 
     pred_details = direct_model.predict_details(direct_X)
     pred_return = pd.Series(pred_details["pred_return"])
+    raw_pred_return = pd.Series(pred_details.get("raw_pred_return", pred_details["pred_return"]))
     direction_label = np.asarray(pred_details["direction_label"], dtype=float).reshape(-1)
     direction_expectation = np.asarray(pred_details["direction_expectation"], dtype=float).reshape(-1)
     dir_probas = np.asarray(pred_details["direction_proba"], dtype=float)
@@ -229,6 +301,15 @@ def run_backtest(
     range_base = build_range_baselines(range_eval)
     baseline_persistence_price = current_close * (1 + direct_base["baseline_persistence_return"])
     baseline_rolling_price = current_close * (1 + direct_base["baseline_rolling_mean_return"])
+
+    raw_model_metrics = _compute_raw_model_observability_metrics(
+        close=current_close,
+        target_future_close=direct_targets["target_future_close"].reset_index(drop=True),
+        target_return=direct_targets["target_return"].reset_index(drop=True),
+        raw_pred_return=raw_pred_return.reset_index(drop=True),
+        baseline_persistence_price=baseline_persistence_price.reset_index(drop=True),
+        deadband=DIRECTION_DEADBAND,
+    )
 
     merged = pd.DataFrame({
         "timestamp": direct_eval["timestamp"].reset_index(drop=True),
@@ -415,6 +496,8 @@ def run_backtest(
         "direction_accuracy_pct": accuracy_metrics["direction_accuracy_pct"],
         "sign_accuracy_pct": accuracy_metrics["sign_accuracy_pct"],
         "rows": backtest_points,
+        "raw_model_metrics": raw_model_metrics,
+        **raw_model_metrics,
     }
 
     # Attach per-model diagnostics to summary (computed earlier)

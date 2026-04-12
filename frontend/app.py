@@ -8,4 +8,7 @@ PROJECT_ROOT = os.path.dirname(THIS_DIR)
 if PROJECT_ROOT not in sys.path:
 	sys.path.insert(0, PROJECT_ROOT)
 
-from frontend.pages.main_dashboard import *
+from frontend.pages.main_dashboard import render_dashboard
+
+if __name__ == "__main__":
+	render_dashboard()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from catboost_floader.app.direct_robustness import (
+from catboost_floader.selection.direct_robustness import (
     _compute_direct_candidate_multi_window,
     _extract_robustness_metrics,
 )

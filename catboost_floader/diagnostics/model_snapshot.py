@@ -1,80 +1,15 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-import pandas as pd
-import streamlit as st
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _score_outputs_dir(path: Path) -> int:
-    if not path.exists():
-        return -1
-    score = 1
-    markers = {
-        path / "reports" / "pipeline_summary.json": 12,
-        path / "backtest_results" / "backtest_summary.json": 10,
-        path / "backtest_results" / "pipeline_metadata.json": 8,
-        path / "backtest_results" / "multi_models": 5,
-        path / "reports": 2,
-        path / "artifacts": 1,
-        path / "logs": 1,
-    }
-    for marker, weight in markers.items():
-        if marker.exists():
-            score += weight
-    return score
-
-
-def _resolve_outputs_dir(project_root: Path = PROJECT_ROOT) -> Path:
-    candidates = [
-        project_root / "catboost_floader" / "outputs",
-        project_root / "outputs",
-    ]
-    scored = sorted(((candidate, _score_outputs_dir(candidate)) for candidate in candidates), key=lambda item: item[1], reverse=True)
-    best_path, best_score = scored[0]
-    if best_score >= 0:
-        return best_path
-    return candidates[0]
-
-
-OUTPUTS_DIR = _resolve_outputs_dir()
-ARTIFACTS_DIR = OUTPUTS_DIR / "artifacts"
-LOG_DIR = OUTPUTS_DIR / "logs"
-BACKTEST_DIR = OUTPUTS_DIR / "backtest_results"
-REPORT_DIR = OUTPUTS_DIR / "reports"
-
-
-def get_frontend_paths() -> dict[str, str]:
-    return {
-        "project_root": str(PROJECT_ROOT),
-        "outputs_dir": str(OUTPUTS_DIR),
-        "artifacts_dir": str(ARTIFACTS_DIR),
-        "log_dir": str(LOG_DIR),
-        "backtest_dir": str(BACKTEST_DIR),
-        "report_dir": str(REPORT_DIR),
-    }
-
-
-def _safe_read_csv(path: Path, parse_ts: bool = True) -> pd.DataFrame:
-    if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame()
-    df = pd.read_csv(path)
-    if parse_ts:
-        for col in ["timestamp", "start_ts", "end_ts"]:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
-    return df
-
-
-def _safe_read_json(path: Path) -> Optional[dict[str, Any]]:
-    if not path.exists() or path.stat().st_size == 0:
-        return None
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+from catboost_floader.diagnostics.artifact_readers import (
+    load_model_backtest_summary,
+    load_model_comparison_vs_baselines,
+    load_model_multi_window_summary,
+    load_model_pipeline_metadata,
+    load_pipeline_summary,
+)
+from catboost_floader.diagnostics.artifact_registry import MAIN_MODEL_KEY, list_model_keys, model_artifact_paths
 
 
 def _safe_float(value: Any) -> float | None:
@@ -82,7 +17,7 @@ def _safe_float(value: Any) -> float | None:
         value_f = float(value)
     except (TypeError, ValueError):
         return None
-    if pd.isna(value_f):
+    if value_f != value_f:
         return None
     return value_f
 
@@ -111,14 +46,13 @@ def _lookup_value(key: str, *sources: Any) -> Any:
 
 
 def _display_model_name(model_key: str) -> str:
-    if model_key == "main_direct_pipeline":
+    if model_key == MAIN_MODEL_KEY:
         return "Main Pipeline"
     return str(model_key)
 
 
 def _is_robust_status(status: Any) -> bool:
-    status_norm = str(status or "").lower()
-    return status_norm.startswith("robust")
+    return str(status or "").lower().startswith("robust")
 
 
 def _derive_recommendation_bucket(row: dict[str, Any]) -> str:
@@ -145,27 +79,6 @@ def _derive_recommendation_bucket(row: dict[str, Any]) -> str:
     return "Watch"
 
 
-def _model_artifact_paths(outputs_dir: Path, model_key: str) -> dict[str, Path]:
-    is_main = model_key == "main_direct_pipeline"
-    backtest_dir = outputs_dir / "backtest_results"
-    report_dir = outputs_dir / "reports"
-    if not is_main:
-        backtest_dir = backtest_dir / "multi_models" / model_key
-        report_dir = report_dir / "multi_models" / model_key
-    return {
-        "backtest_dir": backtest_dir,
-        "report_dir": report_dir,
-        "backtest_summary": backtest_dir / "backtest_summary.json",
-        "pipeline_metadata": backtest_dir / "pipeline_metadata.json",
-        "multi_window_summary": backtest_dir / "multi_window_summary.json",
-        "comparison_vs_baselines": backtest_dir / "comparison_vs_baselines.json",
-        "backtest_results": backtest_dir / "backtest_results.csv",
-        "direct_backtest_results": backtest_dir / "direct_backtest_results.csv",
-        "range_backtest_results": backtest_dir / "range_backtest_results.csv",
-        "raw_predictions": backtest_dir / "raw_predictions.csv",
-    }
-
-
 def _extract_guarded_delta(metric_summary: dict[str, Any]) -> float | None:
     direct_model = dict(metric_summary.get("direct_model", {}) or {})
     baselines = dict(metric_summary.get("direct_baselines", {}) or {})
@@ -185,11 +98,7 @@ def _extract_robustness_metrics(
 ) -> dict[str, Any]:
     direct_strategy = _lookup_dict("direct_strategy", metric_summary, pipeline_metadata, summary_seed)
     multi_window_seed = _lookup_dict("multi_window", summary_seed, pipeline_metadata)
-    aggregate_metrics = _lookup_dict(
-        "aggregate_metrics",
-        multi_window_summary,
-        multi_window_seed,
-    )
+    aggregate_metrics = _lookup_dict("aggregate_metrics", multi_window_summary, multi_window_seed)
     robustness = dict(direct_strategy.get("robustness_metrics", {}) or {})
     if not robustness:
         robustness = aggregate_metrics
@@ -457,21 +366,19 @@ def _extract_selection_fields(
     return selection
 
 
-def _build_model_record(
-    *,
-    outputs_dir: Path,
+def build_model_snapshot(
     model_key: str,
-    summary_seed: Optional[dict[str, Any]],
-    pipeline_summary: Optional[dict[str, Any]],
+    *,
+    summary_seed: dict[str, Any] | None = None,
+    pipeline_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary_seed = dict(summary_seed or {})
-    paths = _model_artifact_paths(outputs_dir, model_key)
-    backtest_summary = dict(_safe_read_json(paths["backtest_summary"]) or {})
-    pipeline_metadata = dict(_safe_read_json(paths["pipeline_metadata"]) or {})
-    multi_window_summary = dict(_safe_read_json(paths["multi_window_summary"]) or {})
-    comparison_vs_baselines = dict(_safe_read_json(paths["comparison_vs_baselines"]) or {})
-
+    backtest_summary = dict(load_model_backtest_summary(model_key) or {})
+    pipeline_metadata = dict(load_model_pipeline_metadata(model_key) or {})
+    multi_window_summary = dict(load_model_multi_window_summary(model_key) or {})
+    comparison_vs_baselines = dict(load_model_comparison_vs_baselines(model_key) or {})
     metric_summary = dict(backtest_summary or summary_seed.get("metrics", {}) or summary_seed.get("backtest_summary", {}) or {})
+
     direct_model = dict(metric_summary.get("direct_model", {}) or {})
     accuracy = dict(metric_summary.get("accuracy_metrics", {}) or {})
     robustness = _extract_robustness_metrics(summary_seed, metric_summary, pipeline_metadata, multi_window_summary)
@@ -513,7 +420,7 @@ def _build_model_record(
     registry_row = {
         "model_key": model_key,
         "model_name": _display_model_name(model_key),
-        "is_main": model_key == "main_direct_pipeline",
+        "is_main": model_key == MAIN_MODEL_KEY,
         "robustness_status": summary["robustness_status"],
         "selection_eligibility": summary["selection_eligibility"],
         "delta_vs_baseline": summary["delta_vs_baseline"],
@@ -534,18 +441,19 @@ def _build_model_record(
         "recommendation_bucket": _lookup_value("recommendation_bucket", summary_seed, metric_summary, pipeline_metadata),
     }
     registry_row["recommendation_bucket"] = _derive_recommendation_bucket(registry_row)
+    artifact_paths = model_artifact_paths(model_key)
 
     return {
         "model_key": model_key,
         "model_name": _display_model_name(model_key),
-        "is_main": model_key == "main_direct_pipeline",
+        "is_main": model_key == MAIN_MODEL_KEY,
         "summary": summary,
         "raw_model": raw_model_metrics,
         "overfitting": overfitting,
         "robustness": robustness,
         "selection": selection,
         "registry": registry_row,
-        "artifact_paths": {name: str(path) for name, path in paths.items()},
+        "artifact_paths": artifact_paths,
         "artifacts": {
             "pipeline_summary_entry": summary_seed,
             "pipeline_summary": dict(pipeline_summary or {}),
@@ -557,182 +465,31 @@ def _build_model_record(
     }
 
 
-def _collect_model_keys(outputs_dir: Path, pipeline_summary: Optional[dict[str, Any]]) -> list[str]:
-    keys = {"main_direct_pipeline"}
-    pipeline_multi = dict((pipeline_summary or {}).get("multi_models", {}) or {})
-    keys.update(str(key) for key in pipeline_multi.keys())
-
-    for base_dir in [outputs_dir / "backtest_results" / "multi_models", outputs_dir / "reports" / "multi_models"]:
-        if not base_dir.exists():
-            continue
-        for child in base_dir.iterdir():
-            if child.is_dir():
-                keys.add(child.name)
-
-    return ["main_direct_pipeline"] + sorted(key for key in keys if key != "main_direct_pipeline")
-
-
-def _build_model_records(outputs_dir: Path, pipeline_summary: Optional[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    keys = _collect_model_keys(outputs_dir, pipeline_summary)
-    pipeline_multi = dict((pipeline_summary or {}).get("multi_models", {}) or {})
+def build_model_snapshots(pipeline_summary: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    pipeline_summary = dict(pipeline_summary or load_pipeline_summary() or {})
+    pipeline_multi = dict(pipeline_summary.get("multi_models", {}) or {})
     records: dict[str, dict[str, Any]] = {}
-    for key in keys:
-        summary_seed = dict(pipeline_summary or {}) if key == "main_direct_pipeline" else dict(pipeline_multi.get(key, {}) or {})
-        records[key] = _build_model_record(
-            outputs_dir=outputs_dir,
-            model_key=key,
+    for key in list_model_keys(pipeline_summary):
+        summary_seed = dict(pipeline_summary if key == MAIN_MODEL_KEY else pipeline_multi.get(key, {}) or {})
+        records[key] = build_model_snapshot(
+            key,
             summary_seed=summary_seed,
             pipeline_summary=pipeline_summary,
         )
     return records
 
 
-@st.cache_data(show_spinner=False)
-def list_market_files() -> list[str]:
-    if not ARTIFACTS_DIR.exists():
-        return []
-    files = sorted(path.name for path in ARTIFACTS_DIR.glob("*_market_dataset.csv"))
-    if files:
-        return files
-    return sorted(path.name for path in ARTIFACTS_DIR.glob("*_klines.csv"))
-
-
-@st.cache_data(show_spinner=False)
-def load_market_data(file_name: Optional[str] = None) -> pd.DataFrame:
-    files = list_market_files()
-    if not files:
-        return pd.DataFrame()
-    chosen = file_name or files[-1]
-    df = _safe_read_csv(ARTIFACTS_DIR / chosen)
-    for col in df.columns:
-        if col != "timestamp":
-            try:
-                df[col] = pd.to_numeric(df[col])
-            except Exception:
-                continue
-    if "timestamp" in df.columns:
-        return df.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
-    return df
-
-
-@st.cache_data(show_spinner=False)
-def load_anomalies() -> pd.DataFrame:
-    return _safe_read_csv(LOG_DIR / "anomaly_flags.csv")
-
-
-@st.cache_data(show_spinner=False)
-def load_anomaly_windows() -> pd.DataFrame:
-    return _safe_read_csv(LOG_DIR / "anomaly_windows.csv")
-
-
-@st.cache_data(show_spinner=False)
-def load_backtest_results(model_key: Optional[str] = None) -> pd.DataFrame:
-    key = model_key or "main_direct_pipeline"
-    paths = _model_artifact_paths(OUTPUTS_DIR, key)
-    return _safe_read_csv(paths["backtest_results"])
-
-
-@st.cache_data(show_spinner=False)
-def load_backtest_summary(model_key: Optional[str] = None) -> Optional[dict[str, Any]]:
-    key = model_key or "main_direct_pipeline"
-    paths = _model_artifact_paths(OUTPUTS_DIR, key)
-    return _safe_read_json(paths["backtest_summary"])
-
-
-@st.cache_data(show_spinner=False)
-def load_pipeline_metadata(model_key: Optional[str] = None) -> Optional[dict[str, Any]]:
-    key = model_key or "main_direct_pipeline"
-    paths = _model_artifact_paths(OUTPUTS_DIR, key)
-    return _safe_read_json(paths["pipeline_metadata"])
-
-
-@st.cache_data(show_spinner=False)
-def load_multi_window_summary(model_key: Optional[str] = None) -> Optional[dict[str, Any]]:
-    key = model_key or "main_direct_pipeline"
-    paths = _model_artifact_paths(OUTPUTS_DIR, key)
-    return _safe_read_json(paths["multi_window_summary"])
-
-
-@st.cache_data(show_spinner=False)
-def load_comparison_vs_baselines(model_key: Optional[str] = None) -> Optional[dict[str, Any]]:
-    key = model_key or "main_direct_pipeline"
-    paths = _model_artifact_paths(OUTPUTS_DIR, key)
-    return _safe_read_json(paths["comparison_vs_baselines"])
-
-
-@st.cache_data(show_spinner=False)
-def load_live_snapshot() -> Optional[dict[str, Any]]:
-    return _safe_read_json(LOG_DIR / "latest_live_prediction.json")
-
-
-@st.cache_data(show_spinner=False)
-def load_pipeline_summary() -> Optional[dict[str, Any]]:
-    return _safe_read_json(REPORT_DIR / "pipeline_summary.json")
-
-
-@st.cache_data(show_spinner=False)
-def load_feature_importance() -> Optional[dict[str, Any]]:
-    return _safe_read_json(REPORT_DIR / "feature_importance.json")
-
-
-@st.cache_data(show_spinner=False)
-def list_model_keys() -> list[str]:
-    pipeline_summary = load_pipeline_summary()
-    return _collect_model_keys(OUTPUTS_DIR, pipeline_summary)
-
-
-@st.cache_data(show_spinner=False)
-def load_model_records() -> dict[str, dict[str, Any]]:
-    pipeline_summary = load_pipeline_summary()
-    return _build_model_records(OUTPUTS_DIR, pipeline_summary)
-
-
-@st.cache_data(show_spinner=False)
-def load_model_record(model_key: str) -> Optional[dict[str, Any]]:
-    return dict(load_model_records().get(model_key, {}) or {}) or None
-
-
-@st.cache_data(show_spinner=False)
-def load_model_registry() -> pd.DataFrame:
-    records = load_model_records()
-    rows = [dict(record.get("registry", {}) or {}) for record in records.values() if record.get("registry")]
-    if not rows:
-        return pd.DataFrame()
-    registry = pd.DataFrame(rows)
-    sort_cols = []
-    ascending = []
-    if "selection_eligibility" in registry.columns:
-        sort_cols.append("selection_eligibility")
-        ascending.append(False)
-    if "delta_vs_baseline" in registry.columns:
-        sort_cols.append("delta_vs_baseline")
-        ascending.append(False)
-    if "mean_delta_vs_baseline" in registry.columns:
-        sort_cols.append("mean_delta_vs_baseline")
-        ascending.append(False)
-    if sort_cols:
-        registry = registry.sort_values(by=sort_cols, ascending=ascending, na_position="last")
-    return registry.reset_index(drop=True)
-
-
-def get_latest_prediction(backtest_df: pd.DataFrame) -> Optional[dict[str, Any]]:
-    if backtest_df.empty:
-        return None
-    return backtest_df.dropna(how="all").iloc[-1].to_dict()
-
-
-def compute_market_summary(df: pd.DataFrame) -> dict[str, Any]:
-    if df.empty:
-        return {}
-    out = {
-        "last_close": float(df["close"].iloc[-1]),
-        "prev_close": float(df["close"].iloc[-2]) if len(df) > 1 else float(df["close"].iloc[-1]),
-        "last_volume": float(df["volume"].iloc[-1]) if "volume" in df.columns else None,
-        "rows": int(len(df)),
-        "mark_div": float(((df["close"] - df["mark_close"]) / (df["close"] + 1e-8)).iloc[-1]) if "mark_close" in df.columns else None,
-    }
-    out["change_1h"] = (float(df["close"].iloc[-1]) / float(df["close"].iloc[-13]) - 1.0) if len(df) >= 13 else None
-    out["change_24h"] = (float(df["close"].iloc[-1]) / float(df["close"].iloc[-289]) - 1.0) if len(df) >= 289 else None
-    returns = df["close"].pct_change().dropna()
-    out["volatility_1h"] = float(returns.tail(12).std()) if len(returns) >= 12 else None
-    return out
+def build_model_registry_rows(pipeline_summary: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    rows = [
+        dict(snapshot.get("registry", {}) or {})
+        for snapshot in build_model_snapshots(pipeline_summary).values()
+        if snapshot.get("registry")
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            not bool(row.get("selection_eligibility", False)),
+            -float(_safe_float(row.get("delta_vs_baseline")) or float("-inf")),
+            -float(_safe_float(row.get("mean_delta_vs_baseline")) or float("-inf")),
+        ),
+    )

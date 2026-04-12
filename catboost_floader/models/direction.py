@@ -41,6 +41,7 @@ class DirectionModel:
         # reverse map cached
         self._rev_map = {v: k for k, v in self.label_map.items()}
         self.is_degenerate: bool = False
+        self.calibration: Dict[str, Any] = {}
 
     def _prepare_labels(self, y: pd.Series) -> pd.Series:
         # Convert continuous returns into sign classes: -1, 0, 1
@@ -194,7 +195,12 @@ class DirectionModel:
         ensure_dirs([os.path.dirname(prefix)])
         self.model.save_model(prefix + "_direction.cbm")
         save_json(
-            {"feature_names": self.feature_names, "params": self.params, "label_map": self.label_map},
+            {
+                "feature_names": self.feature_names,
+                "params": self.params,
+                "label_map": self.label_map,
+                "calibration": self.calibration,
+            },
             prefix + "_direction.json",
         )
 
@@ -206,6 +212,7 @@ class DirectionModel:
         self.params = meta.get("params", self.params)
         self.label_map = self._normalize_label_map(meta.get("label_map", self.label_map))
         self._rev_map = {v: k for k, v in self.label_map.items()}
+        self.calibration = dict(meta.get("calibration", {}) or {})
         return self
 
 
