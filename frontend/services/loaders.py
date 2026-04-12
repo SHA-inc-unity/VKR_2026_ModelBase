@@ -155,6 +155,7 @@ def _model_artifact_paths(outputs_dir: Path, model_key: str) -> dict[str, Path]:
     return {
         "backtest_dir": backtest_dir,
         "report_dir": report_dir,
+        "feature_importance": report_dir / "feature_importance.json",
         "backtest_summary": backtest_dir / "backtest_summary.json",
         "pipeline_metadata": backtest_dir / "pipeline_metadata.json",
         "multi_window_summary": backtest_dir / "multi_window_summary.json",
@@ -671,8 +672,10 @@ def load_pipeline_summary() -> Optional[dict[str, Any]]:
 
 
 @st.cache_data(show_spinner=False)
-def load_feature_importance() -> Optional[dict[str, Any]]:
-    return _safe_read_json(REPORT_DIR / "feature_importance.json")
+def load_feature_importance(model_key: Optional[str] = None) -> Optional[dict[str, Any]]:
+    key = model_key or "main_direct_pipeline"
+    paths = _model_artifact_paths(OUTPUTS_DIR, key)
+    return _safe_read_json(paths["feature_importance"])
 
 
 @st.cache_data(show_spinner=False)

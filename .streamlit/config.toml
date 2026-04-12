@@ -1,0 +1,4 @@
+[server]
+port = 8395
+address = "0.0.0.0"
+headless = true

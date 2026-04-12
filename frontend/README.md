@@ -1,21 +1,32 @@
 # frontend
 
-Streamlit read-only analysis dashboard for:
-- overview of model health and registry metrics
-- per-model detail inspection
-- side-by-side model comparison
-- market overview and prediction diagnostics
-- anomaly windows and confidence history
-- feature importance and artifact JSON inspection
+Streamlit unified workspace for:
 
-Navigation:
-- Overview
-- Models
-- Model Detail
-- Comparison
-- Diagnostics
+- one main dashboard-centered workflow
+- model fleet monitoring and selected-model drilldown
+- market and backtest diagnostics on the same screen
+- TXT report export for sharing the current state
+- visible reserved run controls without launching the pipeline from the UI
 
-The frontend is inspection-only in this stage:
-- no pipeline execution
-- no run controls
+Main screen layout:
+
+- top control bar
+- colored summary cards
+- model fleet table
+- focused model detail area
+- market and backtest charts
+- fleet diagnostics watchlists
+- TXT report preview and export
+
+Execution policy in the frontend:
+
+- refresh is live and clears cached artifact reads
+- run buttons are reserved controls only
+- no full pipeline execution from the dashboard
 - no config editing
+
+Default Streamlit server settings:
+
+- port `8395`
+- bind address `0.0.0.0` for non-local access
+- configuration source: `.streamlit/config.toml`

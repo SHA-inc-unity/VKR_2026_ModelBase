@@ -77,3 +77,42 @@ class ComparisonRowDTO:
         payload = {"model_key": self.model_key, "model_name": self.model_name}
         payload.update(self.fields)
         return payload
+
+
+@dataclass(frozen=True)
+class JobRecordDTO:
+    job_id: str
+    action_type: str
+    label: str
+    status: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    target_model: str | None = None
+    target_models: list[str] = field(default_factory=list)
+    summary: str | None = None
+    error_message: str | None = None
+    log_path: str | None = None
+    pid: int | None = None
+    command: list[str] = field(default_factory=list)
+    latest_log_lines: list[str] = field(default_factory=list)
+    result: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ActionResponseDTO:
+    accepted: bool
+    action_type: str
+    message: str
+    tone: str = "info"
+    job: JobRecordDTO | None = None
+    report_text: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        if self.job is not None:
+            payload["job"] = self.job.to_dict()
+        return payload

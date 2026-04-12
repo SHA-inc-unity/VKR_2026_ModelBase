@@ -16,6 +16,14 @@ def _render_metrics_row(items: list[tuple[str, str]]) -> None:
         col.metric(label, value)
 
 
+def _scalar_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if not isinstance(value, (dict, list))
+    }
+
+
 def _render_key_value_frame(payload: dict[str, Any], *, labels: dict[str, str] | None = None) -> None:
     labels = labels or {}
     if not payload:
@@ -29,7 +37,7 @@ def _render_key_value_frame(payload: dict[str, Any], *, labels: dict[str, str] |
     if not rows:
         st.info("No scalar fields available.")
         return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 def render_model_registry_table(registry_df: pd.DataFrame) -> None:
@@ -71,7 +79,7 @@ def render_model_registry_table(registry_df: pd.DataFrame) -> None:
         "guarded_candidate_type",
     ]
     columns = [column for column in preferred_columns if column in view.columns]
-    st.dataframe(view[columns], use_container_width=True, hide_index=True)
+    st.dataframe(view[columns], width="stretch", hide_index=True)
 
 
 def render_model_summary_section(record: dict[str, Any]) -> None:
@@ -122,10 +130,10 @@ def render_model_summary_section(record: dict[str, Any]) -> None:
         },
     ]
     st.subheader("Guarded vs Raw")
-    st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(comparison_rows), width="stretch", hide_index=True)
 
 
-def render_model_overfitting_section(record: dict[str, Any]) -> None:
+def render_model_overfitting_section(record: dict[str, Any], *, show_advanced: bool = False) -> None:
     overfitting = dict(record.get("overfitting", {}) or {})
     diagnostics = dict(overfitting.get("diagnostics", {}) or {})
 
@@ -149,7 +157,7 @@ def render_model_overfitting_section(record: dict[str, Any]) -> None:
     )
     st.subheader("Overfitting Fields")
     _render_key_value_frame({key: value for key, value in overfitting.items() if key != "diagnostics"})
-    if diagnostics:
+    if diagnostics and show_advanced:
         with st.expander("Raw Overfitting Diagnostics JSON"):
             st.json(diagnostics)
 
@@ -175,10 +183,10 @@ def render_model_robustness_section(record: dict[str, Any]) -> None:
     windows = list(multi_window_summary.get("windows", []) or [])
     if windows:
         st.subheader("Multi-window Breakdown")
-        st.dataframe(pd.DataFrame(windows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(windows), width="stretch", hide_index=True)
 
 
-def render_model_selection_section(record: dict[str, Any]) -> None:
+def render_model_selection_section(record: dict[str, Any], *, show_advanced: bool = False) -> None:
     selection = dict(record.get("selection", {}) or {})
 
     _render_metrics_row(
@@ -211,33 +219,63 @@ def render_model_selection_section(record: dict[str, Any]) -> None:
     }
     _render_key_value_frame(scalar_selection)
 
+    relaxed_rule = dict(selection.get("main_selection_relaxed_rule", {}) or {})
+    persistence_promotion = dict(selection.get("main_persistence_promotion", {}) or {})
+    if relaxed_rule or persistence_promotion:
+        st.subheader("Rule Applications")
+        left_col, right_col = st.columns(2)
+        with left_col:
+            st.caption("Relaxed Selection Rule")
+            _render_key_value_frame(_scalar_payload(relaxed_rule))
+        with right_col:
+            st.caption("Persistence Promotion")
+            _render_key_value_frame(_scalar_payload(persistence_promotion))
+
+    candidate_before = dict(selection.get("final_holdout_candidate_before_guard", {}) or {})
+    candidate_after = dict(selection.get("final_holdout_candidate_after_guard", {}) or {})
+    if candidate_before or candidate_after:
+        st.subheader("Guard Transition")
+        before_col, after_col = st.columns(2)
+        with before_col:
+            st.caption("Candidate Before Guard")
+            _render_key_value_frame(_scalar_payload(candidate_before))
+        with after_col:
+            st.caption("Candidate After Guard")
+            _render_key_value_frame(_scalar_payload(candidate_after))
+
     if selection.get("profile_evaluations"):
         st.subheader("Profile Evaluations")
-        st.dataframe(pd.DataFrame(selection.get("profile_evaluations", [])), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(selection.get("profile_evaluations", [])), width="stretch", hide_index=True)
 
-    with st.expander("Candidate Before Guard"):
-        st.json(selection.get("final_holdout_candidate_before_guard", {}))
-    with st.expander("Candidate After Guard"):
-        st.json(selection.get("final_holdout_candidate_after_guard", {}))
-    with st.expander("Selected Strategy JSON"):
-        st.json(selection.get("direct_strategy", {}))
+    if show_advanced:
+        with st.expander("Advanced Selection Payloads"):
+            st.json(
+                {
+                    "main_selection_relaxed_rule": relaxed_rule,
+                    "main_persistence_promotion": persistence_promotion,
+                    "candidate_before_guard": candidate_before,
+                    "candidate_after_guard": candidate_after,
+                    "selected_strategy": selection.get("direct_strategy", {}),
+                }
+            )
 
 
-def render_model_artifacts_section(record: dict[str, Any]) -> None:
+def render_model_artifacts_section(record: dict[str, Any], *, show_raw: bool = False) -> None:
     artifact_paths = dict(record.get("artifact_paths", {}) or {})
     artifacts = dict(record.get("artifacts", {}) or {})
 
     st.subheader("Artifact Paths")
     path_rows = [{"Artifact": key, "Path": value} for key, value in artifact_paths.items()]
-    st.dataframe(pd.DataFrame(path_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(path_rows), width="stretch", hide_index=True)
 
-    expander_order = [
-        ("Backtest Summary", "backtest_summary"),
-        ("Pipeline Metadata", "pipeline_metadata"),
-        ("Multi-window Summary", "multi_window_summary"),
-        ("Comparison vs Baselines", "comparison_vs_baselines"),
-        ("Pipeline Summary Entry", "pipeline_summary_entry"),
-    ]
-    for title, key in expander_order:
-        with st.expander(title):
-            st.json(artifacts.get(key, {}))
+    if show_raw:
+        expander_order = [
+            ("Backtest Summary", "backtest_summary"),
+            ("Pipeline Metadata", "pipeline_metadata"),
+            ("Multi-window Summary", "multi_window_summary"),
+            ("Comparison vs Baselines", "comparison_vs_baselines"),
+            ("Pipeline Summary Entry", "pipeline_summary_entry"),
+        ]
+        for title, key in expander_order:
+            with st.expander(title):
+                st.json(artifacts.get(key, {}))
