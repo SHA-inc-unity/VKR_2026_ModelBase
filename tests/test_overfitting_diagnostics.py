@@ -66,6 +66,9 @@ def test_overfitting_diagnostics_reports_none_for_stable_metrics():
     assert diagnostics["train_delta_vs_baseline"] is not None
     assert diagnostics["val_delta_vs_baseline"] is not None
     assert diagnostics["holdout_delta_vs_baseline"] is not None
+    assert diagnostics["train_sign_acc_pct"] == 100.0
+    assert diagnostics["val_sign_acc_pct"] == 100.0
+    assert diagnostics["holdout_sign_acc_pct"] == 100.0
 
 
 def test_overfitting_diagnostics_reports_severe_when_holdout_degrades():
@@ -99,3 +102,5 @@ def test_overfitting_diagnostics_reports_severe_when_holdout_degrades():
     assert float(diagnostics["holdout_overfit_ratio"]) >= 1.3
     assert float(diagnostics["mae_gap_train_holdout"]) > 0.0
     assert float(diagnostics["sign_gap_train_holdout"]) > 0.0
+    assert diagnostics["train_sign_acc_pct"] == 100.0
+    assert diagnostics["holdout_sign_acc_pct"] == 25.0

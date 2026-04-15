@@ -14,8 +14,11 @@ OVERFIT_FIELDS = [
     "val_MAE",
     "holdout_MAE",
     "train_sign_acc",
+    "train_sign_acc_pct",
     "val_sign_acc",
+    "val_sign_acc_pct",
     "holdout_sign_acc",
+    "holdout_sign_acc_pct",
     "mae_gap_train_val",
     "mae_gap_train_holdout",
     "sign_gap_train_val",
@@ -38,6 +41,13 @@ def _safe_float(value: Any) -> float | None:
     if np.isnan(out):
         return None
     return out
+
+
+def _accuracy_pct(value: Any) -> float | None:
+    value_f = _safe_float(value)
+    if value_f is None:
+        return None
+    return round(value_f * 100.0, 2)
 
 
 def _split_direct_metrics(
@@ -192,8 +202,11 @@ def compute_direct_overfitting_diagnostics(
         "val_MAE": val_mae,
         "holdout_MAE": holdout_mae,
         "train_sign_acc": train_sign,
+        "train_sign_acc_pct": _accuracy_pct(train_sign),
         "val_sign_acc": val_sign,
+        "val_sign_acc_pct": _accuracy_pct(val_sign),
         "holdout_sign_acc": holdout_sign,
+        "holdout_sign_acc_pct": _accuracy_pct(holdout_sign),
         "mae_gap_train_val": mae_gap_train_val,
         "mae_gap_train_holdout": mae_gap_train_holdout,
         "sign_gap_train_val": sign_gap_train_val,

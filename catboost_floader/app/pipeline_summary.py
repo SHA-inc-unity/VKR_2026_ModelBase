@@ -7,6 +7,7 @@ from catboost_floader.core.config import (
     ENABLE_MULTI_WINDOW_EVALUATION,
     MULTI_WINDOW_RANKING_METRIC,
     REPORT_DIR,
+    RUN_ALL_MODELS_EXECUTION_MODE,
 )
 from catboost_floader.diagnostics.overfitting_diagnostics import overfitting_flat_fields
 from catboost_floader.evaluation.multi_window import save_global_multi_window_ranking
@@ -19,6 +20,28 @@ def _build_pipeline_summary(
     multi_models_summary: Dict[str, Dict[str, Any]],
     live_result: Dict[str, Any],
 ) -> Dict[str, Any]:
+    diagnostic_field_names = [
+        "selection_effective_score",
+        "effective_penalty_value",
+        "penalty_components",
+        "holdout_weight_used",
+        "validation_weight_used",
+        "holdout_proxy_mae",
+    ]
+
+    def _selection_diagnostics(primary: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        primary_payload = dict(primary or {})
+        fallback_payload = dict(fallback or {})
+        for field in diagnostic_field_names:
+            if field == "penalty_components":
+                out[field] = dict(
+                    primary_payload.get(field, fallback_payload.get(field, {})) or {}
+                )
+            else:
+                out[field] = primary_payload.get(field, fallback_payload.get(field))
+        return out
+
     raw_metric_keys = [
         "raw_model_MAE",
         "raw_model_sign_acc",
@@ -149,6 +172,7 @@ def _build_pipeline_summary(
             main_backtest_summary.get("guarded_candidate_after_guard", main_final_holdout_guard_applied),
         )
     )
+    main_selection_diagnostics = _selection_diagnostics(main_result, main_backtest_summary)
 
     practical_selection_registry["main_direct_pipeline"] = {
         "robustness_status": main_classification.get("robustness_status"),
@@ -175,6 +199,7 @@ def _build_pipeline_summary(
         "raw_model_used_before_guard": main_raw_model_used_before_guard,
         "guarded_candidate_type": main_guarded_candidate_type,
         "guarded_candidate_after_guard": main_guarded_candidate_after_guard,
+        **main_selection_diagnostics,
     }
     for key, model_summary in multi_models_summary.items():
         model_classification = dict(model_summary.get("robustness_classification", {}) or {})
@@ -201,6 +226,7 @@ def _build_pipeline_summary(
                 model_metrics_summary.get("final_holdout_guard_applied", False),
             )
         )
+        model_selection_diagnostics = _selection_diagnostics(model_summary, model_metrics_summary)
         practical_selection_registry[key] = {
             "robustness_status": model_classification.get("robustness_status"),
             "disabled_by_robustness": bool(model_classification.get("disabled_by_robustness", False)),
@@ -235,6 +261,7 @@ def _build_pipeline_summary(
                     model_metrics_summary.get("guarded_candidate_after_guard", model_final_holdout_guard_applied),
                 )
             ),
+            **model_selection_diagnostics,
         }
 
     practical_ranking_excluded_models = [
@@ -308,6 +335,7 @@ def _build_pipeline_summary(
         "raw_model_used_before_guard": main_raw_model_used_before_guard,
         "guarded_candidate_type": main_guarded_candidate_type,
         "guarded_candidate_after_guard": main_guarded_candidate_after_guard,
+        **main_selection_diagnostics,
         "overfitting_diagnostics": main_overfitting_diagnostics,
         **main_overfitting_metrics,
         "range_calibration": main_result["range_calibration"],
@@ -318,6 +346,15 @@ def _build_pipeline_summary(
         "direction_accuracy_pct": main_result.get("accuracy_metrics", {}).get("direction_accuracy_pct"),
         "sign_accuracy_pct": main_result.get("accuracy_metrics", {}).get("sign_accuracy_pct"),
         "multi_window": main_result.get("multi_window", {}),
+        "execution_metrics": {
+            "start_time": None,
+            "end_time": None,
+            "duration_seconds": None,
+            "avg_cpu_usage_percent": None,
+            "max_cpu_usage_percent": None,
+            "models_executed_count": 1 + len(multi_models_summary),
+            "execution_mode": RUN_ALL_MODELS_EXECUTION_MODE,
+        },
         "practical_selection_registry": practical_selection_registry,
         "practical_ranking_included_models": practical_ranking_included_models,
         "practical_ranking_excluded_models": practical_ranking_excluded_models,

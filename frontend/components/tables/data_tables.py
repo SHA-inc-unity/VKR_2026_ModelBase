@@ -8,7 +8,7 @@ def _render_df(df: pd.DataFrame, rows: int = 10) -> None:
     if df is None or df.empty:
         st.info("No data available.")
         return
-    st.dataframe(df.tail(rows), use_container_width=True)
+    st.dataframe(df.tail(rows), width="stretch")
 
 
 def render_market_table(df: pd.DataFrame, rows: int = 10) -> None:

@@ -22,6 +22,21 @@ def _safe_float(value: Any) -> float | None:
     return value_f
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        value_i = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value_i
+
+
+def _accuracy_pct(value: Any) -> float | None:
+    value_f = _safe_float(value)
+    if value_f is None:
+        return None
+    return round(value_f * 100.0, 2)
+
+
 def _lookup_first(*values: Any) -> Any:
     for value in values:
         if value is not None:
@@ -186,8 +201,11 @@ def _extract_overfitting_fields(
         "val_MAE",
         "holdout_MAE",
         "train_sign_acc",
+        "train_sign_acc_pct",
         "val_sign_acc",
+        "val_sign_acc_pct",
         "holdout_sign_acc",
+        "holdout_sign_acc_pct",
         "mae_gap_train_val",
         "mae_gap_train_holdout",
         "sign_gap_train_val",
@@ -206,7 +224,28 @@ def _extract_overfitting_fields(
             diagnostics.get(field),
             _lookup_value(field, summary_seed, metric_summary, pipeline_metadata),
         )
+    for acc_field, pct_field in [
+        ("train_sign_acc", "train_sign_acc_pct"),
+        ("val_sign_acc", "val_sign_acc_pct"),
+        ("holdout_sign_acc", "holdout_sign_acc_pct"),
+    ]:
+        if payload.get(pct_field) is None:
+            payload[pct_field] = _accuracy_pct(payload.get(acc_field))
     return payload
+
+
+def _extract_sign_confusion_fields(
+    metric_summary: dict[str, Any],
+    direct_model: dict[str, Any],
+    accuracy: dict[str, Any],
+) -> dict[str, int | None]:
+    sign_confusion = _lookup_dict("sign_confusion", direct_model, accuracy, metric_summary)
+    return {
+        "sign_tp": _safe_int(_lookup_first(sign_confusion.get("true_positive"), _lookup_value("sign_tp", direct_model, accuracy, metric_summary))),
+        "sign_tn": _safe_int(_lookup_first(sign_confusion.get("true_negative"), _lookup_value("sign_tn", direct_model, accuracy, metric_summary))),
+        "sign_fp": _safe_int(_lookup_first(sign_confusion.get("false_positive"), _lookup_value("sign_fp", direct_model, accuracy, metric_summary))),
+        "sign_fn": _safe_int(_lookup_first(sign_confusion.get("false_negative"), _lookup_value("sign_fn", direct_model, accuracy, metric_summary))),
+    }
 
 
 def _extract_raw_model_metrics(
@@ -394,6 +433,7 @@ def build_model_snapshot(
             accuracy.get("sign_accuracy_pct"),
         )
     )
+    sign_confusion = _extract_sign_confusion_fields(metric_summary, direct_model, accuracy)
     direction_acc = _safe_float(_lookup_first(accuracy.get("direction_accuracy"), metric_summary.get("direction_accuracy")))
     direction_acc_pct = _safe_float(
         _lookup_first(
@@ -408,6 +448,7 @@ def build_model_snapshot(
         "return_MAE": _safe_float(direct_model.get("return_MAE")),
         "sign_acc": sign_acc,
         "sign_acc_pct": sign_acc_pct,
+        **sign_confusion,
         "direction_acc": direction_acc,
         "direction_acc_pct": direction_acc_pct,
         "delta_vs_baseline": _extract_guarded_delta(metric_summary),
@@ -428,6 +469,10 @@ def build_model_snapshot(
         "std_delta_vs_baseline": robustness.get("std_delta_vs_baseline"),
         "win_rate_vs_baseline": robustness.get("win_rate_vs_baseline"),
         "sign_acc_pct": summary["sign_acc_pct"],
+        "sign_tp": summary.get("sign_tp"),
+        "sign_tn": summary.get("sign_tn"),
+        "sign_fp": summary.get("sign_fp"),
+        "sign_fn": summary.get("sign_fn"),
         "direction_acc_pct": summary["direction_acc_pct"],
         "overfit_status": summary["overfit_status"],
         "overfit_reason": summary["overfit_reason"],

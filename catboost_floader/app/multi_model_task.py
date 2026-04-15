@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Dict
 
 from catboost_floader.core.config import (
@@ -7,7 +8,10 @@ from catboost_floader.core.config import (
     EVALUATION_WINDOW_COUNT,
     EVALUATION_WINDOW_SIZE,
     EVALUATION_WINDOW_STEP,
+)
+from catboost_floader.core.parallel_policy import (
     apply_cpu_worker_limits,
+    get_cpu_execution_mode_metadata,
 )
 from catboost_floader.core.utils import get_logger
 from catboost_floader.diagnostics.artifact_registry import _multi_model_artifact_paths
@@ -22,16 +26,29 @@ logger = get_logger("multi_model_task")
 
 
 def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    started_at = time.perf_counter()
     key = task["key"]
     thread_count = task.get("catboost_thread_count")
     outer_parallel_worker = bool(task.get("outer_parallel_worker", False))
-    if thread_count is not None:
-        apply_cpu_worker_limits(thread_count, mark_outer_parallel=outer_parallel_worker)
+    execution_mode = task.get("execution_mode")
+    execution_metadata = get_cpu_execution_mode_metadata(
+        execution_mode,
+        model_workers=task.get("model_workers"),
+    )
+    apply_cpu_worker_limits(
+        thread_count,
+        mark_outer_parallel=outer_parallel_worker,
+        execution_mode=execution_mode,
+    )
 
     logger.info(
-        "CPU-parallel multi-model worker started for %s with catboost_thread_count=%s",
+        "CPU-parallel multi-model worker started for %s with execution_mode=%s worker_thread_limits_applied=%s nested_thread_caps_applied=%s catboost_thread_count=%s model_workers=%s",
         key,
+        execution_metadata["execution_mode"],
+        execution_metadata["worker_thread_limits_applied"],
+        execution_metadata["nested_thread_caps_applied"],
         thread_count,
+        execution_metadata.get("model_workers"),
     )
 
     direct_targets_tf = generate_direct_targets(task["df_tf"], horizon_steps=task["steps"])
@@ -65,6 +82,7 @@ def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
         range_high_params=tuning_tf["range_high"],
         direct_composition_profile=direct_composition_profile,
         catboost_thread_count=thread_count,
+        execution_mode=execution_mode,
         model_key=key,
         enable_multi_window_evaluation=ENABLE_MULTI_WINDOW_EVALUATION,
         evaluation_window_count=EVALUATION_WINDOW_COUNT,
@@ -86,6 +104,12 @@ def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
 
     summary = {
         "rows": int(len(prepared_tf["X_direct_test_model"])),
+        "execution_mode": execution_metadata["execution_mode"],
+        "worker_thread_limits_applied": execution_metadata["worker_thread_limits_applied"],
+        "nested_thread_caps_applied": execution_metadata["nested_thread_caps_applied"],
+        "model_workers": execution_metadata.get("model_workers"),
+        "duration_seconds": float(time.perf_counter() - started_at),
+        "catboost_thread_count": thread_count,
         "direct_composition_profile": result_tf["direct_composition_profile"],
         "direct_composition_config": result_tf["direct_composition_config"],
         "direct_strategy": result_tf["direct_strategy"],
@@ -104,6 +128,12 @@ def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "raw_model_used_before_guard": result_tf.get("raw_model_used_before_guard"),
         "guarded_candidate_type": result_tf.get("guarded_candidate_type"),
         "guarded_candidate_after_guard": result_tf.get("guarded_candidate_after_guard"),
+        "selection_effective_score": result_tf.get("selection_effective_score"),
+        "effective_penalty_value": result_tf.get("effective_penalty_value"),
+        "penalty_components": dict(result_tf.get("penalty_components", {}) or {}),
+        "holdout_weight_used": result_tf.get("holdout_weight_used"),
+        "validation_weight_used": result_tf.get("validation_weight_used"),
+        "holdout_proxy_mae": result_tf.get("holdout_proxy_mae"),
         "range_calibration": result_tf["range_calibration"],
         "metrics": result_tf["backtest_summary"],
         "backtest_points": result_tf["backtest_summary"].get("backtest_points"),
@@ -114,5 +144,9 @@ def _run_multi_model_key_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "multi_window": result_tf.get("multi_window", {}),
         "artifacts": artifacts,
     }
-    logger.info("CPU-parallel multi-model worker finished for %s", key)
+    logger.info(
+        "CPU-parallel multi-model worker finished for %s in %.2f seconds",
+        key,
+        summary["duration_seconds"],
+    )
     return {"status": "ok", "key": key, "summary": summary}

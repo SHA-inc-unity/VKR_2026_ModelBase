@@ -32,7 +32,17 @@ from frontend.components.model_analysis import (
     render_model_summary_section,
 )
 from frontend.components.tables import render_anomalies_table, render_backtest_table, render_market_table
-from frontend.services.formatters import fmt_bool, fmt_confidence, fmt_delta, fmt_number, fmt_percent, fmt_price, fmt_text
+from frontend.services.formatters import (
+    fmt_bool,
+    fmt_confidence,
+    fmt_cpu_percent,
+    fmt_delta,
+    fmt_duration_seconds,
+    fmt_number,
+    fmt_percent,
+    fmt_price,
+    fmt_text,
+)
 from frontend.services.loaders import (
     compute_market_summary,
     get_frontend_paths,
@@ -207,6 +217,52 @@ def _pill(text: str, *, tone: str = "accent") -> str:
     return f"<span class='dashboard-pill {tone}'>{html.escape(text)}</span>"
 
 
+def _render_execution_metrics_block(execution_metrics: dict[str, Any] | None) -> None:
+    st.subheader("Execution Metrics")
+    st.caption("Latest completed run-all execution metrics from tracked backend jobs and pipeline summary artifacts.")
+    if not execution_metrics or not any(value is not None for value in execution_metrics.values()):
+        st.info("No completed run metrics yet.")
+        return
+
+    _render_status_cards(
+        [
+            {
+                "label": "Total execution time",
+                "value": fmt_duration_seconds(execution_metrics.get("duration_seconds")),
+                "note": (
+                    f"Started {fmt_text(execution_metrics.get('start_time'))} | "
+                    f"Ended {fmt_text(execution_metrics.get('end_time'))}"
+                ),
+                "tone": "accent",
+            },
+            {
+                "label": "Average CPU usage",
+                "value": fmt_cpu_percent(execution_metrics.get("avg_cpu_usage_percent")),
+                "note": "Average host CPU during the latest completed run",
+                "tone": "positive",
+            },
+            {
+                "label": "Peak CPU usage",
+                "value": fmt_cpu_percent(execution_metrics.get("max_cpu_usage_percent")),
+                "note": "Highest sampled host CPU during the latest completed run",
+                "tone": "warning",
+            },
+            {
+                "label": "Models executed",
+                "value": fmt_text(execution_metrics.get("models_executed_count")),
+                "note": "Main pipeline plus completed multi-model runs",
+                "tone": "accent",
+            },
+            {
+                "label": "Execution mode",
+                "value": fmt_text(execution_metrics.get("execution_mode")),
+                "note": "Tracked run-all execution policy",
+                "tone": "accent",
+            },
+        ]
+    )
+
+
 def _filter_registry(
     registry_df: pd.DataFrame,
     *,
@@ -243,6 +299,9 @@ def _format_registry_view(registry_df: pd.DataFrame, selected_model_key: str | N
 
     view = registry_df.copy()
     view.insert(0, "Focus", view["model_key"].eq(selected_model_key).map(lambda is_selected: "Selected" if is_selected else ""))
+    for raw_column, display_column in [("sign_tp", "TP"), ("sign_tn", "TN"), ("sign_fp", "FP"), ("sign_fn", "FN")]:
+        if raw_column in view.columns:
+            view[display_column] = view[raw_column]
     for column in ["selection_eligibility", "raw_model_used_before_guard", "guarded_candidate_after_guard", "is_main"]:
         if column in view.columns:
             view[column] = view[column].map(fmt_bool)
@@ -265,6 +324,10 @@ def _format_registry_view(registry_df: pd.DataFrame, selected_model_key: str | N
         "mean_delta_vs_baseline",
         "win_rate_vs_baseline",
         "sign_acc_pct",
+        "TP",
+        "TN",
+        "FP",
+        "FN",
         "direction_acc_pct",
         "overfit_status",
         "guarded_candidate_type",
@@ -321,7 +384,7 @@ def _render_fleet_comparison_chart(registry_df: pd.DataFrame) -> None:
         )
     )
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10), yaxis_title="Delta vs Baseline")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_selected_model_header(record: dict[str, Any] | None) -> None:
@@ -451,6 +514,7 @@ def render_dashboard() -> None:
     report_text = build_dashboard_txt_report(selected_model_key=selected_model_key)
     report_name = f"model_dashboard_report_{pd.Timestamp.utcnow().strftime('%Y%m%d_%H%M%SZ')}.txt"
     recent_jobs = [job.to_dict() for job in get_recent_jobs(limit=8, max_log_lines=16)]
+    execution_metrics = dashboard_overview.execution_metrics.to_dict() if dashboard_overview.execution_metrics is not None else None
 
     st.markdown(
         """
@@ -485,18 +549,18 @@ def render_dashboard() -> None:
             st.caption("Market dataset")
             st.write("No cached dataset")
     with control_cols[2]:
-        run_all_clicked = st.button("Run all models", type="primary", use_container_width=True)
+        run_all_clicked = st.button("Run all models", type="primary", width="stretch")
     with control_cols[3]:
-        run_selected_clicked = st.button("Run selected model", type="primary", use_container_width=True)
+        run_selected_clicked = st.button("Run selected model", type="primary", width="stretch")
     with control_cols[4]:
-        refresh_clicked = st.button("Refresh", use_container_width=True)
+        refresh_clicked = st.button("Refresh", width="stretch")
     with control_cols[5]:
         st.download_button(
             "Export TXT report",
             data=report_text,
             file_name=report_name,
             mime="text/plain",
-            use_container_width=True,
+            width="stretch",
         )
 
     if run_all_clicked:
@@ -506,7 +570,6 @@ def render_dashboard() -> None:
         st.session_state["dashboard_action_event"] = dispatch_action_request("run_selected_model", selected_model_key).to_dict()
         st.rerun()
     if refresh_clicked:
-        st.session_state["dashboard_action_event"] = dispatch_action_request("refresh_artifacts", selected_model_key).to_dict()
         st.cache_data.clear()
         st.rerun()
 
@@ -638,6 +701,8 @@ def render_dashboard() -> None:
             },
         ]
     )
+
+    _render_execution_metrics_block(execution_metrics)
 
     fleet_col, focus_col = st.columns([1.08, 0.92], gap="large")
     with fleet_col:
@@ -819,7 +884,7 @@ def render_dashboard() -> None:
             data=report_text,
             file_name=report_name,
             mime="text/plain",
-            use_container_width=False,
+            width="content",
         )
         st.text_area("TXT report content", value=report_text, height=540, disabled=True)
         with st.expander("Current data source summary"):

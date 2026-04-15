@@ -65,7 +65,7 @@ def render_overview_page(
         winners = winners.sort_values(by="delta_vs_baseline", ascending=False, na_position="last")
     st.dataframe(
         winners[[column for column in ["model_name", "delta_vs_baseline", "mean_delta_vs_baseline", "sign_acc_pct", "direction_acc_pct", "robustness_status", "recommendation_bucket"] if column in winners.columns]].head(8),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -81,7 +81,7 @@ def render_overview_page(
         ]
     st.dataframe(
         suppressed[[column for column in ["model_name", "raw_model_delta_vs_baseline", "delta_vs_baseline", "selection_eligibility", "overfit_status", "guarded_candidate_type"] if column in suppressed.columns]].head(8),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 

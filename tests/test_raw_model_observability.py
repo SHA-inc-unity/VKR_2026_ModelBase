@@ -105,12 +105,24 @@ def test_pipeline_summary_exposes_raw_model_metrics_and_trace_fields():
         "raw_model_used_before_guard": True,
         "guarded_candidate_type": "baseline_only",
         "guarded_candidate_after_guard": True,
+        "selection_effective_score": 101.2,
+        "effective_penalty_value": 3.1,
+        "penalty_components": {"risk_score": 0.6},
+        "holdout_weight_used": 0.62,
+        "validation_weight_used": 0.38,
+        "holdout_proxy_mae": 98.1,
         "overfitting_diagnostics": {"overfit_status": "none", "overfit_reason": "within_thresholds"},
         "range_calibration": {},
         "backtest_summary": {
             "backtest_points": 1,
             "direction_points": 1,
             "overfitting_diagnostics": {"overfit_status": "none", "overfit_reason": "within_thresholds"},
+            "selection_effective_score": 101.2,
+            "effective_penalty_value": 3.1,
+            "penalty_components": {"risk_score": 0.6},
+            "holdout_weight_used": 0.62,
+            "validation_weight_used": 0.38,
+            "holdout_proxy_mae": 98.1,
         },
         "accuracy_metrics": {"direction_accuracy_pct": 55.0, "sign_accuracy_pct": 54.0},
         "multi_window": {"enabled": False},
@@ -134,6 +146,12 @@ def test_pipeline_summary_exposes_raw_model_metrics_and_trace_fields():
             "raw_model_used_before_guard": True,
             "guarded_candidate_type": "baseline_only",
             "guarded_candidate_after_guard": True,
+            "selection_effective_score": 115.0,
+            "effective_penalty_value": 4.2,
+            "penalty_components": {"risk_score": 0.7},
+            "holdout_weight_used": 0.62,
+            "validation_weight_used": 0.38,
+            "holdout_proxy_mae": 110.0,
             "metrics": {
                 "raw_model_MAE": 0.2,
                 "raw_model_sign_acc": 0.58,
@@ -159,7 +177,11 @@ def test_pipeline_summary_exposes_raw_model_metrics_and_trace_fields():
     assert summary["raw_model_candidate_type"] == "model_only"
     assert summary["guarded_candidate_type"] == "baseline_only"
     assert summary["guarded_candidate_after_guard"] is True
+    assert float(summary["effective_penalty_value"]) == 3.1
+    assert float(summary["holdout_weight_used"]) == 0.62
 
     registry = summary["practical_selection_registry"]
     assert float(registry["main_direct_pipeline"]["raw_model_MAE"]) == 0.12
     assert float(registry["60min_3h"]["raw_model_MAE"]) == 0.2
+    assert float(registry["main_direct_pipeline"]["effective_penalty_value"]) == 3.1
+    assert float(registry["60min_3h"]["holdout_weight_used"]) == 0.62

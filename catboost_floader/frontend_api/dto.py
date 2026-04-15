@@ -16,6 +16,10 @@ class ModelRegistryEntry:
     std_delta_vs_baseline: float | None = None
     win_rate_vs_baseline: float | None = None
     sign_acc_pct: float | None = None
+    sign_tp: int | None = None
+    sign_tn: int | None = None
+    sign_fp: int | None = None
+    sign_fn: int | None = None
     direction_acc_pct: float | None = None
     overfit_status: str | None = None
     overfit_reason: str | None = None
@@ -33,6 +37,20 @@ class ModelRegistryEntry:
 
 
 @dataclass(frozen=True)
+class ExecutionMetricsDTO:
+    start_time: str | None = None
+    end_time: str | None = None
+    duration_seconds: float | None = None
+    avg_cpu_usage_percent: float | None = None
+    max_cpu_usage_percent: float | None = None
+    models_executed_count: int | None = None
+    execution_mode: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class DashboardOverviewDTO:
     total_models: int
     eligible_count: int
@@ -41,11 +59,13 @@ class DashboardOverviewDTO:
     overfit_risk_count: int
     suppressed_edge_count: int
     main_model_key: str | None = None
+    execution_metrics: ExecutionMetricsDTO | None = None
     registry: list[ModelRegistryEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["registry"] = [entry.to_dict() for entry in self.registry]
+        payload["execution_metrics"] = self.execution_metrics.to_dict() if self.execution_metrics is not None else None
         return payload
 
 

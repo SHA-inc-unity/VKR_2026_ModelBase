@@ -50,7 +50,7 @@ def render_price_chart(df: pd.DataFrame, anomaly_windows: pd.DataFrame | None, r
             fig.add_trace(go.Scatter(x=[forecast_ts, forecast_ts], y=[low, high], mode="lines", line=dict(width=10), name="Forecast Range"))
 
     fig.update_layout(height=520, margin=dict(l=10, r=10, t=20, b=10), xaxis_title=None, yaxis_title="Price", xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_backtest_chart(backtest_df: pd.DataFrame, rows_to_show: int = 500) -> None:
@@ -69,7 +69,7 @@ def render_backtest_chart(backtest_df: pd.DataFrame, rows_to_show: int = 500) ->
         fig.add_trace(go.Scatter(x=x, y=view["range_pred_high"], mode="lines", line=dict(width=0), showlegend=False))
         fig.add_trace(go.Scatter(x=x, y=view["range_pred_low"], mode="lines", fill="tonexty", name="Forecast Range", line=dict(width=0)))
     fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10), xaxis_title=None, yaxis_title="Price")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_confidence_chart(backtest_df: pd.DataFrame, rows_to_show: int = 500) -> None:
@@ -84,7 +84,7 @@ def render_confidence_chart(backtest_df: pd.DataFrame, rows_to_show: int = 500) 
     fig.add_hrect(y0=0.5, y1=0.75, fillcolor="rgba(255,193,7,0.12)", line_width=0)
     fig.add_hrect(y0=0.75, y1=1.0, fillcolor="rgba(76,175,80,0.12)", line_width=0)
     fig.update_layout(height=280, margin=dict(l=10, r=10, t=20, b=10), yaxis_range=[0, 1])
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_confidence_gauge(confidence: float | None) -> None:
@@ -110,7 +110,7 @@ def render_confidence_gauge(confidence: float | None) -> None:
         title={"text": "Confidence"},
     ))
     fig.update_layout(height=260, margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_error_histogram(backtest_df: pd.DataFrame) -> None:
@@ -121,7 +121,7 @@ def render_error_histogram(backtest_df: pd.DataFrame) -> None:
         errors = (backtest_df["direct_pred_price"] - backtest_df["target_future_close"]).dropna()
         fig = go.Figure(go.Histogram(x=errors, nbinsx=50, name="Forecast Error"))
         fig.update_layout(height=300, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Error", yaxis_title="Count")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 def render_coverage_chart(backtest_df: pd.DataFrame, rows_to_show: int = 500) -> None:
@@ -132,7 +132,7 @@ def render_coverage_chart(backtest_df: pd.DataFrame, rows_to_show: int = 500) ->
     covered = ((view["target_future_close"] >= view["range_pred_low"]) & (view["target_future_close"] <= view["range_pred_high"])).astype(int)
     fig = go.Figure(go.Scatter(x=view["timestamp"], y=covered, mode="lines", name="Covered"))
     fig.update_layout(height=260, margin=dict(l=10, r=10, t=20, b=10), yaxis=dict(range=[-0.1, 1.1], tickvals=[0, 1]))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_feature_importance(importance: dict | None, key: str, top_n: int = 12) -> None:
@@ -142,4 +142,4 @@ def render_feature_importance(importance: dict | None, key: str, top_n: int = 12
     items = sorted(importance[key].items(), key=lambda kv: kv[1], reverse=True)[:top_n]
     fig = go.Figure(go.Bar(x=[v for _, v in items][::-1], y=[k for k, _ in items][::-1], orientation="h"))
     fig.update_layout(height=360, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Importance")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")

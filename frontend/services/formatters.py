@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 
@@ -64,3 +65,29 @@ def fmt_text(value: Optional[object]) -> str:
     if value in (None, ""):
         return "—"
     return str(value)
+
+
+def fmt_duration_seconds(value: Optional[float]) -> str:
+    if value is None:
+        return "—"
+    try:
+        total_seconds = max(0, int(round(float(value))))
+    except Exception:
+        return "—"
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def fmt_cpu_percent(value: Optional[float], digits: int = 1) -> str:
+    if value is None:
+        return "—"
+    try:
+        numeric = float(value)
+    except Exception:
+        return "—"
+    if math.isnan(numeric):
+        return "—"
+    return f"{numeric:.{digits}f}%"

@@ -3,19 +3,23 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
 from typing import Any, Dict
 
 import pandas as pd
 
 from catboost_floader.core.config import (
-    ENABLE_PARALLEL_CPU_BACKTEST,
-    format_cpu_stage_policy_log,
     MULTI_AGGREGATED_DIR,
     MULTI_HORIZONS_HOURS,
     MULTI_PERSIST_AGGREGATED,
     MULTI_SKIP_TUNING,
     MULTI_TIMEFRAMES,
-    apply_cpu_worker_limits,
+)
+from catboost_floader.core.parallel_policy import (
+    ENABLE_PARALLEL_CPU_MULTI_MODEL,
+    format_cpu_stage_policy_log,
+    get_cpu_execution_mode_metadata,
+    RUN_ALL_MODELS_CPU_MODE,
     resolve_cpu_stage_parallel_policy,
 )
 from catboost_floader.core.utils import ensure_dirs, get_logger
@@ -28,6 +32,7 @@ logger = get_logger("multi_model_orchestration")
 
 
 def _run_multi_models(raw: pd.DataFrame) -> dict[str, Dict[str, Any]]:
+    started_at = time.perf_counter()
     try:
         from catboost_floader.data.preprocessing import aggregate_for_modeling
     except Exception:
@@ -78,40 +83,60 @@ def _run_multi_models(raw: pd.DataFrame) -> dict[str, Dict[str, Any]]:
                     )
 
             if multi_tasks:
+                execution_mode = RUN_ALL_MODELS_CPU_MODE
+                execution_metadata = get_cpu_execution_mode_metadata(
+                    execution_mode,
+                    model_workers=len(multi_tasks),
+                )
                 multi_policy = resolve_cpu_stage_parallel_policy(
                     "multi_model_evaluation",
                     parallel_units=len(multi_tasks),
                     granularity="model_key",
-                    allow_parallel=ENABLE_PARALLEL_CPU_BACKTEST,
+                    allow_parallel=ENABLE_PARALLEL_CPU_MULTI_MODEL,
+                    execution_mode=execution_mode,
                 )
                 multi_workers = int(multi_policy["outer_workers"])
-                multi_threads = int(multi_policy["inner_threads"])
+                multi_threads = multi_policy.get("catboost_thread_count")
                 multi_parallel = bool(multi_policy["parallel_enabled"])
                 keys_msg = ", ".join(task["key"] for task in multi_tasks)
                 logger.info(
-                    "Multi-model evaluation using CPU policy: %s keys=%s",
+                    "Multi-model execution policy selected: %s model_workers=%s keys=%s",
                     format_cpu_stage_policy_log(multi_policy),
+                    multi_workers,
                     keys_msg,
                 )
                 print(
                     "CPU policy (multi-model): "
-                    f"{format_cpu_stage_policy_log(multi_policy)}"
+                    f"{format_cpu_stage_policy_log(multi_policy)} "
+                    f"model_workers={multi_workers}"
+                )
+                logger.info(
+                    "Run-all multi-model mode: execution_mode=%s worker_thread_limits_applied=%s nested_thread_caps_applied=%s model_workers=%s",
+                    execution_metadata["execution_mode"],
+                    execution_metadata["worker_thread_limits_applied"],
+                    execution_metadata["nested_thread_caps_applied"],
+                    multi_workers,
                 )
 
                 multi_completed_in_parallel = False
                 if multi_parallel:
-                    apply_cpu_worker_limits(multi_threads)
                     try:
                         with ProcessPoolExecutor(
                             max_workers=multi_workers,
                             mp_context=mp.get_context("spawn"),
                             initializer=_initialize_multi_model_worker,
-                            initargs=(multi_threads,),
+                            initargs=(multi_threads, execution_mode),
                         ) as executor:
                             future_to_key = {
                                 executor.submit(
                                     _run_multi_model_key_task,
-                                    {**task, "catboost_thread_count": multi_threads, "outer_parallel_worker": True},
+                                    {
+                                        **task,
+                                        "catboost_thread_count": multi_threads,
+                                        "outer_parallel_worker": True,
+                                        "execution_mode": execution_mode,
+                                        "model_workers": multi_workers,
+                                    },
                                 ): task["key"]
                                 for task in multi_tasks
                             }
@@ -147,7 +172,13 @@ def _run_multi_models(raw: pd.DataFrame) -> dict[str, Dict[str, Any]]:
                         print(f"Multi-model: processing {key}")
                         try:
                             result = _run_multi_model_key_task(
-                                {**task, "catboost_thread_count": multi_threads, "outer_parallel_worker": False}
+                                {
+                                    **task,
+                                    "catboost_thread_count": multi_threads,
+                                    "outer_parallel_worker": False,
+                                    "execution_mode": execution_mode,
+                                    "model_workers": multi_workers,
+                                }
                             )
                             status = result.get("status")
                             if status == "ok":
@@ -163,4 +194,9 @@ def _run_multi_models(raw: pd.DataFrame) -> dict[str, Dict[str, Any]]:
 
     if multi_models_summary:
         multi_models_summary = {key: multi_models_summary[key] for key in sorted(multi_models_summary)}
+    logger.info(
+        "Multi-model orchestration finished in %.2f seconds for %s models",
+        time.perf_counter() - started_at,
+        len(multi_models_summary),
+    )
     return multi_models_summary

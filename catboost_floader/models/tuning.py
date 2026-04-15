@@ -15,38 +15,48 @@ from sklearn.model_selection import ParameterGrid, TimeSeriesSplit
 from tqdm import tqdm
 
 from catboost_floader.core.config import (
-    apply_cpu_worker_limits,
-    current_worker_thread_count,
     DIRECT_CATBOOST_PARAMS,
     DIRECT_SEARCH_GRID,
-    ENABLE_PARALLEL_CPU_FULL_EVALUATION,
     ENABLE_GPU_FULL_EVALUATION,
-    format_cpu_stage_policy_log,
     HALVING_FACTOR,
     HALVING_MAX_ROWS,
-    is_nested_outer_parallel,
     RANDOM_SEED,
     RANGE_HIGH_CATBOOST_PARAMS,
     RANGE_LOW_CATBOOST_PARAMS,
     RANGE_SEARCH_GRID,
     REPORT_DIR,
+    TIME_SERIES_SPLITS,
+)
+from catboost_floader.core.parallel_policy import (
+    apply_cpu_worker_limits,
+    current_worker_thread_count,
+    ENABLE_PARALLEL_CPU_FAST_SCREENING,
+    ENABLE_PARALLEL_CPU_FULL_EVALUATION,
+    format_cpu_stage_policy_log,
+    is_nested_outer_parallel,
     resolve_cpu_stage_parallel_policy,
     resolve_stage2_parallel_policy,
-    TIME_SERIES_SPLITS,
 )
 from catboost_floader.core.utils import get_logger
 
 logger = get_logger("hyperparameter_search")
+_STAGE1_WORKER_STATE: Dict[str, Any] = {}
 _STAGE2_WORKER_STATE: Dict[str, Any] = {}
 
 
 def _initialize_cpu_parallel_worker(
-    thread_count: int,
+    thread_count: int | None,
     X_stage2: pd.DataFrame | None = None,
     y_stage2: pd.Series | None = None,
     fold_specs: List[Tuple[np.ndarray, np.ndarray]] | None = None,
+    mark_outer_parallel: bool = False,
+    execution_mode: str | None = None,
 ) -> None:
-    apply_cpu_worker_limits(thread_count)
+    apply_cpu_worker_limits(
+        thread_count,
+        mark_outer_parallel=mark_outer_parallel,
+        execution_mode=execution_mode,
+    )
     if X_stage2 is not None and y_stage2 is not None and fold_specs is not None:
         global _STAGE2_WORKER_STATE
         _STAGE2_WORKER_STATE = {
@@ -54,6 +64,58 @@ def _initialize_cpu_parallel_worker(
             "y_stage2": y_stage2,
             "fold_specs": fold_specs,
         }
+
+
+def _initialize_fast_screening_worker(
+    thread_count: int | None,
+    X_fast: pd.DataFrame,
+    y_fast: pd.Series,
+    mark_outer_parallel: bool = False,
+    execution_mode: str | None = None,
+) -> None:
+    apply_cpu_worker_limits(
+        thread_count,
+        mark_outer_parallel=mark_outer_parallel,
+        execution_mode=execution_mode,
+    )
+    global _STAGE1_WORKER_STATE
+    _STAGE1_WORKER_STATE = {
+        "X_fast": X_fast,
+        "y_fast": y_fast,
+    }
+
+
+def _evaluate_stage1_candidate_job(
+    candidate_idx: int,
+    params: Dict[str, Any],
+    base_params: Dict[str, Any],
+    *,
+    scorer: str,
+    thread_count: int | None = None,
+    X_fast: pd.DataFrame | None = None,
+    y_fast: pd.Series | None = None,
+) -> tuple[float, Dict[str, Any], Dict[str, Any], int] | None:
+    try:
+        X_data = X_fast if X_fast is not None else _STAGE1_WORKER_STATE.get("X_fast")
+        y_data = y_fast if y_fast is not None else _STAGE1_WORKER_STATE.get("y_fast")
+        if X_data is None or y_data is None:
+            raise RuntimeError("Stage 1 worker state is not initialized")
+
+        prepared_params = base_params.copy()
+        prepared_params.update(params)
+        orig_iter = int(prepared_params.get("iterations", 300))
+        prepared_params["iterations"] = max(10, int(orig_iter // max(1, HALVING_FACTOR * 2)))
+        prepared_params["depth"] = min(int(prepared_params.get("depth", 8)), 6)
+
+        effective_threads = thread_count or current_worker_thread_count()
+        model = _make_estimator(prepared_params, thread_count=effective_threads)
+        model.fit(X_data, y_data)
+        preds = model.predict(X_data)
+        score = _score_predictions(y_data.to_numpy(), np.asarray(preds), scorer)
+        return score, dict(params), prepared_params.copy(), candidate_idx
+    except Exception as exc:
+        logger.exception("Stage 1 candidate idx %s failed: %s", candidate_idx, exc)
+        return None
 
 
 def _format_duration(seconds: float) -> str:
@@ -348,6 +410,7 @@ def _run_stage2_full_evaluation(
         len(fold_specs),
         nested_outer_parallel=nested_outer_parallel,
     )
+    stage2_inner_threads = stage2_policy.get("catboost_thread_count")
 
     stage2_started_at = time.perf_counter()
     logger.info(
@@ -408,10 +471,24 @@ def _run_stage2_full_evaluation(
                 max_workers=stage2_policy["outer_workers"],
                 mp_context=mp.get_context("spawn"),
                 initializer=_initialize_cpu_parallel_worker,
-                initargs=(stage2_policy["inner_threads"], X_stage2, y_stage2, fold_specs),
+                initargs=(
+                    stage2_inner_threads,
+                    X_stage2,
+                    y_stage2,
+                    fold_specs,
+                    True,
+                    stage2_policy.get("execution_mode"),
+                ),
             )
         elif executor_kind == "thread":
-            _initialize_cpu_parallel_worker(stage2_policy["inner_threads"], X_stage2, y_stage2, fold_specs)
+            _initialize_cpu_parallel_worker(
+                stage2_inner_threads,
+                X_stage2,
+                y_stage2,
+                fold_specs,
+                nested_outer_parallel,
+                stage2_policy.get("execution_mode"),
+            )
             executor_cm = ThreadPoolExecutor(max_workers=stage2_policy["outer_workers"])
         else:
             raise ValueError(f"Unsupported executor kind: {executor_kind}")
@@ -425,7 +502,7 @@ def _run_stage2_full_evaluation(
                         candidate["params"],
                         fold_idx,
                         scorer=scorer,
-                        thread_count=stage2_policy["inner_threads"],
+                        thread_count=stage2_inner_threads,
                     ): (candidate["candidate_idx"], fold_idx)
                     for candidate in stage2_candidates
                     for fold_idx in range(len(fold_specs))
@@ -455,7 +532,7 @@ def _run_stage2_full_evaluation(
                         candidate["candidate_idx"],
                         candidate["params"],
                         scorer=scorer,
-                        thread_count=stage2_policy["inner_threads"],
+                        thread_count=stage2_inner_threads,
                     ): candidate["candidate_idx"]
                     for candidate in stage2_candidates
                 }
@@ -481,7 +558,11 @@ def _run_stage2_full_evaluation(
 
     def _run_sequential() -> None:
         nonlocal execution_path
-        apply_cpu_worker_limits(stage2_policy["inner_threads"])
+        apply_cpu_worker_limits(
+            stage2_inner_threads,
+            mark_outer_parallel=nested_outer_parallel,
+            execution_mode=stage2_policy.get("execution_mode"),
+        )
         if stage2_policy["granularity"] == "candidate_fold":
             for candidate in stage2_candidates:
                 for fold_idx in range(len(fold_specs)):
@@ -490,7 +571,7 @@ def _run_stage2_full_evaluation(
                             candidate["params"],
                             fold_idx,
                             scorer=scorer,
-                            thread_count=stage2_policy["inner_threads"],
+                            thread_count=stage2_inner_threads,
                             X_stage2=X_stage2,
                             y_stage2=y_stage2,
                             fold_specs=fold_specs,
@@ -518,7 +599,7 @@ def _run_stage2_full_evaluation(
                         len(fold_specs),
                         search_name=name,
                         scorer=scorer,
-                        thread_count=stage2_policy["inner_threads"],
+                        thread_count=stage2_inner_threads,
                     )
                     candidate_scores[candidate["candidate_idx"]] = score
                 except Exception as exc:
@@ -610,65 +691,149 @@ def _run_search(name, base_params, grid, X, y, scorer):
         granularity="candidate",
         nested_outer_parallel=nested_outer_parallel,
         nested_thread_count=nested_thread_count if nested_outer_parallel else None,
-        allow_parallel=ENABLE_PARALLEL_CPU_FULL_EVALUATION,
+        allow_parallel=ENABLE_PARALLEL_CPU_FAST_SCREENING,
     )
     workers = int(stage1_policy["outer_workers"])
-    stage1_inner_threads = int(stage1_policy["inner_threads"])
-    apply_cpu_worker_limits(stage1_inner_threads, mark_outer_parallel=nested_outer_parallel)
+    stage1_inner_threads = stage1_policy.get("catboost_thread_count")
+    apply_cpu_worker_limits(
+        stage1_inner_threads,
+        mark_outer_parallel=nested_outer_parallel,
+        execution_mode=stage1_policy.get("execution_mode"),
+    )
     logger.info(
         "Stage 1 fast screening using CPU policy for %s: %s",
         name,
         format_cpu_stage_policy_log(stage1_policy),
     )
 
-    def _eval_candidate(idx, params):
-        try:
-            p = base_params.copy()
-            p.update(params)
-            orig_iter = int(p.get("iterations", 300))
-            p["iterations"] = max(10, int(orig_iter // max(1, HALVING_FACTOR * 2)))
-            p["depth"] = min(int(p.get("depth", 8)), 6)
-
-            model = _make_estimator(p, thread_count=stage1_inner_threads)
-            model.fit(X_fast, y_fast)
-            preds = model.predict(X_fast)
-            score = _score_predictions(y_fast.to_numpy(), np.asarray(preds), scorer)
-            return (score, params.copy() if isinstance(params, dict) else params, p.copy(), idx)
-        except Exception as exc:
-            logger.exception("Stage 1 candidate idx %s failed: %s", idx, exc)
-            return None
-
     progress = tqdm(total=len(param_grid), desc="Stage 1", unit="model")
     recent_intervals = deque(maxlen=50)
     last_ts = None
 
-    futures = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    def _reset_stage1_results() -> None:
+        nonlocal last_ts
+        scores.clear()
+        recent_intervals.clear()
+        last_ts = None
+
+    def _update_stage1_progress(result) -> None:
+        nonlocal last_ts
+        now = time.time()
+        if last_ts is not None:
+            interval = now - last_ts
+            if interval <= 0:
+                interval = 1e-6
+            recent_intervals.append(interval)
+        last_ts = now
+
+        progress.update(1)
+        if result:
+            scores.append(result)
+            best_val = round(max(score for score, *_ in scores), 6)
+            if recent_intervals:
+                rate = len(recent_intervals) / sum(recent_intervals)
+                progress.set_postfix(best=best_val, rps=f"{rate:.2f}model/s")
+            else:
+                progress.set_postfix(best=best_val)
+
+    def _run_stage1_parallel(executor_kind: str) -> None:
+        if executor_kind == "process":
+            executor_cm = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=_initialize_fast_screening_worker,
+                initargs=(
+                    stage1_inner_threads,
+                    X_fast,
+                    y_fast,
+                    True,
+                    stage1_policy.get("execution_mode"),
+                ),
+            )
+        elif executor_kind == "thread":
+            _initialize_fast_screening_worker(
+                stage1_inner_threads,
+                X_fast,
+                y_fast,
+                nested_outer_parallel,
+                stage1_policy.get("execution_mode"),
+            )
+            executor_cm = ThreadPoolExecutor(max_workers=workers)
+        else:
+            raise ValueError(f"Unsupported executor kind: {executor_kind}")
+
+        with executor_cm as executor:
+            future_to_idx = {
+                executor.submit(
+                    _evaluate_stage1_candidate_job,
+                    idx,
+                    params,
+                    base_params,
+                    scorer=scorer,
+                    thread_count=stage1_inner_threads,
+                ): idx
+                for idx, params in enumerate(param_grid, start=1)
+            }
+            for future in as_completed(future_to_idx):
+                _update_stage1_progress(future.result())
+
+    def _run_stage1_sequential() -> None:
+        _initialize_fast_screening_worker(
+            stage1_inner_threads,
+            X_fast,
+            y_fast,
+            nested_outer_parallel,
+            stage1_policy.get("execution_mode"),
+        )
         for idx, params in enumerate(param_grid, start=1):
-            futures.append(executor.submit(_eval_candidate, idx, params))
+            result = _evaluate_stage1_candidate_job(
+                idx,
+                params,
+                base_params,
+                scorer=scorer,
+                thread_count=stage1_inner_threads,
+                X_fast=X_fast,
+                y_fast=y_fast,
+            )
+            _update_stage1_progress(result)
 
-        for fut in as_completed(futures):
-            now = time.time()
-            if last_ts is not None:
-                interval = now - last_ts
-                if interval <= 0:
-                    interval = 1e-6
-                recent_intervals.append(interval)
-            last_ts = now
+    stage1_execution_path = "sequential_candidate"
+    stage1_parallel_completed = False
+    if stage1_policy["parallel_enabled"]:
+        try:
+            _run_stage1_parallel("process")
+            stage1_execution_path = "process_candidate"
+            stage1_parallel_completed = True
+        except Exception as exc:
+            logger.warning(
+                "Stage 1 CPU process pool unavailable for %s: %s. Falling back to thread-based CPU screening.",
+                name,
+                exc,
+            )
+            _reset_stage1_results()
+            if progress.n > 0:
+                progress.close()
+                progress = tqdm(total=len(param_grid), desc="Stage 1", unit="model")
+            try:
+                _run_stage1_parallel("thread")
+                stage1_execution_path = "thread_candidate"
+                stage1_parallel_completed = True
+            except Exception as thread_exc:
+                logger.warning(
+                    "Stage 1 CPU thread pool unavailable for %s: %s. Falling back to sequential CPU screening.",
+                    name,
+                    thread_exc,
+                )
+                _reset_stage1_results()
+                if progress.n > 0:
+                    progress.close()
+                    progress = tqdm(total=len(param_grid), desc="Stage 1", unit="model")
 
-            res = fut.result()
-            progress.update(1)
-            if res:
-                scores.append(res)
-                best_val = round(max([s for s, *_ in scores]), 6)
-                if recent_intervals:
-                    rate = len(recent_intervals) / sum(recent_intervals)
-                    progress.set_postfix(best=best_val, rps=f"{rate:.2f}model/s")
-                else:
-                    progress.set_postfix(best=best_val)
+    if not stage1_parallel_completed:
+        _run_stage1_sequential()
 
     progress.close()
-    logger.info("Stage 1 fast screening finished for %s", name)
+    logger.info("Stage 1 fast screening finished for %s using %s", name, stage1_execution_path)
 
     if scores:
         best_score_stage1, best_params_stage1, best_p_used_stage1, best_idx_stage1 = max(scores, key=lambda x: x[0])

@@ -77,7 +77,7 @@ def render_comparison_page(*, registry_df: pd.DataFrame) -> None:
         return
 
     table = selected_df[field_selection].rename(columns=comparison_fields)
-    st.dataframe(table, use_container_width=True)
+    st.dataframe(table, width="stretch")
 
     numeric_metric = st.selectbox(
         "Chart metric",
@@ -104,6 +104,6 @@ def render_comparison_page(*, registry_df: pd.DataFrame) -> None:
             )
         )
         fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), yaxis_title=comparison_fields[numeric_metric])
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     st.caption("Comparison remains read-only. No model execution or config changes are exposed here.")

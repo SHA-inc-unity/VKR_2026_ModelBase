@@ -1,2 +1,9 @@
 {
+  "http.proxy": "socks5://127.0.0.1:10808",
+  "http.proxySupport": "override",
+  "http.systemCertificates": true,
+  "github.copilot.advanced": {
+    "proxy": "socks5://127.0.0.1:10808"
+  },
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
 }

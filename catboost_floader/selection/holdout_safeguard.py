@@ -15,6 +15,7 @@ from catboost_floader.core.config import (
     MAIN_HOLDOUT_SAFEGUARD_TRIGGER_ON_ANY_NEGATIVE_DELTA,
 )
 from catboost_floader.evaluation.backtest import build_direct_baselines
+from catboost_floader.models.direct import apply_direct_prediction_stabilization
 
 from catboost_floader.core.utils import _drop_non_model_columns
 from catboost_floader.selection.direct_robustness import _safe_float
@@ -59,6 +60,15 @@ def _strategy_descriptor(strategy: Dict[str, Any] | None) -> Dict[str, Any]:
         "main_selection_final_ranking_reason": str(strategy.get("main_selection_final_ranking_reason", "")),
         "main_selection_baseline_overridden": bool(strategy.get("main_selection_baseline_overridden", False)),
         "main_selection_candidate_type": str(strategy.get("main_selection_candidate_type", strategy.get("type", "model_only"))),
+        "selection_effective_score": _safe_float(strategy.get("selection_effective_score", strategy.get("stabilization_effective_mae"))),
+        "effective_penalty_value": _safe_float(strategy.get("effective_penalty_value")),
+        "penalty_components": dict(strategy.get("penalty_components", {}) or {}),
+        "holdout_weight_used": _safe_float(strategy.get("holdout_weight_used")),
+        "validation_weight_used": _safe_float(strategy.get("validation_weight_used")),
+        "holdout_proxy_mae": _safe_float(strategy.get("holdout_proxy_mae")),
+        "prediction_stabilization_applied": bool(strategy.get("prediction_stabilization_applied", False)),
+        "prediction_stabilization": dict(strategy.get("prediction_stabilization", {}) or {}),
+        "prediction_stabilization_stats": dict(strategy.get("prediction_stabilization_stats", {}) or {}),
     }
 
 
@@ -153,8 +163,10 @@ def _evaluate_holdout_vs_persistence(
         }
 
     try:
-        raw_pred_return = np.asarray(direct_model.predict_details(X_aligned).get("raw_pred_return"), dtype=float)
+        pred_details = dict(direct_model.predict_details(X_aligned) or {})
+        raw_pred_return = np.asarray(pred_details.get("raw_pred_return"), dtype=float)
     except Exception:
+        pred_details = {}
         raw_pred_return = np.asarray(direct_model.predict(X_aligned), dtype=float)
 
     baselines = build_direct_baselines(X_holdout_full)
@@ -167,6 +179,16 @@ def _evaluate_holdout_vs_persistence(
         "trend": trend_return,
     }
     pred_return = _compose_strategy_return(raw_pred_return, baseline_map, strategy_candidate)
+    pred_return, prediction_stabilization_stats = apply_direct_prediction_stabilization(
+        pred_return,
+        baseline_map.get(str(dict(strategy_candidate or {}).get("baseline", "persistence")), persistence_return),
+        direction_expectation=pred_details.get("direction_expectation"),
+        direction_proba=pred_details.get("direction_proba"),
+        direction_confidence_threshold=_safe_float(pred_details.get("direction_confidence_threshold")),
+        strategy=dict(strategy_candidate or {}),
+    )
+    candidate_descriptor["prediction_stabilization_applied"] = bool(prediction_stabilization_stats.get("applied", False))
+    candidate_descriptor["prediction_stabilization_stats"] = dict(prediction_stabilization_stats)
 
     pred_price = close * (1.0 + pred_return)
     persistence_price = close * (1.0 + persistence_return)

@@ -16,7 +16,14 @@ from catboost_floader.core.config import (
     RANGE_HIGH_CATBOOST_PARAMS,
     RANGE_LOW_CATBOOST_PARAMS,
     REPORT_DIR,
+)
+from catboost_floader.core.parallel_policy import (
     apply_cpu_worker_limits,
+    current_worker_thread_count,
+    get_active_cpu_execution_mode,
+    get_total_logical_threads,
+    is_nested_outer_parallel,
+    is_unbounded_cpu_execution_mode,
 )
 from catboost_floader.core.utils import _prepare_catboost_params, ensure_dirs, save_json
 from catboost_floader.diagnostics.overfitting_diagnostics import (
@@ -40,8 +47,15 @@ from catboost_floader.selection.holdout_safeguard import _apply_main_holdout_saf
 from catboost_floader.selection.robustness_regime import _classify_robustness_regime
 
 
-def _initialize_multi_model_worker(thread_count: int) -> None:
-    apply_cpu_worker_limits(thread_count, mark_outer_parallel=True)
+def _initialize_multi_model_worker(
+    thread_count: int | None,
+    execution_mode: str | None = None,
+) -> None:
+    apply_cpu_worker_limits(
+        thread_count,
+        mark_outer_parallel=True,
+        execution_mode=execution_mode,
+    )
 
 
 def _build_raw_vs_guarded_trace_fields(
@@ -72,6 +86,21 @@ def _build_raw_vs_guarded_trace_fields(
     }
 
 
+def _selection_diagnostic_fields(direct_strategy: Dict[str, Any] | None) -> Dict[str, Any]:
+    strategy = dict(direct_strategy or {})
+    return {
+        "selection_effective_score": strategy.get(
+            "selection_effective_score",
+            strategy.get("stabilization_effective_mae"),
+        ),
+        "effective_penalty_value": float(strategy.get("effective_penalty_value", 0.0) or 0.0),
+        "penalty_components": dict(strategy.get("penalty_components", {}) or {}),
+        "holdout_weight_used": strategy.get("holdout_weight_used"),
+        "validation_weight_used": strategy.get("validation_weight_used"),
+        "holdout_proxy_mae": strategy.get("holdout_proxy_mae"),
+    }
+
+
 def _run_pipeline_bundle(
     prepared: Dict[str, Any],
     *,
@@ -80,6 +109,7 @@ def _run_pipeline_bundle(
     range_high_params=None,
     direct_composition_profile: str | None = None,
     catboost_thread_count: int | None = None,
+    execution_mode: str | None = None,
     model_key: str = "main_direct_pipeline",
     enable_multi_window_evaluation: bool = ENABLE_MULTI_WINDOW_EVALUATION,
     evaluation_window_count: int = EVALUATION_WINDOW_COUNT,
@@ -94,9 +124,35 @@ def _run_pipeline_bundle(
     feature_stats = prepared["feature_stats"]
     save_json(feature_stats, os.path.join(model_dir, "feature_stats.json"))
 
-    direct_params_prepared = _prepare_catboost_params(direct_params, DIRECT_CATBOOST_PARAMS, catboost_thread_count)
-    range_low_params_prepared = _prepare_catboost_params(range_low_params, RANGE_LOW_CATBOOST_PARAMS, catboost_thread_count)
-    range_high_params_prepared = _prepare_catboost_params(range_high_params, RANGE_HIGH_CATBOOST_PARAMS, catboost_thread_count)
+    active_execution_mode = execution_mode or get_active_cpu_execution_mode()
+    inherited_worker_threads = (
+        current_worker_thread_count(active_execution_mode)
+        if is_nested_outer_parallel(active_execution_mode)
+        else None
+    )
+    if is_unbounded_cpu_execution_mode(active_execution_mode):
+        effective_catboost_thread_count = catboost_thread_count or inherited_worker_threads
+    else:
+        effective_catboost_thread_count = max(
+            1,
+            int(catboost_thread_count or inherited_worker_threads or get_total_logical_threads()),
+        )
+
+    direct_params_prepared = _prepare_catboost_params(
+        direct_params,
+        DIRECT_CATBOOST_PARAMS,
+        effective_catboost_thread_count,
+    )
+    range_low_params_prepared = _prepare_catboost_params(
+        range_low_params,
+        RANGE_LOW_CATBOOST_PARAMS,
+        effective_catboost_thread_count,
+    )
+    range_high_params_prepared = _prepare_catboost_params(
+        range_high_params,
+        RANGE_HIGH_CATBOOST_PARAMS,
+        effective_catboost_thread_count,
+    )
 
     direct_model = train_direct_model(
         prepared["X_direct_fit_model"],
@@ -242,6 +298,7 @@ def _run_pipeline_bundle(
         direct_strategy=direct_strategy,
         holdout_safeguard=holdout_safeguard,
     )
+    selection_diagnostics = _selection_diagnostic_fields(direct_strategy)
     overfitting_diagnostics = compute_direct_overfitting_diagnostics(
         direct_model=direct_model,
         X_train_full=prepared["X_direct_fit"],
@@ -278,6 +335,7 @@ def _run_pipeline_bundle(
     backtest_summary["raw_model_metrics"] = raw_model_metrics
     backtest_summary.update(raw_model_metrics)
     backtest_summary.update(raw_vs_guarded_trace)
+    backtest_summary.update(selection_diagnostics)
     backtest_summary["overfitting_diagnostics"] = overfitting_diagnostics
     backtest_summary.update(overfitting_metrics)
     save_json(backtest_summary, os.path.join(backtest_dir, "backtest_summary.json"))
@@ -310,6 +368,7 @@ def _run_pipeline_bundle(
             "raw_model_metrics": raw_model_metrics,
             **raw_model_metrics,
             **raw_vs_guarded_trace,
+            **selection_diagnostics,
             "overfitting_diagnostics": overfitting_diagnostics,
             **overfitting_metrics,
             "range_calibration": range_calibration,
@@ -361,6 +420,7 @@ def _run_pipeline_bundle(
         "raw_model_metrics": raw_model_metrics,
         **raw_model_metrics,
         **raw_vs_guarded_trace,
+        **selection_diagnostics,
         "overfitting_diagnostics": overfitting_diagnostics,
         **overfitting_metrics,
         "range_model": range_model,

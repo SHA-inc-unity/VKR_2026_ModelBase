@@ -24,6 +24,19 @@ def _scalar_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _format_scalar_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return fmt_bool(value)
+    if value is None:
+        return fmt_text(value)
+    if isinstance(value, (int, float)):
+        if pd.isna(value):
+            return fmt_text(None)
+        digits = 4 if abs(float(value)) < 1 else 2
+        return fmt_number(value, digits=digits)
+    return fmt_text(value)
+
+
 def _render_key_value_frame(payload: dict[str, Any], *, labels: dict[str, str] | None = None) -> None:
     labels = labels or {}
     if not payload:
@@ -33,7 +46,7 @@ def _render_key_value_frame(payload: dict[str, Any], *, labels: dict[str, str] |
     for key, value in payload.items():
         if isinstance(value, (dict, list)):
             continue
-        rows.append({"Field": labels.get(key, key), "Value": value})
+        rows.append({"Field": labels.get(key, key), "Value": _format_scalar_value(value)})
     if not rows:
         st.info("No scalar fields available.")
         return
@@ -46,6 +59,9 @@ def render_model_registry_table(registry_df: pd.DataFrame) -> None:
         return
 
     view = registry_df.copy()
+    for raw_column, display_column in [("sign_tp", "TP"), ("sign_tn", "TN"), ("sign_fp", "FP"), ("sign_fn", "FN")]:
+        if raw_column in view.columns:
+            view[display_column] = view[raw_column]
     for col in ["selection_eligibility", "raw_model_used_before_guard", "guarded_candidate_after_guard", "is_main"]:
         if col in view.columns:
             view[col] = view[col].map(fmt_bool)
@@ -73,6 +89,10 @@ def render_model_registry_table(registry_df: pd.DataFrame) -> None:
         "std_delta_vs_baseline",
         "win_rate_vs_baseline",
         "sign_acc_pct",
+        "TP",
+        "TN",
+        "FP",
+        "FN",
         "direction_acc_pct",
         "overfit_status",
         "recommendation_bucket",
@@ -144,6 +164,13 @@ def render_model_overfitting_section(record: dict[str, Any], *, show_advanced: b
             ("Holdout MAE", fmt_number(overfitting.get("holdout_MAE"))),
             ("Overfit Status", fmt_text(overfitting.get("overfit_status"))),
             ("Overfit Reason", fmt_text(overfitting.get("overfit_reason"))),
+        ]
+    )
+    _render_metrics_row(
+        [
+            ("Train Sign %", fmt_percent(overfitting.get("train_sign_acc_pct"), scale_100=False)),
+            ("Val Sign %", fmt_percent(overfitting.get("val_sign_acc_pct"), scale_100=False)),
+            ("Holdout Sign %", fmt_percent(overfitting.get("holdout_sign_acc_pct"), scale_100=False)),
         ]
     )
     _render_metrics_row(
@@ -265,7 +292,7 @@ def render_model_artifacts_section(record: dict[str, Any], *, show_raw: bool = F
     artifacts = dict(record.get("artifacts", {}) or {})
 
     st.subheader("Artifact Paths")
-    path_rows = [{"Artifact": key, "Path": value} for key, value in artifact_paths.items()]
+    path_rows = [{"Artifact": fmt_text(key), "Path": fmt_text(value)} for key, value in artifact_paths.items()]
     st.dataframe(pd.DataFrame(path_rows), width="stretch", hide_index=True)
 
     if show_raw:

@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 import os
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
 
-from catboost_floader.core.config import (
+from catboost_floader.core.config import DIRECTION_DEADBAND
+from catboost_floader.core.parallel_policy import (
     apply_cpu_worker_limits,
     current_worker_thread_count,
-    DIRECTION_DEADBAND,
+    ENABLE_PARALLEL_CPU_BACKTEST_WINDOW,
     format_cpu_stage_policy_log,
     is_nested_outer_parallel,
     resolve_cpu_stage_parallel_policy,
@@ -18,6 +20,7 @@ from catboost_floader.core.config import (
 from catboost_floader.core.utils import ensure_dirs, get_logger, save_json
 
 logger = get_logger("multi_window_eval")
+_WINDOW_EVAL_STATE: dict[str, Any] = {}
 
 
 def _accuracy_pct(value: float | None) -> float | None:
@@ -272,6 +275,72 @@ def _aggregate_window_metrics(window_metrics_df: pd.DataFrame, model_key: str) -
     }
 
 
+def _initialize_window_eval_worker(
+    thread_count: int | None,
+    work_df: pd.DataFrame,
+    deadband: float,
+    mark_outer_parallel: bool = False,
+    execution_mode: str | None = None,
+) -> None:
+    apply_cpu_worker_limits(
+        thread_count,
+        mark_outer_parallel=mark_outer_parallel,
+        execution_mode=execution_mode,
+    )
+    global _WINDOW_EVAL_STATE
+    _WINDOW_EVAL_STATE = {
+        "work_df": work_df,
+        "deadband": float(deadband),
+    }
+
+
+def _evaluate_single_window_job(
+    spec: dict[str, int],
+    work_df: pd.DataFrame | None = None,
+    deadband: float | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    source_df = work_df if work_df is not None else _WINDOW_EVAL_STATE.get("work_df")
+    resolved_deadband = deadband if deadband is not None else _WINDOW_EVAL_STATE.get("deadband")
+    if source_df is None or resolved_deadband is None:
+        raise RuntimeError("Window evaluation worker state is not initialized")
+
+    start = int(spec["start_row"])
+    end = int(spec["end_row"])
+    if end <= start:
+        return None
+
+    window_df = source_df.iloc[start:end].copy()
+    metrics = _compute_window_metrics(window_df, float(resolved_deadband))
+    if metrics is None:
+        return None
+
+    start_ts = None
+    end_ts = None
+    if "timestamp" in window_df.columns and len(window_df) > 0:
+        start_raw = window_df["timestamp"].iloc[0]
+        end_raw = window_df["timestamp"].iloc[-1]
+        start_ts = None if pd.isna(start_raw) else pd.Timestamp(start_raw).isoformat()
+        end_ts = None if pd.isna(end_raw) else pd.Timestamp(end_raw).isoformat()
+
+    row = {
+        "window_index": int(spec["window_index"]),
+        "window_start_row": start,
+        "window_end_row": end - 1,
+        "window_start_timestamp": start_ts,
+        "window_end_timestamp": end_ts,
+    }
+    row.update(metrics)
+    window_meta = {
+        "window_index": int(spec["window_index"]),
+        "start_row": start,
+        "end_row_exclusive": end,
+        "window_rows": int(len(window_df)),
+        "start_timestamp": start_ts,
+        "end_timestamp": end_ts,
+    }
+    return row, window_meta
+
+
 def _evaluate_model_multi_window_core(
     backtest_df: pd.DataFrame,
     *,
@@ -319,11 +388,13 @@ def _evaluate_model_multi_window_core(
         granularity="backtest_window",
         nested_outer_parallel=nested_outer_parallel,
         nested_thread_count=nested_thread_count if nested_outer_parallel else None,
-        allow_parallel=True,
+        allow_parallel=ENABLE_PARALLEL_CPU_BACKTEST_WINDOW,
     )
+    window_inner_threads = window_policy.get("catboost_thread_count")
     apply_cpu_worker_limits(
-        int(window_policy["inner_threads"]),
+        window_inner_threads,
         mark_outer_parallel=nested_outer_parallel,
+        execution_mode=window_policy.get("execution_mode"),
     )
     logger.info(
         "Backtest window evaluation using CPU policy for model=%s: %s",
@@ -334,51 +405,48 @@ def _evaluate_model_multi_window_core(
     rows: list[dict[str, Any]] = []
     windows_meta: list[dict[str, Any]] = []
 
-    def _evaluate_single_window(spec: dict[str, int]) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        start = int(spec["start_row"])
-        end = int(spec["end_row"])
-        if end <= start:
-            return None
-        window_df = work_df.iloc[start:end].copy()
-        metrics = _compute_window_metrics(window_df, deadband)
-        if metrics is None:
-            return None
+    def _append_window_result(spec: dict[str, int], result) -> None:
+        if result is None:
+            return
+        row, window_meta = result
+        rows.append(row)
+        windows_meta.append(window_meta)
 
-        start_ts = None
-        end_ts = None
-        if "timestamp" in window_df.columns and len(window_df) > 0:
-            start_raw = window_df["timestamp"].iloc[0]
-            end_raw = window_df["timestamp"].iloc[-1]
-            start_ts = None if pd.isna(start_raw) else pd.Timestamp(start_raw).isoformat()
-            end_ts = None if pd.isna(end_raw) else pd.Timestamp(end_raw).isoformat()
+    def _run_window_parallel(executor_kind: str) -> None:
+        if executor_kind == "process":
+            executor_cm = ProcessPoolExecutor(
+                max_workers=int(window_policy["outer_workers"]),
+                mp_context=mp.get_context("spawn"),
+                initializer=_initialize_window_eval_worker,
+                initargs=(
+                    window_inner_threads,
+                    work_df,
+                    deadband,
+                    True,
+                    window_policy.get("execution_mode"),
+                ),
+            )
+        elif executor_kind == "thread":
+            _initialize_window_eval_worker(
+                window_inner_threads,
+                work_df,
+                deadband,
+                nested_outer_parallel,
+                window_policy.get("execution_mode"),
+            )
+            executor_cm = ThreadPoolExecutor(max_workers=int(window_policy["outer_workers"]))
+        else:
+            raise ValueError(f"Unsupported executor kind: {executor_kind}")
 
-        row = {
-            "window_index": int(spec["window_index"]),
-            "window_start_row": start,
-            "window_end_row": end - 1,
-            "window_start_timestamp": start_ts,
-            "window_end_timestamp": end_ts,
-        }
-        row.update(metrics)
-        window_meta = {
-            "window_index": int(spec["window_index"]),
-            "start_row": start,
-            "end_row_exclusive": end,
-            "window_rows": int(len(window_df)),
-            "start_timestamp": start_ts,
-            "end_timestamp": end_ts,
-        }
-        return row, window_meta
-
-    if window_policy["parallel_enabled"] and len(window_specs) > 1:
-        with ThreadPoolExecutor(max_workers=int(window_policy["outer_workers"])) as executor:
+        with executor_cm as executor:
             future_to_spec = {
-                executor.submit(_evaluate_single_window, spec): spec for spec in window_specs
+                executor.submit(_evaluate_single_window_job, spec): spec for spec in window_specs
+                for spec in window_specs
             }
             for future in as_completed(future_to_spec):
                 spec = future_to_spec[future]
                 try:
-                    result = future.result()
+                    _append_window_result(spec, future.result())
                 except Exception as exc:
                     logger.exception(
                         "Multi-window evaluation failed for model=%s window_index=%s: %s",
@@ -386,20 +454,53 @@ def _evaluate_model_multi_window_core(
                         spec.get("window_index"),
                         exc,
                     )
-                    continue
-                if result is None:
-                    continue
-                row, window_meta = result
-                rows.append(row)
-                windows_meta.append(window_meta)
-    else:
+
+    def _run_window_sequential() -> None:
+        _initialize_window_eval_worker(
+            window_inner_threads,
+            work_df,
+            deadband,
+            nested_outer_parallel,
+            window_policy.get("execution_mode"),
+        )
         for spec in window_specs:
-            result = _evaluate_single_window(spec)
-            if result is None:
-                continue
-            row, window_meta = result
-            rows.append(row)
-            windows_meta.append(window_meta)
+            try:
+                _append_window_result(
+                    spec,
+                    _evaluate_single_window_job(spec, work_df=work_df, deadband=deadband),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Multi-window evaluation failed for model=%s window_index=%s: %s",
+                    model_key,
+                    spec.get("window_index"),
+                    exc,
+                )
+
+    if window_policy["parallel_enabled"] and len(window_specs) > 1:
+        try:
+            _run_window_parallel("process")
+        except Exception as exc:
+            logger.warning(
+                "Multi-window CPU process pool unavailable for model=%s: %s. Falling back to thread-based evaluation.",
+                model_key,
+                exc,
+            )
+            rows.clear()
+            windows_meta.clear()
+            try:
+                _run_window_parallel("thread")
+            except Exception as thread_exc:
+                logger.warning(
+                    "Multi-window CPU thread pool unavailable for model=%s: %s. Falling back to sequential evaluation.",
+                    model_key,
+                    thread_exc,
+                )
+                rows.clear()
+                windows_meta.clear()
+                _run_window_sequential()
+    else:
+        _run_window_sequential()
 
     if rows:
         rows = sorted(rows, key=lambda item: int(item.get("window_index", 0)))

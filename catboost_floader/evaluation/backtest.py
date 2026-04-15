@@ -14,19 +14,21 @@ from catboost_floader.models.confidence import (
 )
 from sklearn.metrics import precision_recall_fscore_support
 from catboost_floader.core.config import (
-    apply_cpu_worker_limits,
     BACKTEST_DIR,
-    current_worker_thread_count,
     ENABLE_GPU_BACKTEST,
-    format_cpu_stage_policy_log,
     GPU_BACKTEST_DEVICE,
-    is_nested_outer_parallel,
     RANGE_BASELINE_ZSCORE,
-    resolve_cpu_stage_parallel_policy,
     TEST_SIZE,
     DIRECTION_DEADBAND,
     SHORT_HORIZON,
     MEDIUM_HORIZON,
+)
+from catboost_floader.core.parallel_policy import (
+    apply_cpu_worker_limits,
+    current_worker_thread_count,
+    format_cpu_stage_policy_log,
+    is_nested_outer_parallel,
+    resolve_cpu_stage_parallel_policy,
 )
 from catboost_floader.core.utils import ensure_dirs, get_logger, save_json
 
@@ -49,6 +51,21 @@ def regression_metrics(y_true, y_pred) -> Dict[str, float]:
 
 def sign_accuracy(y_true, y_pred) -> float:
     return float(np.mean(np.sign(y_true) == np.sign(y_pred)))
+
+
+def _binary_sign_confusion(y_true, y_pred) -> Dict[str, int]:
+    y_true_arr = np.asarray(y_true, dtype=float)
+    y_pred_arr = np.asarray(y_pred, dtype=float)
+    true_positive = (y_true_arr > 0) & (y_pred_arr > 0)
+    true_negative = (y_true_arr <= 0) & (y_pred_arr <= 0)
+    false_positive = (y_true_arr <= 0) & (y_pred_arr > 0)
+    false_negative = (y_true_arr > 0) & (y_pred_arr <= 0)
+    return {
+        "true_positive": int(np.sum(true_positive)),
+        "true_negative": int(np.sum(true_negative)),
+        "false_positive": int(np.sum(false_positive)),
+        "false_negative": int(np.sum(false_negative)),
+    }
 
 
 def _accuracy_pct(value) -> float | None:
@@ -203,15 +220,16 @@ def run_backtest(
     nested_thread_count = current_worker_thread_count()
     backtest_policy = resolve_cpu_stage_parallel_policy(
         "backtest",
-        parallel_units=max(1, len(direct_features)),
+        parallel_units=1,
         granularity="chunk",
         nested_outer_parallel=nested_outer_parallel,
         nested_thread_count=nested_thread_count if nested_outer_parallel else None,
         allow_parallel=True,
     )
     apply_cpu_worker_limits(
-        int(backtest_policy["inner_threads"]),
+        backtest_policy.get("catboost_thread_count"),
         mark_outer_parallel=nested_outer_parallel,
+        execution_mode=backtest_policy.get("execution_mode"),
     )
     logger.info(
         "Backtest stage using CPU policy: %s",
@@ -344,6 +362,7 @@ def run_backtest(
     direct_summary["return_MAE"] = float(np.mean(np.abs(merged["target_return"] - merged["direct_pred_return"])))
     direct_summary["sign_accuracy"] = sign_accuracy(merged["target_return"], merged["direct_pred_return"])
     direct_summary["sign_accuracy_pct"] = _accuracy_pct(direct_summary["sign_accuracy"])
+    direct_summary["sign_confusion"] = _binary_sign_confusion(merged["target_return"], merged["direct_pred_return"])
     direct_summary["corr"] = float(merged[["target_return", "direct_pred_return"]].corr().iloc[0, 1]) if len(merged) > 2 else np.nan
 
     # Per-model sign accuracy diagnostics
@@ -464,6 +483,7 @@ def run_backtest(
         "direction_accuracy_pct": _accuracy_pct(direction_accuracy),
         "sign_accuracy": float(direct_summary["sign_accuracy"]),
         "sign_accuracy_pct": _accuracy_pct(direct_summary["sign_accuracy"]),
+        "sign_confusion": dict(direct_summary.get("sign_confusion", {}) or {}),
     }
 
     baseline_summary = {

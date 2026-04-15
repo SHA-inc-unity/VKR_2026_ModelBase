@@ -160,6 +160,23 @@ def test_build_dashboard_txt_report_includes_required_sections(monkeypatch):
     assert "Run all models control" in report
 
 
+def test_dispatch_action_request_refresh_does_not_queue_backend_job(monkeypatch):
+    called = {"submit_callable_job": False}
+
+    def fake_submit_callable_job(**kwargs):
+        called["submit_callable_job"] = True
+        raise AssertionError("refresh must not queue a backend job")
+
+    monkeypatch.setattr(action_requests, "submit_callable_job", fake_submit_callable_job, raising=False)
+
+    response = action_requests.dispatch_action_request("refresh_artifacts", "60min_3h")
+
+    assert response.accepted is True
+    assert response.job is None
+    assert response.message == "Dashboard refresh completed for 60min_3h."
+    assert called["submit_callable_job"] is False
+
+
 def test_dispatch_action_request_queues_selected_model_job(monkeypatch):
     queued_job = JobRecord(
         job_id="job-selected-1",

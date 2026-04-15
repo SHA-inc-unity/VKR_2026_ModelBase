@@ -26,6 +26,8 @@ from catboost_floader.core.config import (
     OVERFIT_STABILIZATION_ALPHA_CAP_MODERATE,
     OVERFIT_STABILIZATION_CONFIDENCE_BUMP_MODERATE,
     OVERFIT_STABILIZATION_CONFIDENCE_BUMP_SEVERE,
+    OVERFIT_STABILIZATION_EDGE_RELIEF_FLOOR,
+    OVERFIT_STABILIZATION_EDGE_RELIEF_MULTIPLIER,
     OVERFIT_STABILIZATION_ENABLED,
     OVERFIT_STABILIZATION_EXPECTATION_DEADBAND_FLOOR_MODERATE,
     OVERFIT_STABILIZATION_EXPECTATION_DEADBAND_FLOOR_SEVERE,
@@ -40,14 +42,28 @@ from catboost_floader.core.config import (
     OVERFIT_STABILIZATION_MOVEMENT_SCALE_CAP_SEVERE,
     OVERFIT_STABILIZATION_OVERFIT_PENALTY_MAX,
     OVERFIT_STABILIZATION_OVERFIT_PENALTY_SCALE,
+    OVERFIT_STABILIZATION_PREDICTION_BASELINE_MEAN_ABS_WEIGHT,
+    OVERFIT_STABILIZATION_PREDICTION_CONFIDENCE_THRESHOLD_BUFFER,
+    OVERFIT_STABILIZATION_PREDICTION_DEVIATION_SOFT_LIMIT_FLOOR,
+    OVERFIT_STABILIZATION_PREDICTION_DEVIATION_SOFT_LIMIT_MULTIPLIER,
+    OVERFIT_STABILIZATION_PREDICTION_LOW_CONFIDENCE_SHRINK_MAX,
+    OVERFIT_STABILIZATION_PREDICTION_SIGNAL_CONFIDENCE_WEIGHT,
+    OVERFIT_STABILIZATION_PREDICTION_SIGNAL_EXPECTATION_WEIGHT,
     OVERFIT_STABILIZATION_PRIMARY_ALPHA_CAP_SEVERE,
     OVERFIT_STABILIZATION_PRIMARY_MODELS,
     OVERFIT_STABILIZATION_PROMOTION_MAX_PENALTY_MODERATE,
     OVERFIT_STABILIZATION_PROMOTION_MAX_PENALTY_SEVERE,
+    OVERFIT_STABILIZATION_SELECTION_HOLDOUT_WEIGHT,
+    OVERFIT_STABILIZATION_SELECTION_VALIDATION_WEIGHT,
+    OVERFIT_STABILIZATION_SMOOTH_HOLDOUT_RATIO_SCALE,
+    OVERFIT_STABILIZATION_SMOOTH_MAE_GAP_SCALE,
+    OVERFIT_STABILIZATION_SMOOTH_SIGN_GAP_SCALE,
+    OVERFIT_STABILIZATION_POLICY_OVERRIDES,
     OVERFIT_STABILIZATION_SECONDARY_ALPHA_CAP_SEVERE,
     OVERFIT_STABILIZATION_SIGN_GAP_MIN,
     OVERFIT_STABILIZATION_SIGN_GAP_WEIGHT,
     OVERFIT_STABILIZATION_TARGET_MODELS,
+    OVERFIT_STABILIZATION_TARGET_GROUPS,
     DIRECTION_DEADBAND,
     DIRECTION_PRED_THRESHOLD,
     DIRECT_STRATEGY_ROBUSTNESS_ENABLED,
@@ -57,7 +73,7 @@ from catboost_floader.core.config import (
 from catboost_floader.core.utils import _drop_non_model_columns
 from catboost_floader.diagnostics.artifact_readers import load_model_backtest_summary
 from catboost_floader.evaluation.backtest import build_direct_baselines
-from catboost_floader.models.direct import resolve_direct_composition_config
+from catboost_floader.models.direct import apply_direct_prediction_stabilization, resolve_direct_composition_config
 
 from catboost_floader.selection.composition_profiles import (
     _direct_strategy_alpha_grid,
@@ -415,6 +431,43 @@ def _candidate_within_main_negative_tolerance(candidate_eval: Dict[str, Any], po
     return rel_delta >= -float(policy.get("negative_delta_tolerance", 0.0))
 
 
+def _target_stabilization_override_keys(model_key: str) -> list[str]:
+    override_keys: list[str] = []
+    target_groups = dict(OVERFIT_STABILIZATION_TARGET_GROUPS or {})
+    for group_key, members in target_groups.items():
+        try:
+            member_keys = {str(item) for item in list(members)}
+        except TypeError:
+            continue
+        if model_key in member_keys:
+            override_keys.append(str(group_key))
+
+    if model_key in {str(key) for key in dict(OVERFIT_STABILIZATION_POLICY_OVERRIDES or {}).keys()}:
+        override_keys.append(model_key)
+    return override_keys
+
+
+def _resolve_target_stabilization_overrides(model_key: str) -> tuple[Dict[str, Any], list[str]]:
+    overrides: Dict[str, Any] = {}
+    sources: list[str] = []
+    raw_overrides = dict(OVERFIT_STABILIZATION_POLICY_OVERRIDES or {})
+    for override_key in _target_stabilization_override_keys(model_key):
+        payload = dict(raw_overrides.get(override_key, {}) or {})
+        if not payload:
+            continue
+        overrides.update(payload)
+        sources.append(override_key)
+    return overrides, sources
+
+
+def _policy_override_value(overrides: Dict[str, Any], key: str, severity: str | None, default: Any) -> Any:
+    if severity:
+        scoped_key = f"{key}_{severity}"
+        if scoped_key in overrides:
+            return overrides[scoped_key]
+    return overrides.get(key, default)
+
+
 def _load_previous_overfitting_diagnostics(model_key: str | None) -> Dict[str, Any]:
     summary_payload = dict(load_model_backtest_summary(model_key) or {})
     diagnostics = dict(summary_payload.get("overfitting_diagnostics", {}) or {})
@@ -463,6 +516,7 @@ def _resolve_target_overfit_stabilization_context(model_key: str | None) -> Dict
         "diagnostics": {},
         "reference_overfit": {},
         "policy": {},
+        "policy_override_sources": [],
     }
 
     if not bool(OVERFIT_STABILIZATION_ENABLED):
@@ -471,16 +525,35 @@ def _resolve_target_overfit_stabilization_context(model_key: str | None) -> Dict
         context["reason"] = "not_target_model"
         return context
 
+    policy_overrides, policy_override_sources = _resolve_target_stabilization_overrides(model_key_norm)
+    context["policy_override_sources"] = list(policy_override_sources)
+
     diagnostics = _load_previous_overfitting_diagnostics(model_key_norm)
     context["diagnostics"] = dict(diagnostics)
     overfit_status = str(diagnostics.get("overfit_status", "none") or "none").lower()
     overfit_reason = str(diagnostics.get("overfit_reason", "unavailable") or "unavailable")
     sign_gap_train_holdout = max(0.0, float(_try_float(diagnostics.get("sign_gap_train_holdout")) or 0.0))
+    holdout_overfit_ratio = _try_float(diagnostics.get("holdout_overfit_ratio"))
+    activation_sign_gap_min = max(
+        0.0,
+        float(_policy_override_value(policy_overrides, "activation_sign_gap_min", None, OVERFIT_STABILIZATION_SIGN_GAP_MIN)),
+    )
+    activation_holdout_ratio_min = _try_float(
+        _policy_override_value(policy_overrides, "activation_holdout_ratio_min", None, None)
+    )
 
     severity = "none"
     if overfit_status == "severe":
         severity = "severe"
-    elif overfit_status == "moderate" or sign_gap_train_holdout >= float(OVERFIT_STABILIZATION_SIGN_GAP_MIN):
+    elif (
+        overfit_status == "moderate"
+        or sign_gap_train_holdout >= activation_sign_gap_min
+        or (
+            activation_holdout_ratio_min is not None
+            and holdout_overfit_ratio is not None
+            and holdout_overfit_ratio >= activation_holdout_ratio_min
+        )
+    ):
         severity = "moderate"
 
     context["severity"] = severity
@@ -492,6 +565,7 @@ def _resolve_target_overfit_stabilization_context(model_key: str | None) -> Dict
         "holdout_overfit_ratio": _try_float(diagnostics.get("holdout_overfit_ratio")),
         "mae_gap_train_holdout": _try_float(diagnostics.get("mae_gap_train_holdout")),
         "sign_gap_train_holdout": _try_float(diagnostics.get("sign_gap_train_holdout")),
+        "holdout_delta_vs_baseline": _try_float(diagnostics.get("holdout_delta_vs_baseline")),
     }
 
     if severity not in {"severe", "moderate"}:
@@ -518,6 +592,239 @@ def _resolve_target_overfit_stabilization_context(model_key: str | None) -> Dict
         low_conf_weight_cap = float(OVERFIT_STABILIZATION_LOW_CONFIDENCE_EXPECTATION_WEIGHT_CAP_MODERATE)
         promotion_max_penalty = float(OVERFIT_STABILIZATION_PROMOTION_MAX_PENALTY_MODERATE)
 
+    alpha_cap = float(_policy_override_value(policy_overrides, "alpha_cap", severity, alpha_cap))
+    confidence_bump = float(_policy_override_value(policy_overrides, "confidence_bump", severity, confidence_bump))
+    movement_scale_cap = float(
+        _policy_override_value(policy_overrides, "movement_scale_cap", severity, movement_scale_cap)
+    )
+    expectation_deadband_floor = float(
+        _policy_override_value(
+            policy_overrides,
+            "expectation_deadband_floor",
+            severity,
+            expectation_deadband_floor,
+        )
+    )
+    low_conf_weight_cap = float(
+        _policy_override_value(
+            policy_overrides,
+            "low_confidence_expectation_weight_cap",
+            severity,
+            low_conf_weight_cap,
+        )
+    )
+    promotion_max_penalty = float(
+        _policy_override_value(policy_overrides, "promotion_max_penalty", severity, promotion_max_penalty)
+    )
+    penalty_scale_multiplier = max(
+        0.0,
+        float(_policy_override_value(policy_overrides, "penalty_scale_multiplier", severity, 1.0)),
+    )
+    penalty_scale = float(OVERFIT_STABILIZATION_OVERFIT_PENALTY_SCALE) * penalty_scale_multiplier
+    penalty_max = float(
+        _policy_override_value(policy_overrides, "penalty_max", severity, OVERFIT_STABILIZATION_OVERFIT_PENALTY_MAX)
+    )
+    sign_gap_weight = float(
+        _policy_override_value(policy_overrides, "sign_gap_weight", severity, OVERFIT_STABILIZATION_SIGN_GAP_WEIGHT)
+    )
+    holdout_ratio_weight = float(
+        _policy_override_value(
+            policy_overrides,
+            "holdout_ratio_weight",
+            severity,
+            OVERFIT_STABILIZATION_HOLDOUT_RATIO_WEIGHT,
+        )
+    )
+    mae_gap_weight = float(
+        _policy_override_value(policy_overrides, "mae_gap_weight", severity, OVERFIT_STABILIZATION_MAE_GAP_WEIGHT)
+    )
+    model_only_aggressiveness_bonus = float(
+        _policy_override_value(
+            policy_overrides,
+            "model_only_aggressiveness_bonus",
+            severity,
+            OVERFIT_STABILIZATION_MODEL_ONLY_AGGRESSIVENESS_BONUS,
+        )
+    )
+    high_alpha_threshold = float(
+        _policy_override_value(
+            policy_overrides,
+            "high_alpha_threshold",
+            severity,
+            OVERFIT_STABILIZATION_HIGH_ALPHA_THRESHOLD,
+        )
+    )
+    high_alpha_aggressiveness_bonus = float(
+        _policy_override_value(
+            policy_overrides,
+            "high_alpha_aggressiveness_bonus",
+            severity,
+            OVERFIT_STABILIZATION_HIGH_ALPHA_AGGRESSIVENESS_BONUS,
+        )
+    )
+    edge_relief_floor = max(
+        0.0,
+        min(
+            1.0,
+            float(
+                _policy_override_value(
+                    policy_overrides,
+                    "edge_relief_floor",
+                    severity,
+                    OVERFIT_STABILIZATION_EDGE_RELIEF_FLOOR,
+                )
+            ),
+        ),
+    )
+    edge_relief_multiplier = max(
+        0.0,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "edge_relief_multiplier",
+                severity,
+                OVERFIT_STABILIZATION_EDGE_RELIEF_MULTIPLIER,
+            )
+        ),
+    )
+    force_expectation_to_blend = bool(
+        _policy_override_value(policy_overrides, "force_expectation_to_blend_on_severe", severity, True)
+    )
+    prefer_model_tolerance_cap = max(
+        0.0,
+        float(_policy_override_value(policy_overrides, "prefer_model_tolerance_cap", severity, 0.0)),
+    )
+    prediction_enabled = bool(_policy_override_value(policy_overrides, "prediction_enabled", severity, True))
+    prediction_confidence_threshold_buffer = max(
+        0.0,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "prediction_confidence_threshold_buffer",
+                severity,
+                OVERFIT_STABILIZATION_PREDICTION_CONFIDENCE_THRESHOLD_BUFFER,
+            )
+        ),
+    )
+    prediction_signal_confidence_weight = float(
+        _policy_override_value(
+            policy_overrides,
+            "prediction_signal_confidence_weight",
+            severity,
+            OVERFIT_STABILIZATION_PREDICTION_SIGNAL_CONFIDENCE_WEIGHT,
+        )
+    )
+    prediction_signal_expectation_weight = float(
+        _policy_override_value(
+            policy_overrides,
+            "prediction_signal_expectation_weight",
+            severity,
+            OVERFIT_STABILIZATION_PREDICTION_SIGNAL_EXPECTATION_WEIGHT,
+        )
+    )
+    prediction_low_confidence_shrink_max = max(
+        0.0,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "prediction_low_confidence_shrink_max",
+                severity,
+                OVERFIT_STABILIZATION_PREDICTION_LOW_CONFIDENCE_SHRINK_MAX,
+            )
+        ),
+    )
+    prediction_deviation_soft_limit_multiplier = max(
+        0.05,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "prediction_deviation_soft_limit_multiplier",
+                severity,
+                OVERFIT_STABILIZATION_PREDICTION_DEVIATION_SOFT_LIMIT_MULTIPLIER,
+            )
+        ),
+    )
+    prediction_deviation_soft_limit_floor = max(
+        0.0,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "prediction_deviation_soft_limit_floor",
+                severity,
+                OVERFIT_STABILIZATION_PREDICTION_DEVIATION_SOFT_LIMIT_FLOOR,
+            )
+        ),
+    )
+    prediction_baseline_mean_abs_weight = max(
+        0.0,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "prediction_baseline_mean_abs_weight",
+                severity,
+                OVERFIT_STABILIZATION_PREDICTION_BASELINE_MEAN_ABS_WEIGHT,
+            )
+        ),
+    )
+    selection_holdout_weight = max(
+        0.0,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "selection_holdout_weight",
+                severity,
+                OVERFIT_STABILIZATION_SELECTION_HOLDOUT_WEIGHT,
+            )
+        ),
+    )
+    selection_validation_weight = max(
+        0.0,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "selection_validation_weight",
+                severity,
+                OVERFIT_STABILIZATION_SELECTION_VALIDATION_WEIGHT,
+            )
+        ),
+    )
+    selection_weight_total = max(selection_holdout_weight + selection_validation_weight, 1e-8)
+    selection_holdout_weight = selection_holdout_weight / selection_weight_total
+    selection_validation_weight = selection_validation_weight / selection_weight_total
+    smooth_holdout_ratio_scale = max(
+        1e-6,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "smooth_holdout_ratio_scale",
+                severity,
+                OVERFIT_STABILIZATION_SMOOTH_HOLDOUT_RATIO_SCALE,
+            )
+        ),
+    )
+    smooth_sign_gap_scale = max(
+        1e-6,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "smooth_sign_gap_scale",
+                severity,
+                OVERFIT_STABILIZATION_SMOOTH_SIGN_GAP_SCALE,
+            )
+        ),
+    )
+    smooth_mae_gap_scale = max(
+        1e-6,
+        float(
+            _policy_override_value(
+                policy_overrides,
+                "smooth_mae_gap_scale",
+                severity,
+                OVERFIT_STABILIZATION_SMOOTH_MAE_GAP_SCALE,
+            )
+        ),
+    )
+
     context["enabled"] = True
     context["reason"] = "active"
     context["policy"] = {
@@ -528,8 +835,34 @@ def _resolve_target_overfit_stabilization_context(model_key: str | None) -> Dict
         "expectation_deadband_floor": expectation_deadband_floor,
         "low_confidence_expectation_weight_cap": low_conf_weight_cap,
         "promotion_max_penalty_ratio": promotion_max_penalty,
-        "penalty_scale": float(OVERFIT_STABILIZATION_OVERFIT_PENALTY_SCALE),
-        "penalty_max": float(OVERFIT_STABILIZATION_OVERFIT_PENALTY_MAX),
+        "penalty_scale": penalty_scale,
+        "penalty_max": penalty_max,
+        "sign_gap_weight": sign_gap_weight,
+        "holdout_ratio_weight": holdout_ratio_weight,
+        "mae_gap_weight": mae_gap_weight,
+        "model_only_aggressiveness_bonus": model_only_aggressiveness_bonus,
+        "high_alpha_threshold": high_alpha_threshold,
+        "high_alpha_aggressiveness_bonus": high_alpha_aggressiveness_bonus,
+        "edge_relief_floor": edge_relief_floor,
+        "edge_relief_multiplier": edge_relief_multiplier,
+        "force_expectation_to_blend_on_severe": force_expectation_to_blend,
+        "prefer_model_tolerance_cap": prefer_model_tolerance_cap,
+        "activation_sign_gap_min": activation_sign_gap_min,
+        "activation_holdout_ratio_min": activation_holdout_ratio_min,
+        "prediction_enabled": prediction_enabled,
+        "prediction_confidence_threshold_buffer": prediction_confidence_threshold_buffer,
+        "prediction_signal_confidence_weight": prediction_signal_confidence_weight,
+        "prediction_signal_expectation_weight": prediction_signal_expectation_weight,
+        "prediction_low_confidence_shrink_max": prediction_low_confidence_shrink_max,
+        "prediction_deviation_soft_limit_multiplier": prediction_deviation_soft_limit_multiplier,
+        "prediction_deviation_soft_limit_floor": prediction_deviation_soft_limit_floor,
+        "prediction_baseline_mean_abs_weight": prediction_baseline_mean_abs_weight,
+        "selection_holdout_weight": selection_holdout_weight,
+        "selection_validation_weight": selection_validation_weight,
+        "smooth_holdout_ratio_scale": smooth_holdout_ratio_scale,
+        "smooth_sign_gap_scale": smooth_sign_gap_scale,
+        "smooth_mae_gap_scale": smooth_mae_gap_scale,
+        "override_sources": list(policy_override_sources),
     }
     return context
 
@@ -583,9 +916,11 @@ def _apply_targeted_stabilization_to_strategy_config(
             "after": low_conf_weight_after,
         }
 
-    if str(cfg.get("low_confidence_sign_mode", "neutral")) == "expectation" and str(
-        stabilization_context.get("severity", "none")
-    ) == "severe":
+    if (
+        str(cfg.get("low_confidence_sign_mode", "neutral")) == "expectation"
+        and str(stabilization_context.get("severity", "none")) == "severe"
+        and bool(policy.get("force_expectation_to_blend_on_severe", True))
+    ):
         cfg["low_confidence_sign_mode"] = "blend"
         payload["changes"]["low_confidence_sign_mode"] = {
             "before": "expectation",
@@ -593,11 +928,15 @@ def _apply_targeted_stabilization_to_strategy_config(
         }
 
     prefer_model_tolerance_before = float(cfg.get("strategy_prefer_model_tolerance", 0.0))
-    if prefer_model_tolerance_before > 0.0:
-        cfg["strategy_prefer_model_tolerance"] = 0.0
+    prefer_model_tolerance_after = min(
+        prefer_model_tolerance_before,
+        max(0.0, float(policy.get("prefer_model_tolerance_cap", 0.0))),
+    )
+    if prefer_model_tolerance_after < prefer_model_tolerance_before - 1e-12:
+        cfg["strategy_prefer_model_tolerance"] = prefer_model_tolerance_after
         payload["changes"]["strategy_prefer_model_tolerance"] = {
             "before": prefer_model_tolerance_before,
-            "after": 0.0,
+            "after": prefer_model_tolerance_after,
         }
 
     alpha_cap = max(0.05, min(0.99, float(policy.get("alpha_cap", 0.99))))
@@ -617,49 +956,312 @@ def _apply_targeted_stabilization_to_strategy_config(
     return cfg, payload
 
 
+def _smooth_positive_signal(value: float | None, scale: float) -> float:
+    if value is None:
+        return 0.0
+    return float(np.tanh(max(0.0, float(value)) / max(float(scale), 1e-8)))
+
+
+def _candidate_aggressiveness_signal(strategy: Dict[str, Any], policy: Dict[str, Any]) -> float:
+    strategy_payload = dict(strategy or {})
+    strategy_type = str(strategy_payload.get("type", "model_only"))
+    if strategy_type == "baseline_only":
+        return 0.0
+    if strategy_type == "model_only":
+        return 1.0
+
+    model_weight = max(0.0, min(1.0, float(_direct_strategy_model_weight(strategy_payload))))
+    threshold = max(
+        0.0,
+        min(0.95, float(policy.get("high_alpha_threshold", OVERFIT_STABILIZATION_HIGH_ALPHA_THRESHOLD))),
+    )
+    scale = max(1e-8, 1.0 - threshold)
+    return float(np.clip((model_weight - threshold) / scale, 0.0, 1.0))
+
+
+def _candidate_edge_strength(candidate_eval: Dict[str, Any], diagnostics: Dict[str, Any]) -> float:
+    validation_edge = max(0.0, float(_try_float(candidate_eval.get("relative_delta_vs_persistence")) or 0.0))
+    holdout_delta = max(0.0, float(_try_float(diagnostics.get("holdout_delta_vs_baseline")) or 0.0))
+    holdout_mae = abs(float(_try_float(diagnostics.get("holdout_MAE")) or 0.0))
+    holdout_edge = holdout_delta / max(holdout_mae, 1e-8) if holdout_delta > 0.0 else 0.0
+    return float(max(validation_edge, holdout_edge))
+
+
+def _candidate_edge_relief(
+    candidate_eval: Dict[str, Any],
+    diagnostics: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> tuple[float, float]:
+    edge_strength = _candidate_edge_strength(candidate_eval, diagnostics)
+    edge_relief_floor = max(
+        0.0,
+        min(1.0, float(policy.get("edge_relief_floor", OVERFIT_STABILIZATION_EDGE_RELIEF_FLOOR))),
+    )
+    edge_relief_multiplier = max(
+        0.0,
+        float(policy.get("edge_relief_multiplier", OVERFIT_STABILIZATION_EDGE_RELIEF_MULTIPLIER)),
+    )
+    relief = 1.0 / (1.0 + edge_relief_multiplier * edge_strength * 6.0)
+    return float(max(edge_relief_floor, min(1.0, relief))), float(edge_strength)
+
+
+def _candidate_holdout_proxy_payload(
+    candidate_eval: Dict[str, Any],
+    stabilization_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    validation_mae = _try_float(candidate_eval.get("validation_mae"))
+    if validation_mae is None:
+        return {
+            "estimated_holdout_mae": None,
+            "holdout_gap_ratio": 0.0,
+            "holdout_weight_used": 0.0,
+            "validation_weight_used": 1.0,
+            "aggressiveness_signal": 0.0,
+            "edge_relief_factor": 1.0,
+        }
+
+    if not bool(stabilization_context.get("enabled", False)):
+        return {
+            "estimated_holdout_mae": float(validation_mae),
+            "holdout_gap_ratio": 0.0,
+            "holdout_weight_used": 0.0,
+            "validation_weight_used": 1.0,
+            "aggressiveness_signal": 0.0,
+            "edge_relief_factor": 1.0,
+        }
+
+    diagnostics = dict(stabilization_context.get("diagnostics", {}) or {})
+    policy = dict(stabilization_context.get("policy", {}) or {})
+    prior_val_mae = _try_float(diagnostics.get("val_MAE"))
+    prior_holdout_mae = _try_float(diagnostics.get("holdout_MAE"))
+    if prior_val_mae is not None and prior_holdout_mae is not None and abs(prior_val_mae) > 1e-8:
+        holdout_gap_ratio = max(0.0, float(prior_holdout_mae - prior_val_mae) / max(abs(prior_val_mae), 1e-8))
+    else:
+        holdout_gap_ratio = max(0.0, float(_try_float(diagnostics.get("holdout_overfit_ratio")) or 1.0) - 1.0)
+
+    aggressiveness_signal = _candidate_aggressiveness_signal(candidate_eval.get("strategy", {}), policy)
+    edge_relief_factor, _ = _candidate_edge_relief(candidate_eval, diagnostics, policy)
+    holdout_proxy_multiplier = 1.0 + holdout_gap_ratio * (0.35 + 0.65 * aggressiveness_signal) * edge_relief_factor
+
+    return {
+        "estimated_holdout_mae": float(validation_mae * holdout_proxy_multiplier),
+        "holdout_gap_ratio": float(holdout_gap_ratio),
+        "holdout_weight_used": float(policy.get("selection_holdout_weight", 0.0)),
+        "validation_weight_used": float(policy.get("selection_validation_weight", 1.0)),
+        "aggressiveness_signal": float(aggressiveness_signal),
+        "edge_relief_factor": float(edge_relief_factor),
+    }
+
+
+def _candidate_overfit_penalty_payload(
+    candidate_eval: Dict[str, Any],
+    stabilization_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    validation_mae = _try_float(candidate_eval.get("validation_mae"))
+    empty_payload = {
+        "ratio": 0.0,
+        "value": 0.0,
+        "components": {
+            "holdout_ratio_excess": 0.0,
+            "holdout_ratio_component": 0.0,
+            "sign_gap_train_holdout": 0.0,
+            "sign_gap_component": 0.0,
+            "normalized_mae_gap": 0.0,
+            "mae_gap_component": 0.0,
+            "risk_score": 0.0,
+            "aggressiveness_signal": 0.0,
+            "edge_strength": 0.0,
+            "edge_relief_factor": 1.0,
+            "penalty_scale": float(
+                dict(stabilization_context.get("policy", {}) or {}).get(
+                    "penalty_scale",
+                    OVERFIT_STABILIZATION_OVERFIT_PENALTY_SCALE,
+                )
+            ),
+            "penalty_max": float(
+                dict(stabilization_context.get("policy", {}) or {}).get(
+                    "penalty_max",
+                    OVERFIT_STABILIZATION_OVERFIT_PENALTY_MAX,
+                )
+            ),
+        },
+    }
+    if not bool(stabilization_context.get("enabled", False)) or validation_mae is None:
+        return empty_payload
+
+    policy = dict(stabilization_context.get("policy", {}) or {})
+    diagnostics = dict(stabilization_context.get("diagnostics", {}) or {})
+    holdout_ratio_excess = max(0.0, float(_try_float(diagnostics.get("holdout_overfit_ratio")) or 1.0) - 1.0)
+    sign_gap = max(0.0, float(_try_float(diagnostics.get("sign_gap_train_holdout")) or 0.0))
+    mae_gap = float(_try_float(diagnostics.get("mae_gap_train_holdout")) or 0.0)
+    holdout_mae = abs(float(_try_float(diagnostics.get("holdout_MAE")) or 0.0))
+    normalized_mae_gap = max(0.0, mae_gap / max(holdout_mae, 1e-8))
+
+    holdout_ratio_component = _smooth_positive_signal(
+        holdout_ratio_excess,
+        float(policy.get("smooth_holdout_ratio_scale", OVERFIT_STABILIZATION_SMOOTH_HOLDOUT_RATIO_SCALE)),
+    )
+    sign_gap_component = _smooth_positive_signal(
+        sign_gap,
+        float(policy.get("smooth_sign_gap_scale", OVERFIT_STABILIZATION_SMOOTH_SIGN_GAP_SCALE)),
+    )
+    mae_gap_component = _smooth_positive_signal(
+        normalized_mae_gap,
+        float(policy.get("smooth_mae_gap_scale", OVERFIT_STABILIZATION_SMOOTH_MAE_GAP_SCALE)),
+    )
+
+    holdout_ratio_weight = float(policy.get("holdout_ratio_weight", OVERFIT_STABILIZATION_HOLDOUT_RATIO_WEIGHT))
+    sign_gap_weight = float(policy.get("sign_gap_weight", OVERFIT_STABILIZATION_SIGN_GAP_WEIGHT))
+    mae_gap_weight = float(policy.get("mae_gap_weight", OVERFIT_STABILIZATION_MAE_GAP_WEIGHT))
+    total_weight = max(holdout_ratio_weight + sign_gap_weight + mae_gap_weight, 1e-8)
+    risk_score = (
+        holdout_ratio_component * holdout_ratio_weight
+        + sign_gap_component * sign_gap_weight
+        + mae_gap_component * mae_gap_weight
+    ) / total_weight
+
+    aggressiveness_signal = _candidate_aggressiveness_signal(candidate_eval.get("strategy", {}), policy)
+    edge_relief_factor, edge_strength = _candidate_edge_relief(candidate_eval, diagnostics, policy)
+    penalty_scale = float(policy.get("penalty_scale", OVERFIT_STABILIZATION_OVERFIT_PENALTY_SCALE))
+    penalty_max = float(policy.get("penalty_max", OVERFIT_STABILIZATION_OVERFIT_PENALTY_MAX))
+    penalty_ratio = penalty_scale * risk_score * aggressiveness_signal * edge_relief_factor
+    penalty_ratio = max(0.0, min(penalty_max, penalty_ratio))
+    penalty_value = float(validation_mae * penalty_ratio)
+
+    return {
+        "ratio": float(penalty_ratio),
+        "value": penalty_value,
+        "components": {
+            "holdout_ratio_excess": float(holdout_ratio_excess),
+            "holdout_ratio_component": float(holdout_ratio_component),
+            "sign_gap_train_holdout": float(sign_gap),
+            "sign_gap_component": float(sign_gap_component),
+            "normalized_mae_gap": float(normalized_mae_gap),
+            "mae_gap_component": float(mae_gap_component),
+            "risk_score": float(risk_score),
+            "aggressiveness_signal": float(aggressiveness_signal),
+            "edge_strength": float(edge_strength),
+            "edge_relief_factor": float(edge_relief_factor),
+            "penalty_scale": float(penalty_scale),
+            "penalty_max": float(penalty_max),
+        },
+    }
+
+
 def _candidate_overfit_penalty_ratio(
     candidate_eval: Dict[str, Any],
     stabilization_context: Dict[str, Any],
 ) -> float:
-    if not bool(stabilization_context.get("enabled", False)):
-        return 0.0
+    return float(_candidate_overfit_penalty_payload(candidate_eval, stabilization_context).get("ratio", 0.0))
 
-    diagnostics = dict(stabilization_context.get("diagnostics", {}) or {})
-    overfit_status = str(stabilization_context.get("overfit_status", "none"))
-    status_bias_map = {"none": 0.0, "mild": 0.25, "moderate": 0.6, "severe": 1.0}
-    status_bias = float(status_bias_map.get(overfit_status, 0.0))
 
-    holdout_ratio = max(0.0, float(_try_float(diagnostics.get("holdout_overfit_ratio")) or 1.0) - 1.0)
-    sign_gap = max(0.0, float(_try_float(diagnostics.get("sign_gap_train_holdout")) or 0.0))
-    mae_gap = float(_try_float(diagnostics.get("mae_gap_train_holdout")) or 0.0)
-    holdout_mae = abs(float(_try_float(diagnostics.get("holdout_MAE")) or 0.0))
-    normalized_mae_gap = max(0.0, mae_gap / max(1.0, holdout_mae))
+def _candidate_effective_selection_score(
+    candidate_eval: Dict[str, Any],
+    stabilization_context: Dict[str, Any],
+    penalty_payload: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    validation_mae = _try_float(candidate_eval.get("validation_mae"))
+    if validation_mae is None:
+        return {
+            "effective_score": np.inf,
+            "holdout_metric": None,
+            "holdout_weight_used": 0.0,
+            "validation_weight_used": 1.0,
+            "effective_penalty_value": 0.0,
+        }
 
-    risk_score = (
-        status_bias
-        + holdout_ratio * float(OVERFIT_STABILIZATION_HOLDOUT_RATIO_WEIGHT)
-        + sign_gap * float(OVERFIT_STABILIZATION_SIGN_GAP_WEIGHT)
-        + normalized_mae_gap * float(OVERFIT_STABILIZATION_MAE_GAP_WEIGHT)
+    holdout_payload = _candidate_holdout_proxy_payload(candidate_eval, stabilization_context)
+    if penalty_payload is None:
+        penalty_payload = _candidate_overfit_penalty_payload(candidate_eval, stabilization_context)
+
+    holdout_metric = _try_float(holdout_payload.get("estimated_holdout_mae"))
+    if holdout_metric is None:
+        holdout_metric = float(validation_mae)
+    holdout_weight_used = float(holdout_payload.get("holdout_weight_used", 0.0))
+    validation_weight_used = float(holdout_payload.get("validation_weight_used", 1.0))
+    effective_penalty_value = float(penalty_payload.get("value", 0.0) or 0.0)
+    effective_score = (
+        holdout_weight_used * holdout_metric
+        + validation_weight_used * float(validation_mae)
+        + effective_penalty_value
     )
+    return {
+        "effective_score": float(effective_score),
+        "holdout_metric": float(holdout_metric),
+        "holdout_weight_used": float(holdout_weight_used),
+        "validation_weight_used": float(validation_weight_used),
+        "effective_penalty_value": float(effective_penalty_value),
+    }
 
-    strategy = dict(candidate_eval.get("strategy", {}) or {})
-    strategy_type = str(strategy.get("type", "model_only"))
-    model_weight = _direct_strategy_model_weight(strategy)
-    aggressiveness = max(0.0, model_weight)
-    if strategy_type == "model_only":
-        aggressiveness += float(OVERFIT_STABILIZATION_MODEL_ONLY_AGGRESSIVENESS_BONUS)
-    if strategy_type == "blend" and float(strategy.get("alpha", 0.0)) >= float(OVERFIT_STABILIZATION_HIGH_ALPHA_THRESHOLD):
-        aggressiveness += float(OVERFIT_STABILIZATION_HIGH_ALPHA_AGGRESSIVENESS_BONUS)
 
-    relative_delta = max(0.0, float(_try_float(candidate_eval.get("relative_delta_vs_persistence")) or 0.0))
-    edge_relief = max(0.6, 1.0 - 2.0 * min(relative_delta, 0.2))
+def _strategy_with_prediction_stabilization(
+    strategy: Dict[str, Any],
+    stabilization_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    strategy_payload = dict(strategy or {})
+    if not bool(stabilization_context.get("enabled", False)):
+        return strategy_payload
 
-    penalty_ratio = float(OVERFIT_STABILIZATION_OVERFIT_PENALTY_SCALE) * risk_score * aggressiveness * edge_relief
-    penalty_ratio = max(0.0, min(float(OVERFIT_STABILIZATION_OVERFIT_PENALTY_MAX), penalty_ratio))
-    return penalty_ratio
+    policy = dict(stabilization_context.get("policy", {}) or {})
+    if not bool(policy.get("prediction_enabled", True)):
+        return strategy_payload
+
+    strategy_payload["prediction_stabilization"] = {
+        "enabled": True,
+        "mode": "targeted_pre_selection",
+        "model_key": stabilization_context.get("model_key"),
+        "severity": stabilization_context.get("severity"),
+        "override_sources": list(policy.get("override_sources", []) or []),
+        "confidence_threshold_buffer": float(
+            policy.get(
+                "prediction_confidence_threshold_buffer",
+                OVERFIT_STABILIZATION_PREDICTION_CONFIDENCE_THRESHOLD_BUFFER,
+            )
+        ),
+        "signal_confidence_weight": float(
+            policy.get(
+                "prediction_signal_confidence_weight",
+                OVERFIT_STABILIZATION_PREDICTION_SIGNAL_CONFIDENCE_WEIGHT,
+            )
+        ),
+        "signal_expectation_weight": float(
+            policy.get(
+                "prediction_signal_expectation_weight",
+                OVERFIT_STABILIZATION_PREDICTION_SIGNAL_EXPECTATION_WEIGHT,
+            )
+        ),
+        "low_confidence_shrink_max": float(
+            policy.get(
+                "prediction_low_confidence_shrink_max",
+                OVERFIT_STABILIZATION_PREDICTION_LOW_CONFIDENCE_SHRINK_MAX,
+            )
+        ),
+        "deviation_soft_limit_multiplier": float(
+            policy.get(
+                "prediction_deviation_soft_limit_multiplier",
+                OVERFIT_STABILIZATION_PREDICTION_DEVIATION_SOFT_LIMIT_MULTIPLIER,
+            )
+        ),
+        "deviation_soft_limit_floor": float(
+            policy.get(
+                "prediction_deviation_soft_limit_floor",
+                OVERFIT_STABILIZATION_PREDICTION_DEVIATION_SOFT_LIMIT_FLOOR,
+            )
+        ),
+        "baseline_mean_abs_weight": float(
+            policy.get(
+                "prediction_baseline_mean_abs_weight",
+                OVERFIT_STABILIZATION_PREDICTION_BASELINE_MEAN_ABS_WEIGHT,
+            )
+        ),
+    }
+    return strategy_payload
 
 
 def _candidate_ranking_mae(candidate_eval: Dict[str, Any]) -> float:
+    selection_effective_score = _try_float(candidate_eval.get("selection_effective_score"))
+    if selection_effective_score is not None:
+        return float(selection_effective_score)
     effective = _try_float(candidate_eval.get("stabilization_effective_mae"))
     if effective is not None:
         return effective
@@ -669,6 +1271,9 @@ def _candidate_ranking_mae(candidate_eval: Dict[str, Any]) -> float:
 
 def _profile_result_ranking_mae(profile_result: Dict[str, Any]) -> float:
     selected = dict(profile_result.get("selected", {}) or {})
+    selection_effective_score = _try_float(selected.get("selection_effective_score"))
+    if selection_effective_score is not None:
+        return float(selection_effective_score)
     effective = _try_float(selected.get("stabilization_effective_mae"))
     if effective is not None:
         return effective
@@ -685,6 +1290,12 @@ def _stabilization_strategy_fields(stabilization_context: Dict[str, Any]) -> Dic
         "stabilization_overfit_reason": stabilization_context.get("overfit_reason"),
         "stabilization_reference_overfit": dict(stabilization_context.get("reference_overfit", {}) or {}),
         "stabilization_policy": dict(stabilization_context.get("policy", {}) or {}),
+        "selection_effective_score": None,
+        "holdout_proxy_mae": None,
+        "effective_penalty_value": 0.0,
+        "penalty_components": {},
+        "holdout_weight_used": None,
+        "validation_weight_used": None,
     }
 
 
@@ -763,18 +1374,31 @@ def _select_direct_strategy(
             composition_config=strategy_cfg,
         )
         raw_pred = np.asarray(direct_details["raw_pred_return"], dtype=float)
+        direction_expectation = np.asarray(direct_details.get("direction_expectation", np.zeros(len(raw_pred))), dtype=float)
+        direction_proba = np.asarray(direct_details.get("direction_proba", np.full((len(raw_pred), 0), np.nan)), dtype=float)
+        direction_confidence_threshold = _try_float(direct_details.get("direction_confidence_threshold"))
         prefer_model_tol = float(strategy_cfg.get("strategy_prefer_model_tolerance", 0.0))
         candidates = _direct_strategy_candidates(strategy_cfg)
         candidate_evaluations: list[Dict[str, Any]] = []
 
         for strategy in candidates:
+            baseline_name = str(strategy.get("baseline", "persistence"))
+            baseline_return = baseline_map.get(baseline_name, baseline_map["persistence"])
             if strategy["type"] == "model_only":
                 ret = raw_pred
             elif strategy["type"] == "baseline_only":
-                ret = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
+                ret = baseline_return
             else:
-                base = baseline_map.get(str(strategy["baseline"]), baseline_map["persistence"])
-                ret = strategy["alpha"] * raw_pred + (1.0 - strategy["alpha"]) * base
+                ret = strategy["alpha"] * raw_pred + (1.0 - strategy["alpha"]) * baseline_return
+            strategy_eval = _strategy_with_prediction_stabilization(strategy, stabilization_context)
+            ret, prediction_stabilization_stats = apply_direct_prediction_stabilization(
+                np.asarray(ret, dtype=float),
+                baseline_return,
+                direction_expectation=direction_expectation,
+                direction_proba=direction_proba,
+                direction_confidence_threshold=direction_confidence_threshold,
+                strategy=strategy_eval,
+            )
             pred_price = close * (1.0 + ret)
             abs_err = np.abs(target_price - pred_price)
             mae = float(np.mean(np.abs(target_price - pred_price)))
@@ -796,22 +1420,36 @@ def _select_direct_strategy(
             robustness_metrics = _extract_robustness_metrics(multi_window_summary)
             robustness_gate_pass, robustness_gate_reasons = _direct_strategy_passes_robustness(robustness_metrics)
             raw_candidate_eval = {
-                "strategy": dict(strategy),
+                "strategy": dict(strategy_eval),
                 "validation_mae": float(mae),
                 "delta_vs_persistence": delta_vs_persistence,
                 "recent_delta_vs_persistence": recent_delta_vs_persistence,
                 "relative_delta_vs_persistence": relative_delta_vs_persistence,
                 "relative_recent_delta_vs_persistence": relative_recent_delta_vs_persistence,
             }
-            overfit_penalty_ratio = _candidate_overfit_penalty_ratio(raw_candidate_eval, stabilization_context)
-            effective_mae = float(mae * (1.0 + overfit_penalty_ratio))
+            overfit_penalty = _candidate_overfit_penalty_payload(raw_candidate_eval, stabilization_context)
+            effective_score_payload = _candidate_effective_selection_score(
+                raw_candidate_eval,
+                stabilization_context,
+                penalty_payload=overfit_penalty,
+            )
+            effective_mae = float(effective_score_payload["effective_score"])
             candidate_evaluations.append(
                 {
-                    "strategy": dict(strategy),
+                    "strategy": dict(strategy_eval),
                     "validation_mae": float(mae),
-                    "stabilization_overfit_penalty_ratio": overfit_penalty_ratio,
+                    "stabilization_overfit_penalty_ratio": float(overfit_penalty.get("ratio", 0.0)),
                     "stabilization_effective_mae": effective_mae,
+                    "selection_effective_score": effective_mae,
                     "stabilization_aggressiveness": _direct_strategy_model_weight(dict(strategy)),
+                    "holdout_proxy_mae": effective_score_payload.get("holdout_metric"),
+                    "holdout_weight_used": float(effective_score_payload.get("holdout_weight_used", 0.0)),
+                    "validation_weight_used": float(effective_score_payload.get("validation_weight_used", 1.0)),
+                    "effective_penalty_value": float(effective_score_payload.get("effective_penalty_value", 0.0)),
+                    "penalty_components": dict(overfit_penalty.get("components", {}) or {}),
+                    "prediction_stabilization": dict(strategy_eval.get("prediction_stabilization", {}) or {}),
+                    "prediction_stabilization_stats": dict(prediction_stabilization_stats),
+                    "prediction_stabilization_applied": bool(prediction_stabilization_stats.get("applied", False)),
                     "robustness_metrics": robustness_metrics,
                     "robustness_summary": multi_window_summary,
                     "robustness_gate_pass": bool(robustness_gate_pass),
@@ -926,10 +1564,21 @@ def _select_direct_strategy(
         selected = dict(profile_best["strategy"])
         selected["validation_mae"] = float(profile_best["validation_mae"])
         selected["stabilization_effective_mae"] = _candidate_ranking_mae(profile_best)
+        selected["selection_effective_score"] = _candidate_ranking_mae(profile_best)
         selected["stabilization_overfit_penalty_ratio"] = float(
             profile_best.get("stabilization_overfit_penalty_ratio", 0.0)
         )
         selected["stabilization_aggressiveness"] = float(profile_best.get("stabilization_aggressiveness", 0.0))
+        selected["holdout_proxy_mae"] = _try_float(profile_best.get("holdout_proxy_mae"))
+        selected["holdout_weight_used"] = float(profile_best.get("holdout_weight_used", 0.0) or 0.0)
+        selected["validation_weight_used"] = float(profile_best.get("validation_weight_used", 1.0) or 1.0)
+        selected["effective_penalty_value"] = float(profile_best.get("effective_penalty_value", 0.0) or 0.0)
+        selected["penalty_components"] = dict(profile_best.get("penalty_components", {}) or {})
+        selected["prediction_stabilization"] = dict(profile_best.get("prediction_stabilization", {}) or {})
+        selected["prediction_stabilization_stats"] = dict(profile_best.get("prediction_stabilization_stats", {}) or {})
+        selected["prediction_stabilization_applied"] = bool(
+            profile_best.get("prediction_stabilization_applied", False)
+        )
         selected["composition_profile"] = profile_key
         selected["selection_pool"] = selection_pool_name
         selected["robustness_metrics"] = dict(profile_best["robustness_metrics"])
@@ -1001,8 +1650,17 @@ def _select_direct_strategy(
             record["stabilization_effective_mae"] = _try_float(
                 dict(result.get("selected", {}) or {}).get("stabilization_effective_mae")
             )
+            record["selection_effective_score"] = _try_float(
+                dict(result.get("selected", {}) or {}).get("selection_effective_score")
+            )
             record["stabilization_overfit_penalty_ratio"] = _try_float(
                 dict(result.get("selected", {}) or {}).get("stabilization_overfit_penalty_ratio")
+            )
+            record["effective_penalty_value"] = _try_float(
+                dict(result.get("selected", {}) or {}).get("effective_penalty_value")
+            )
+            record["holdout_weight_used"] = _try_float(
+                dict(result.get("selected", {}) or {}).get("holdout_weight_used")
             )
 
         main_relaxed_rule_payload = dict(result.get("main_selection_relaxed_rule", {}) or {})
@@ -1264,11 +1922,38 @@ def _select_direct_strategy(
                             "strategy": dict(profile_candidate.get("selected", {}) or {}),
                             "validation_mae": float(profile_candidate.get("validation_mae", np.inf)),
                             "stabilization_effective_mae": _profile_result_ranking_mae(profile_candidate),
+                            "selection_effective_score": _profile_result_ranking_mae(profile_candidate),
                             "stabilization_overfit_penalty_ratio": float(
                                 dict(profile_candidate.get("selected", {}) or {}).get(
                                     "stabilization_overfit_penalty_ratio",
                                     0.0,
                                 )
+                            ),
+                            "effective_penalty_value": float(
+                                dict(profile_candidate.get("selected", {}) or {}).get(
+                                    "effective_penalty_value",
+                                    0.0,
+                                )
+                            ),
+                            "holdout_proxy_mae": dict(profile_candidate.get("selected", {}) or {}).get("holdout_proxy_mae"),
+                            "holdout_weight_used": float(
+                                dict(profile_candidate.get("selected", {}) or {}).get(
+                                    "holdout_weight_used",
+                                    0.0,
+                                )
+                            ),
+                            "validation_weight_used": float(
+                                dict(profile_candidate.get("selected", {}) or {}).get(
+                                    "validation_weight_used",
+                                    1.0,
+                                )
+                            ),
+                            "penalty_components": dict(
+                                dict(profile_candidate.get("selected", {}) or {}).get(
+                                    "penalty_components",
+                                    {},
+                                )
+                                or {}
                             ),
                             "robustness_metrics": dict(profile_candidate.get("robustness_metrics", {}) or {}),
                             "robustness_gate_pass": bool(profile_candidate.get("robustness_gate_pass", True)),
@@ -1302,7 +1987,17 @@ def _select_direct_strategy(
                     selected_candidate = dict(candidate_eval.get("strategy", {}) or {})
                     selected_candidate["validation_mae"] = candidate_mae
                     selected_candidate["stabilization_effective_mae"] = candidate_effective_mae
+                    selected_candidate["selection_effective_score"] = candidate_effective_mae
                     selected_candidate["stabilization_overfit_penalty_ratio"] = candidate_penalty
+                    selected_candidate["effective_penalty_value"] = float(
+                        candidate_eval.get("effective_penalty_value", 0.0) or 0.0
+                    )
+                    selected_candidate["holdout_proxy_mae"] = _try_float(candidate_eval.get("holdout_proxy_mae"))
+                    selected_candidate["holdout_weight_used"] = float(candidate_eval.get("holdout_weight_used", 0.0) or 0.0)
+                    selected_candidate["validation_weight_used"] = float(
+                        candidate_eval.get("validation_weight_used", 1.0) or 1.0
+                    )
+                    selected_candidate["penalty_components"] = dict(candidate_eval.get("penalty_components", {}) or {})
                     selected_candidate["composition_profile"] = profile_key
                     selected_candidate["selection_pool"] = "main_persistence_promotion"
                     selected_candidate["robustness_metrics"] = dict(candidate_eval.get("robustness_metrics", {}) or {})

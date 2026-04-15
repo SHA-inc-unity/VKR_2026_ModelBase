@@ -4,7 +4,7 @@ from typing import Any
 
 from catboost_floader.frontend_api.dto import ActionResponseDTO
 from catboost_floader.frontend_api.job_queries import get_job_status
-from catboost_floader.jobs.runner import build_python_command, submit_callable_job, submit_subprocess_job
+from catboost_floader.jobs.runner import build_python_command, submit_subprocess_job
 
 RUN_ALL_MODELS_COMMAND = build_python_command("catboost_floader.app.job_entrypoints", "run-all-models")
 
@@ -38,10 +38,10 @@ def get_action_catalog(selected_model_key: str | None) -> dict[str, dict[str, An
         "refresh_artifacts": {
             "id": "refresh_artifacts",
             "label": "Refresh",
-            "mode": "job",
+            "mode": "ui",
             "tone": "success",
             "control_path": None,
-            "summary": "Records a refresh event, then the UI clears cached artifact reads and reloads the current screen.",
+            "summary": "Reloads cached backend outputs without creating a backend job.",
         },
         "export_txt_report": {
             "id": "export_txt_report",
@@ -104,19 +104,11 @@ def dispatch_action_request(action_id: str, selected_model_key: str | None = Non
         )
 
     if action_id == "refresh_artifacts":
-        job = submit_callable_job(
-            action_type=action_id,
-            label=action["label"],
-            target_model=model_key,
-            summary="Queued artifact refresh event.",
-            handler=lambda: _refresh_artifact_state(model_key),
-        )
         return ActionResponseDTO(
             accepted=True,
             action_type=action_id,
-            message="Artifact refresh recorded. The screen will reload current backend outputs.",
+            message=f"Dashboard refresh completed for {model_key}.",
             tone="success",
-            job=get_job_status(job.job_id, max_log_lines=0),
         )
 
     if action_id == "export_txt_report":
