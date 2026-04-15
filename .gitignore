@@ -186,3 +186,4 @@ outputs/
 catboost_floader/outputs/backtest_results/backtest_results.csv
 catboost_floader/outputs/backtest_results/direct_backtest_results.csv
 catboost_floader/outputs/backtest_results/range_backtest_results.csv
+catboost_floader/outputs/
