@@ -1,14 +1,21 @@
 {
-  "status": "running",
+  "status": "done",
   "total": 72,
-  "current": 7,
-  "best_so_far": {
-    "sharpe": 0.03141167874626459,
-    "mean_rmse_cv": 0.007454267935611411,
-    "dir_acc_pct": 52.30469067555483,
-    "profit_factor": 1.1017768558000103
+  "current": 72,
+  "best_params": {
+    "iterations": 100000,
+    "depth": 8,
+    "learning_rate": 0.1,
+    "l2_leaf_reg": 25.0,
+    "bagging_temperature": 1.5
+  },
+  "best_metrics": {
+    "sharpe": 0.050719082705107284,
+    "mean_rmse_cv": 0.0074616819834183975,
+    "dir_acc_pct": 51.36005202829038,
+    "profit_factor": 1.169495295862783
   },
   "started_at": "2026-04-16T08:29:33Z",
-  "finished_at": null,
+  "finished_at": "2026-04-16T08:39:54Z",
   "error_msg": null
 }

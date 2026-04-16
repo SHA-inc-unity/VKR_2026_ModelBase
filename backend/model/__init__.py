@@ -24,6 +24,7 @@ from .report import (
     plot_feature_importance,
     save_grid_best_params,
     save_grid_results,
+    save_predictions_json,
     save_results_json,
 )
 from .train import compute_overfitting_diagnostics, grid_search_cv, save_model, train_final_model, walk_forward_split
@@ -51,6 +52,7 @@ __all__ = [
     "plot_feature_importance",
     "save_grid_best_params",
     "save_grid_results",
+    "save_predictions_json",
     "save_results_json",
     "compute_overfitting_diagnostics",
     "grid_search_cv",

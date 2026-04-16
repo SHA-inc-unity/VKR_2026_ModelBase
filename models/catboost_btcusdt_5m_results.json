@@ -1,0 +1,20 @@
+{
+  "model_path": "/home/sha/VKR_2026_ModelBase/models/catboost_btcusdt_5m.cbm",
+  "best_params": {
+    "iterations": 100000,
+    "depth": 8,
+    "learning_rate": 0.1,
+    "l2_leaf_reg": 25.0,
+    "bagging_temperature": 1.5
+  },
+  "metrics": {
+    "MAE": 0.005373455303733125,
+    "RMSE": 0.008170718084869756,
+    "R2": 0.005062259436515393,
+    "Sharpe": 17.064120959608577,
+    "sharpe": 17.064120959608577,
+    "dir_acc_pct": 51.77973066953279,
+    "mae_pct": 99.8424672525569,
+    "profit_factor": 1.1739431268395302
+  }
+}

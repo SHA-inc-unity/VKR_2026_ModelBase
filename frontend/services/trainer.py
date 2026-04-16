@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import threading
+import traceback
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+_LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Глобальный реестр потоков.
@@ -65,8 +69,8 @@ def _write_status(models_dir: Path, prefix: str, task: str, payload: dict) -> No
             json.dumps(_safe(payload), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-    except OSError:
-        pass
+    except OSError as exc:
+        _LOG.warning("[trainer] Не удалось записать статус %s/%s: %s", prefix, task, exc)
 
 
 def read_status(models_dir: Path, prefix: str, task: str) -> dict | None:
@@ -107,6 +111,8 @@ def start_grid_search(
     *,
     use_gpu: bool,
     models_dir: Path,
+    annualize_factor: float = 1.0,
+    step_ms: int = 3_600_000,
 ) -> bool:
     """Запускает Grid Search в фоновом потоке.
 
@@ -158,12 +164,22 @@ def start_grid_search(
             })
 
         try:
+            # Горизонт прогноза в барах = purge gap между train/val фолдами
+            _target_bars = max(1, round(10_800_000 / step_ms))
+            _LOG.info(
+                "[trainer] Grid Search start: prefix=%s total=%d use_gpu=%s "
+                "annualize=%.1f target_bars=%d",
+                prefix, total, use_gpu, annualize_factor, _target_bars,
+            )
             best_params, grid_df = grid_search_cv(
                 X_tr, y_tr,
                 use_gpu=use_gpu,
                 param_grid=custom_pg,
                 on_combo_done=_cb,
+                annualize_factor=annualize_factor,
+                target_horizon_bars=_target_bars,
             )
+            _LOG.info("[trainer] Grid Search done: best_params=%s", best_params)
             save_grid_results(grid_df, prefix=prefix)
             save_grid_best_params(best_params, grid_df.iloc[0].to_dict(), prefix=prefix)
             best_row = grid_df.iloc[0]
@@ -182,9 +198,12 @@ def start_grid_search(
                 "error_msg":   None,
             })
         except Exception as exc:
+            tb = traceback.format_exc()
+            _LOG.error("[trainer] Grid Search FAILED: %s\n%s", exc, tb)
             _write_status(models_dir, prefix, "grid", {
                 "status":      "error",
-                "error_msg":   str(exc),
+                "error_msg":   f"{type(exc).__name__}: {exc}",
+                "traceback":   tb,
                 "started_at":  started,
                 "finished_at": _now(),
             })
@@ -237,7 +256,7 @@ def start_training_pipeline(
             grid_search_cv,
             train_final_model,
         )
-        from backend.model.report import save_grid_results, save_session_result
+        from backend.model.report import save_grid_results, save_predictions_json, save_session_result
 
         started = _now()
         initial_phase = "train" if prior_params is not None else "grid"
@@ -252,13 +271,21 @@ def start_training_pipeline(
         try:
             if prior_params is not None:
                 best_params = prior_params
+                _LOG.info("[trainer] Train pipeline: \u043f\u0440\u043e\u043f\u0443\u0441\u043a \u0433\u0440\u0438\u0434\u0430, params=%s", best_params)
             else:
                 # Grid Search внутри пайплайна
+                _target_bars = max(1, round(10_800_000 / step_ms))
+                _LOG.info(
+                    "[trainer] Train pipeline: Grid Search start target_bars=%d", _target_bars
+                )
                 best_params, grid_df_inner = grid_search_cv(
                     X_train, y_train,
                     use_gpu=use_gpu,
                     param_grid=param_grid,
+                    annualize_factor=annualize_factor,
+                    target_horizon_bars=_target_bars,
                 )
+                _LOG.info("[trainer] Train pipeline: Grid Search done, best=%s", best_params)
                 save_grid_results(grid_df_inner, prefix=prefix)
                 # Переходим к фазе финального обучения
                 _write_status(models_dir, prefix, "train", {
@@ -269,6 +296,10 @@ def start_training_pipeline(
                     "error_msg":   None,
                 })
 
+            _LOG.info(
+                "[trainer] \u0424\u0438\u043d\u0430\u043b\u044c\u043d\u043e\u0435 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435: train=%d test=%d features=%d annualize=%.1f",
+                len(X_train), len(X_test), len(feature_cols), annualize_factor,
+            )
             model, metrics, y_pred = train_final_model(
                 X_train, y_train,
                 X_test,  y_test,
@@ -276,6 +307,7 @@ def start_training_pipeline(
                 annualize_factor=annualize_factor,
                 use_gpu=use_gpu,
             )
+            _LOG.info("[trainer] \u041e\u0431\u0443\u0447\u0435\u043d\u0438\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e: %s", metrics)
 
             try:
                 overfit_diag = compute_overfitting_diagnostics(
@@ -283,7 +315,11 @@ def start_training_pipeline(
                     feature_cols=feature_cols,
                     step_ms=step_ms,
                 )
-            except Exception:
+            except Exception as _diag_exc:
+                _LOG.warning(
+                    "[trainer] \u0414\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u043a\u0430 \u043f\u0435\u0440\u0435\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f \u043d\u0435 \u0443\u0434\u0430\u043b\u0430\u0441\u044c: %s\n%s",
+                    _diag_exc, traceback.format_exc(),
+                )
                 overfit_diag = None
 
             # Сохраняем результаты на диск — переживут перезагрузку страницы
@@ -291,6 +327,15 @@ def start_training_pipeline(
                 model, metrics, y_pred, y_test, ts_test,
                 feature_cols, best_params, overfit_diag,
                 prefix=prefix,
+            )
+
+            # Сохраняем все предсказания в JSON
+            save_predictions_json(
+                y_test, y_pred, ts_test,
+                metrics=metrics,
+                best_params=best_params,
+                prefix=prefix,
+                output_dir=models_dir,
             )
 
             _write_status(models_dir, prefix, "train", {
@@ -303,10 +348,13 @@ def start_training_pipeline(
             })
 
         except Exception as exc:
+            tb = traceback.format_exc()
+            _LOG.error("[trainer] Train pipeline FAILED: %s\n%s", exc, tb)
             _write_status(models_dir, prefix, "train", {
                 "status":      "error",
                 "phase":       initial_phase,
-                "error_msg":   str(exc),
+                "error_msg":   f"{type(exc).__name__}: {exc}",
+                "traceback":   tb,
                 "started_at":  started,
                 "finished_at": _now(),
             })

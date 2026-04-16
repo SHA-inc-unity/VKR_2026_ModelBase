@@ -1,8 +1,10 @@
 """Обучение CatBoost: walk-forward split, grid search, финальное обучение."""
 from __future__ import annotations
 
+import logging
 import os
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +19,8 @@ except ImportError as exc:
 from sklearn.model_selection import TimeSeriesSplit
 
 from backend.dataset.core import log
+
+_LOG = logging.getLogger(__name__)
 
 from .config import (
     CV_SPLITS,
@@ -143,18 +147,40 @@ def grid_search_cv(
     use_gpu: bool = True,
     param_grid: list[dict] | None = None,
     on_combo_done: Callable[[int, int, dict], None] | None = None,
+    annualize_factor: float = 1.0,
+    target_horizon_bars: int = 0,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
     """Перебирает param_grid через TimeSeriesSplit, возвращает лучшие params и таблицу результатов.
 
     Аргументы:
-        param_grid     — список комбинаций гиперпараметров; если None, используется PARAM_GRID.
-        on_combo_done  — опциональный callback(combo_idx, total, row_dict) после каждой комбинации.
+        param_grid           — список комбинаций гиперпараметров; если None, используется PARAM_GRID.
+        on_combo_done        — опциональный callback(combo_idx, total, row_dict) после каждой комбинации.
+        annualize_factor     — количество баров в году для аннуализации Sharpe (передавать bars_per_year).
+        target_horizon_bars  — горизонт прогноза в барах; используется как gap между train/val фолдами
+                               (purge gap, метод Lopez de Prado) для устранения утечки через целевую
+                               переменную. 0 = без gap (старое поведение).
 
     Возвращает:
         best_params  — словарь гиперпараметров с наименьшим mean RMSE по фолдам
         grid_df      — DataFrame со всеми результатами, включая TP/TN/FP/FN/accuracy
     """
     grid_source = param_grid if param_grid is not None else PARAM_GRID
+
+    # --- Валидация входных данных ---
+    if len(X_train) == 0 or len(y_train) == 0:
+        raise ValueError("[grid_search] X_train / y_train пустые — нечего обучать")
+    if len(X_train) != len(y_train):
+        raise ValueError(
+            f"[grid_search] Размеры не совпадают: X_train={len(X_train)}, y_train={len(y_train)}"
+        )
+    nan_x = int(pd.DataFrame(X_train).isnull().any(axis=1).sum())
+    nan_y = int(pd.Series(y_train).isnull().sum())
+    if nan_x > 0:
+        _LOG.warning("[grid_search] X_train содержит %d строк с NaN", nan_x)
+    if nan_y > 0:
+        _LOG.warning("[grid_search] y_train содержит %d NaN значений", nan_y)
+    if target_horizon_bars > 0:
+        log(f"[grid_search] purge gap = {target_horizon_bars} баров между train/val фолдами")
     if use_gpu:
         grid_used = [dict(params) for params in grid_source]
     else:
@@ -167,11 +193,11 @@ def grid_search_cv(
                 continue
             seen.add(key)
             grid_used.append(prepared)
-    tscv = TimeSeriesSplit(n_splits=CV_SPLITS)
+    tscv = TimeSeriesSplit(n_splits=CV_SPLITS, gap=target_horizon_bars)
     results: list[dict] = []
 
     log(f"[grid_search] {len(grid_used)} комбинаций × {CV_SPLITS} folds "
-        f"(device={'GPU' if use_gpu else 'CPU'})")
+        f"(device={'GPU' if use_gpu else 'CPU'}, gap={target_horizon_bars} bars)")
     if not use_gpu:
         cpu_threads = _get_full_cpu_thread_count()
         _configure_full_cpu_runtime(cpu_threads)
@@ -183,28 +209,46 @@ def grid_search_cv(
         all_y_pred: list[float] = []
         t0 = time.perf_counter()
 
-        for tr_idx, val_idx in tscv.split(X_train):
+        for fold_num, (tr_idx, val_idx) in enumerate(tscv.split(X_train), start=1):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
             y_tr, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
 
-            model = _make_model(params, use_gpu=use_gpu)
-            model.fit(
-                _build_pool(X_tr, y_tr),
-                eval_set=_build_pool(X_val, y_val),
-                use_best_model=True,
-            )
+            if len(X_tr) == 0 or len(X_val) == 0:
+                _LOG.warning(
+                    "[grid_search] combo #%d fold #%d: пустой train (%d) или val (%d) — пропуск",
+                    combo_idx, fold_num, len(X_tr), len(X_val),
+                )
+                continue
 
-            y_pred = model.predict(X_val.values)
-            rmse = float(np.sqrt(np.mean((np.asarray(y_val) - y_pred) ** 2)))
-            fold_rmse.append(rmse)
-            all_y_val.extend(y_val.tolist())
-            all_y_pred.extend(y_pred.tolist())
+            try:
+                model = _make_model(params, use_gpu=use_gpu)
+                model.fit(
+                    _build_pool(X_tr, y_tr),
+                    eval_set=_build_pool(X_val, y_val),
+                    use_best_model=True,
+                )
+
+                y_pred = model.predict(X_val.values)
+                rmse = float(np.sqrt(np.mean((np.asarray(y_val) - y_pred) ** 2)))
+                fold_rmse.append(rmse)
+                all_y_val.extend(y_val.tolist())
+                all_y_pred.extend(y_pred.tolist())
+            except Exception as _fold_exc:
+                _LOG.error(
+                    "[grid_search] combo #%d fold #%d FAILED: %s\n%s",
+                    combo_idx, fold_num, _fold_exc, traceback.format_exc(),
+                )
+
+        if not fold_rmse:
+            _LOG.error("[grid_search] combo #%d: все фолды провалились — пропуск", combo_idx)
+            continue
 
         mean_rmse = float(np.mean(fold_rmse))
         std_rmse = float(np.std(fold_rmse))
         elapsed = time.perf_counter() - t0
         dir_metrics     = compute_direction_metrics(all_y_val, all_y_pred)
-        trading_metrics = compute_trading_metrics(all_y_val, all_y_pred)
+        trading_metrics = compute_trading_metrics(all_y_val, all_y_pred,
+                                                  annualize_factor=annualize_factor)
 
         row = {
             "combo": combo_idx,
@@ -270,9 +314,16 @@ def train_final_model(
         metrics  — словарь {MAE, RMSE, R2, Sharpe} на тестовых данных
         y_pred   — np.ndarray предсказаний на тесте
     """
+    # --- Валидация входных данных ---
+    if len(X_train) == 0 or len(y_train) == 0:
+        raise ValueError("[train] X_train / y_train пустые")
+    if len(X_test) == 0 or len(y_test) == 0:
+        raise ValueError("[train] X_test / y_test пустые")
+
     train_params = _prepare_model_params(best_params, use_gpu=use_gpu)
     log(f"[train] Финальное обучение: {len(X_train)} train строк, "
-        f"{len(X_test)} test строк, params={train_params}")
+        f"{len(X_test)} test строк, {len(X_train.columns)} признаков, "
+        f"params={train_params}, device={'GPU' if use_gpu else 'CPU'}")
     if not use_gpu:
         cpu_threads = _get_full_cpu_thread_count()
         _configure_full_cpu_runtime(cpu_threads)
@@ -285,15 +336,31 @@ def train_final_model(
         eval_set=_build_pool(X_test, y_test),
         use_best_model=True,
     )
+    try:
+        _best_iter = model.get_best_iteration()
+        log(f"[train] best_iteration = {_best_iter}")
+    except Exception:
+        pass
 
     y_pred = model.predict(X_test.values)
     metrics = compute_metrics(y_test.values, y_pred, annualize_factor=annualize_factor)
     trading = compute_trading_metrics(y_test.values, y_pred, annualize_factor=annualize_factor)
-    metrics.update(trading)  # добавляем sharpe/dir_acc_pct/mae_pct/profit_factor
+    # Удаляем дубль "Sharpe" (капитализированный) из compute_metrics —
+    # оставляем только "sharpe" (нижний регистр) из compute_trading_metrics,
+    # чтобы в словаре метрик не было двух ключей с одним значением.
+    metrics.pop("Sharpe", None)
+    metrics.update(trading)
+
+    _dir_acc = trading.get("dir_acc_pct", 0.0)
+    _r2      = metrics.get("R2", 0.0)
+    if _r2 < 0:
+        _LOG.warning("[train] R² = %.4f < 0 — модель хуже наивного среднего!", _r2)
+    if _dir_acc < 50.0:
+        _LOG.warning("[train] Dir.Acc = %.1f%% < 50%% — направление хуже случайного!", _dir_acc)
 
     log(f"[train] Тест-метрики: MAE={metrics['MAE']:.6f}  RMSE={metrics['RMSE']:.6f}  "
-        f"R2={metrics['R2']:.4f}  Sharpe={metrics['Sharpe']:.4f}  "
-        f"Dir.Acc={trading['dir_acc_pct']:.1f}%  PF={trading['profit_factor']:.4f}")
+        f"R2={_r2:.4f}  sharpe={trading['sharpe']:.4f}  "
+        f"Dir.Acc={_dir_acc:.1f}%  PF={trading['profit_factor']:.4f}")
     return model, metrics, y_pred
 
 
@@ -365,8 +432,9 @@ def compute_overfitting_diagnostics(
 
     try:
         best_iter = int(model.get_best_iteration() or 0)
+        log(f"[train] best_iteration = {best_iter}")
     except Exception:
-        best_iter = lc_iters[-1] if lc_iters else 0
+        best_iter = 0
 
     # Train RMSE при best_iteration (предсказание уже учитывает use_best_model)
     y_train_arr  = np.asarray(y_train, dtype=float)

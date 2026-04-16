@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+_LOG = logging.getLogger(__name__)
 
 try:
     import matplotlib
@@ -201,19 +204,103 @@ def save_results_json(
     best_params: dict,
     model_path: Path,
     *,
+    annualize_factor: float | None = None,
     output_dir: Path = MODELS_DIR,
     prefix: str = "catboost",
 ) -> Path:
     """Сохраняет все метрики и гиперпараметры в JSON-файл."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{prefix}_results.json"
-    payload = {
+    payload: dict = {
         "model_path": str(model_path),
         "best_params": best_params,
         "metrics": metrics,
     }
+    if annualize_factor is not None:
+        payload["annualize_factor"] = annualize_factor
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    _LOG.info(
+        "[report] Results JSON: R2=%.4f sharpe=%.4f dir_acc=%.1f%%",
+        metrics.get("R2", float("nan")),
+        metrics.get("sharpe", metrics.get("Sharpe", float("nan"))),
+        metrics.get("dir_acc_pct", float("nan")),
+    )
     log(f"[report] Results JSON → {path}")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Сохранение полных предсказаний в JSON
+# ---------------------------------------------------------------------------
+
+def save_predictions_json(
+    y_true: "np.ndarray | pd.Series",
+    y_pred: "np.ndarray",
+    timestamps: "pd.Series | None" = None,
+    *,
+    metrics: "dict | None" = None,
+    best_params: "dict | None" = None,
+    model_path: "Path | None" = None,
+    output_dir: Path = MODELS_DIR,
+    prefix: str = "catboost",
+) -> Path:
+    """Сохраняет все предсказания на тестовой выборке в JSON.
+
+    Структура файла {prefix}_predictions.json:
+      prefix, saved_at, n_samples, [model_path], [metrics], [best_params],
+      predictions: [{timestamp, y_true, y_pred, direction_correct}, ...]
+    """
+    import datetime as _dt
+
+    y_true_arr = np.asarray(y_true, dtype=float)
+    y_pred_arr = np.asarray(y_pred, dtype=float)
+
+    # Сериализуем временны́е метки
+    if timestamps is not None:
+        ts_values: list = []
+        for t in timestamps:
+            try:
+                ts_values.append(str(t))
+            except Exception:
+                ts_values.append(None)
+    else:
+        ts_values = list(range(len(y_true_arr)))
+
+    predictions = [
+        {
+            "timestamp":         ts_values[i],
+            "y_true":            float(y_true_arr[i]),
+            "y_pred":            float(y_pred_arr[i]),
+            "direction_correct": bool(np.sign(y_true_arr[i]) == np.sign(y_pred_arr[i])),
+        }
+        for i in range(len(y_true_arr))
+    ]
+
+    payload: dict = {
+        "prefix":    prefix,
+        "saved_at":  _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "n_samples": len(predictions),
+    }
+    if model_path is not None:
+        payload["model_path"] = str(model_path)
+    if metrics is not None:
+        payload["metrics"] = _to_json_safe(metrics)
+    if best_params is not None:
+        payload["best_params"] = _to_json_safe(best_params)
+    payload["predictions"] = predictions
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{prefix}_predictions.json"
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    _dir_correct = sum(p["direction_correct"] for p in predictions)
+    _dir_acc = 100.0 * _dir_correct / len(predictions) if predictions else 0.0
+    _LOG.info(
+        "[report] Predictions JSON: n=%d dir_acc=%.1f%% mean_y_true=%.6f mean_y_pred=%.6f",
+        len(predictions), _dir_acc,
+        float(np.mean(y_true_arr)) if len(y_true_arr) else float("nan"),
+        float(np.mean(y_pred_arr)) if len(y_pred_arr) else float("nan"),
+    )
+    log(f"[report] Predictions JSON → {path} ({len(predictions):,} строк)")
     return path
 
 
@@ -325,11 +412,26 @@ def save_session_result(
     y_pred_arr = np.asarray(y_pred, dtype=float)
     y_test_arr = np.asarray(y_test, dtype=float)
     if pd.api.types.is_datetime64_any_dtype(ts_test):
+        # Pandas 2.0+ может хранить datetime64[us, UTC] вместо datetime64[ns, UTC].
+        # Определяем фактическую единицу из dtype-строки, чтобы при загрузке
+        # передать правильный unit= в pd.to_datetime и не получить 1970-е годы.
+        _dtype_str = str(getattr(ts_test, "dtype", ""))
+        if "[us" in _dtype_str:
+            ts_unit = "us"
+        elif "[ms" in _dtype_str:
+            ts_unit = "ms"
+        else:
+            ts_unit = "ns"
         ts_arr  = ts_test.astype("int64").values
-        ts_unit = "ns"
+        _LOG.info("[report] save_session: ts dtype=%s → unit=%s", _dtype_str, ts_unit)
     else:
         ts_arr  = np.asarray(ts_test, dtype="int64")
         ts_unit = "idx"
+        _LOG.info("[report] save_session: ts non-datetime → unit=idx")
+    _LOG.info(
+        "[report] save_session: y_pred shape=%s y_test shape=%s ts_arr shape=%s",
+        y_pred_arr.shape, y_test_arr.shape, ts_arr.shape,
+    )
     np.savez_compressed(
         output_dir / f"{prefix}_session_arrays.npz",
         y_pred=y_pred_arr,

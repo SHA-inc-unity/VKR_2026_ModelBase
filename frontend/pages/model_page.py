@@ -42,6 +42,7 @@ from backend.model.report import (
     load_session_result,
     save_grid_best_params,
     save_grid_results,
+    save_predictions_json,
     save_results_json,
     save_session_result,
 )
@@ -737,7 +738,13 @@ with tab_grid:
             st.error("Нет комбинаций — проверьте значения параметров.")
             st.stop()
 
-        start_grid_search(prefix, X_tr, y_tr, custom_pg, use_gpu=grid_use_gpu, models_dir=MODELS_DIR)
+        start_grid_search(
+            prefix, X_tr, y_tr, custom_pg,
+            use_gpu=grid_use_gpu,
+            models_dir=MODELS_DIR,
+            annualize_factor=float(bars_per_year),
+            step_ms=step_ms,
+        )
         st.rerun()
 
     # --- Прогресс / результат фонового Grid Search ---
@@ -829,6 +836,14 @@ with tab_grid:
                         _gmodel.save_model(str(_save_path))
                         save_results_json(
                             _gmetrics, gr["best_params"], _save_path,
+                            annualize_factor=float(bars_per_year),
+                            prefix=f"catboost_{sym_upper.lower()}_{timeframe.lower()}_grid_best",
+                        )
+                        save_predictions_json(
+                            y_te_s, _gpred, d["timestamps"].iloc[d["train_size"]:],
+                            metrics=_gmetrics,
+                            best_params=gr["best_params"],
+                            model_path=_save_path,
                             prefix=f"catboost_{sym_upper.lower()}_{timeframe.lower()}_grid_best",
                         )
                         st.success(f"Модель сохранена: `{_save_path}`")
@@ -1006,6 +1021,14 @@ with tab_train:
         path = save_model(r["model"], st.session_state.model_symbol, st.session_state.model_timeframe)
         save_results_json(
             r["metrics"], r["best_params"], path,
+            annualize_factor=float(bars_per_year),
+            prefix=r["prefix"],
+        )
+        save_predictions_json(
+            r["y_test"], r["y_pred"], r.get("ts_test"),
+            metrics=r["metrics"],
+            best_params=r["best_params"],
+            model_path=path,
             prefix=r["prefix"],
         )
         st.success(f"Модель сохранена: `{path}`")
