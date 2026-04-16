@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import psycopg2
+from psycopg2 import sql
 import streamlit as st
 
 # Пути: корень воркспейса (для builder) и каталог frontend (для services)
@@ -17,7 +18,8 @@ for _p in (_WORKSPACE_ROOT, _FRONTEND_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import build_market_dataset_to_postgres as builder
+from backend import dataset as builder
+from services.charts import get_plot_fields, render_charts
 from services.db_auth import (
     clear_local_config,
     load_db_config,
@@ -25,16 +27,8 @@ from services.db_auth import (
     save_local_config,
 )
 
-PLOT_FIELDS = [
-    "index_price",
-    "funding_rate",
-    "open_interest",
-    "bid1_price",
-    "ask1_price",
-    "bid1_size",
-    "ask1_size",
-    "rsi",
-]
+_EXPECTED_TABLE_SCHEMA = builder.EXPECTED_TABLE_SCHEMA
+_FORBIDDEN_TABLE_COLUMNS = builder.FORBIDDEN_TABLE_COLUMNS
 
 
 def make_request(symbol: str, timeframe: str, start_date: date, end_date: date) -> dict:
@@ -62,6 +56,7 @@ def make_request(symbol: str, timeframe: str, start_date: date, end_date: date) 
         "step_ms": step_ms,
         "start_ms": start_ms,
         "end_ms": end_ms,
+        "launch_time_ms": launch_time_ms,
         "funding_lookback_ms": funding_lookback_ms,
         "open_interest_interval": builder.choose_open_interest_interval(step_ms),
         "table_name": builder.make_table_name(symbol, timeframe),
@@ -91,11 +86,129 @@ def probe_db_connection(config: dict) -> dict:
     return {"connected": True, "message": ""}
 
 
+def _read_table_schema(connection: psycopg2.extensions.connection, table_name: str) -> list[tuple[str, str]]:
+    """Читает текущую схему таблицы из information_schema."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (table_name,),
+        )
+        return [(row[0], row[1]) for row in cursor.fetchall()]
+
+
+def _create_market_table(
+    connection: psycopg2.extensions.connection,
+    table_name: str,
+    if_not_exists: bool = False,
+) -> None:
+    """Создаёт таблицу датасета с ожидаемой схемой."""
+    clause = "IF NOT EXISTS " if if_not_exists else ""
+    column_defs = []
+    for column_name, data_type in _EXPECTED_TABLE_SCHEMA:
+        not_null = " NOT NULL" if column_name in {"timestamp_utc", "symbol", "exchange", "timeframe", "index_price"} else ""
+        column_defs.append(f"{column_name} {data_type}{not_null}")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                f"""
+                CREATE TABLE {clause}{{}} (
+                    {", ".join(column_defs)},
+                    PRIMARY KEY (timestamp_utc)
+                )
+                """
+            ).format(sql.Identifier(table_name))
+        )
+    connection.commit()
+
+
+def _validate_database_local(connection: psycopg2.extensions.connection, table_name: str) -> dict:
+    """Проверяет схему таблицы и очищает поврежденные данные."""
+    schema = _read_table_schema(connection, table_name)
+    schema_mismatch = bool(schema) and schema != _EXPECTED_TABLE_SCHEMA
+    extra_columns = {column_name for column_name, _ in schema} - {column_name for column_name, _ in _EXPECTED_TABLE_SCHEMA}
+    has_forbidden_columns = bool(extra_columns & _FORBIDDEN_TABLE_COLUMNS)
+    table_recreated = False
+    table_dropped = False
+
+    if not schema:
+        _create_market_table(connection, table_name)
+        table_recreated = True
+    elif schema_mismatch or extra_columns or has_forbidden_columns:
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(table_name)))
+        connection.commit()
+        table_dropped = True
+        _create_market_table(connection, table_name)
+        table_recreated = True
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL("DELETE FROM {} WHERE index_price IS NULL OR timestamp_utc IS NULL").format(
+                sql.Identifier(table_name)
+            )
+        )
+        deleted_null_rows = max(cursor.rowcount, 0)
+        cursor.execute(
+            sql.SQL(
+                """
+                DELETE FROM {table_name} AS target
+                USING (
+                    SELECT ctid
+                    FROM (
+                        SELECT
+                            ctid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY timestamp_utc, symbol, timeframe
+                                ORDER BY ctid DESC
+                            ) AS row_number
+                        FROM {table_name}
+                    ) ranked
+                    WHERE row_number > 1
+                ) duplicates
+                WHERE target.ctid = duplicates.ctid
+                """
+            ).format(table_name=sql.Identifier(table_name))
+        )
+        deleted_duplicate_rows = max(cursor.rowcount, 0)
+    connection.commit()
+
+    final_schema = _read_table_schema(connection, table_name)
+    return {
+        "table_name": table_name,
+        "table_dropped": table_dropped,
+        "table_recreated": table_recreated,
+        "deleted_null_rows": deleted_null_rows,
+        "deleted_duplicate_rows": deleted_duplicate_rows,
+        "schema": final_schema,
+    }
+
+
+def validate_database(config: dict, table_name: str) -> dict:
+    """Проверяет и очищает таблицу PostgreSQL перед работой интерфейса."""
+    conn = connect_db(config)
+    try:
+        backend_validator = getattr(builder, "validate_database", None)
+        if callable(backend_validator):
+            return backend_validator(conn, table_name)
+        return _validate_database_local(conn, table_name)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def set_download_progress(
     progress_bar,
     status_placeholder,
     loaded_candles: int,
     total_candles: int,
+    final: bool = True,
 ) -> None:
     """Обновляет прогресс скачивания по числу загруженных свечей."""
     if progress_bar is None or status_placeholder is None:
@@ -104,6 +217,8 @@ def set_download_progress(
     loaded_value = max(0, min(int(loaded_candles), total_value))
     progress = loaded_value / total_value
     progress = max(0.0, min(progress, 1.0))
+    if not final:
+        progress = min(progress, 0.99)
     percent = int(round(progress * 100))
     progress_bar.progress(progress)
     status_placeholder.text(f"Loaded: {loaded_value} / {total_value} candles ({percent}%)")
@@ -176,22 +291,29 @@ def download_missing(
             request_params["end_ms"],
             request_params["step_ms"],
         )
-        if not missing_requested:
-            set_download_progress(
-                progress_bar,
-                status_placeholder,
-                total_candles,
-                total_candles,
-            )
-            return {"inserted": 0, "updated": 0, "downloaded_ranges": []}
-
         refresh_start = max(
-            request_params["start_ms"],
-            missing_requested[0] - rsi_period * request_params["step_ms"],
+            builder.ceil_to_step(request_params["launch_time_ms"], request_params["step_ms"]),
+            request_params["start_ms"] - rsi_period * request_params["step_ms"],
         )
         combined_rows = builder.fetch_db_rows(
             conn, request_params["table_name"], refresh_start, request_params["end_ms"]
         )
+        if not missing_requested:
+            persisted_rows = [combined_rows[timestamp] for timestamp in sorted(combined_rows)]
+            if builder.has_persisted_rsi(persisted_rows, rsi_period):
+                set_download_progress(
+                    progress_bar,
+                    status_placeholder,
+                    total_candles,
+                    total_candles,
+                    final=True,
+                )
+                if progress_bar is not None and status_placeholder is not None:
+                    status_placeholder.text("RSI loaded from PostgreSQL")
+                return {"inserted": 0, "updated": 0, "downloaded_ranges": []}
+            if progress_bar is not None and status_placeholder is not None:
+                status_placeholder.text("Computing and saving missing RSI")
+
         missing_refresh = builder.find_missing_timestamps(
             set(combined_rows), refresh_start, request_params["end_ms"], request_params["step_ms"]
         )
@@ -211,6 +333,7 @@ def download_missing(
                     status_placeholder,
                     base_loaded_candles + range_loaded_candles,
                     total_candles,
+                    final=False,
                 )
 
             combined_rows.update(
@@ -233,7 +356,7 @@ def download_missing(
                 for timestamp in combined_rows
                 if request_params["start_ms"] <= timestamp <= request_params["end_ms"]
             )
-            set_download_progress(progress_bar, status_placeholder, loaded_candles, total_candles)
+            set_download_progress(progress_bar, status_placeholder, loaded_candles, total_candles, final=False)
 
         ordered_ts = list(
             range(refresh_start, request_params["end_ms"] + request_params["step_ms"], request_params["step_ms"])
@@ -249,17 +372,24 @@ def download_missing(
         set_download_progress(
             progress_bar,
             status_placeholder,
+            total_candles - 1,
             total_candles,
-            total_candles,
+            final=False,
         )
-        builder.rebuild_rsi(rows_to_write, rsi_period)
-        builder.validate_rows(rows_to_write, rsi_period)
-        inserted, updated = builder.upsert_rows(conn, request_params["table_name"], rows_to_write)
+        if progress_bar is not None and status_placeholder is not None:
+            status_placeholder.text("Writing rows to PostgreSQL")
+        _, inserted, updated = builder.rebuild_rsi_and_upsert_rows(
+            conn,
+            request_params["table_name"],
+            rows_to_write,
+            rsi_period,
+        )
         set_download_progress(
             progress_bar,
             status_placeholder,
             total_candles,
             total_candles,
+            final=True,
         )
         return {"inserted": inserted, "updated": updated, "downloaded_ranges": missing_ranges}
     except Exception:
@@ -337,6 +467,8 @@ for _key, _default in (
     ("dataset", None),
     ("last_download", None),
     ("controls_signature", None),
+    ("validation_signature", None),
+    ("validation_report", None),
 ):
     if _key not in st.session_state:
         st.session_state[_key] = _default
@@ -405,13 +537,13 @@ if st.session_state.controls_signature != controls_signature:
 
 button_cols = st.columns(3)
 check_clicked = button_cols[0].button(
-    "Check coverage", use_container_width=True, disabled=not db_status["connected"]
+    "Check coverage", width="stretch", disabled=not db_status["connected"]
 )
 download_clicked = button_cols[1].button(
-    "Download missing data", use_container_width=True, disabled=not db_status["connected"]
+    "Download missing data", width="stretch", disabled=not db_status["connected"]
 )
 load_clicked = button_cols[2].button(
-    "Load dataset", use_container_width=True, disabled=not db_status["connected"]
+    "Load dataset", width="stretch", disabled=not db_status["connected"]
 )
 
 if start_date > end_date:
@@ -423,15 +555,35 @@ else:
         request_params = None
         st.error(str(exc))
 
+    validation_error = None
+    if request_params and db_status["connected"]:
+        validation_signature = (
+            db_config["host"],
+            str(db_config["port"]),
+            db_config["database"],
+            db_config.get("user", ""),
+            request_params["table_name"],
+        )
+        if st.session_state.validation_signature != validation_signature:
+            try:
+                with st.spinner(f"Validating PostgreSQL table {request_params['table_name']}..."):
+                    st.session_state.validation_report = validate_database(db_config, request_params["table_name"])
+                    st.session_state.validation_signature = validation_signature
+            except Exception as exc:
+                st.session_state.validation_signature = None
+                st.session_state.validation_report = None
+                validation_error = str(exc)
+                st.error(f"Database validation failed: {validation_error}")
+
     if request_params and not db_status["connected"]:
         st.info("Set PostgreSQL environment variables or use the manual override above, then retry.")
 
-    if request_params and db_status["connected"] and check_clicked:
+    if request_params and db_status["connected"] and validation_error is None and check_clicked:
         save_local_config(db_config)
         with st.spinner("Checking dataset coverage..."):
             st.session_state.coverage = check_coverage(db_config, request_params)
 
-    if request_params and db_status["connected"] and download_clicked:
+    if request_params and db_status["connected"] and validation_error is None and download_clicked:
         save_local_config(db_config)
         download_progress_bar = st.progress(0)
         download_status = st.empty()
@@ -447,7 +599,7 @@ else:
             download_status.text("Download failed")
             st.error(str(exc))
 
-    if request_params and db_status["connected"] and load_clicked:
+    if request_params and db_status["connected"] and validation_error is None and load_clicked:
         save_local_config(db_config)
         with st.spinner("Loading dataset from PostgreSQL..."):
             st.session_state.dataset = load_dataset(db_config, request_params)
@@ -464,9 +616,9 @@ if st.session_state.coverage:
     cov_cols[4].metric("Missing", cov["missing_count"])
     iv_cols = st.columns(2)
     iv_cols[0].write("Existing intervals")
-    iv_cols[0].dataframe(ranges_frame(cov["existing_ranges"]), use_container_width=True, hide_index=True)
+    iv_cols[0].dataframe(ranges_frame(cov["existing_ranges"]), width="stretch", hide_index=True)
     iv_cols[1].write("Missing intervals")
-    iv_cols[1].dataframe(ranges_frame(cov["missing_ranges"]), use_container_width=True, hide_index=True)
+    iv_cols[1].dataframe(ranges_frame(cov["missing_ranges"]), width="stretch", hide_index=True)
 
 # Результат последней загрузки
 if st.session_state.last_download is not None:
@@ -485,18 +637,34 @@ if not st.session_state.dataset.empty:
     dataset = st.session_state.dataset
     summary, missing = dataset_summary(dataset)
     st.subheader("Dataset summary")
+    feat_cols = builder.get_feature_columns(dataset)
     st.write(
         {
             "row_count": summary["row_count"],
             "min_timestamp": summary["min_timestamp"],
             "max_timestamp": summary["max_timestamp"],
-            "available_columns": summary["available_columns"],
+            "feature_columns": len(feat_cols),
+            "total_columns": len(dataset.columns),
         }
     )
-    st.dataframe(missing, use_container_width=True, hide_index=True)
-    default_fields = [f for f in ["index_price", "rsi"] if f in dataset.columns]
-    selected_fields = st.multiselect("Fields to plot", options=PLOT_FIELDS, default=default_fields)
-    if selected_fields:
-        chart_frame = dataset[["timestamp_utc", *selected_fields]].copy().set_index("timestamp_utc")
-        st.line_chart(chart_frame)
-    st.dataframe(dataset, use_container_width=True, hide_index=True)
+    st.dataframe(missing, width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("Charts")
+
+    available_plot_fields = get_plot_fields(dataset)
+    default_fields = [f for f in ["index_price", "rsi"] if f in available_plot_fields]
+
+    ctrl_cols = st.columns([3, 1])
+    selected_fields = ctrl_cols[0].multiselect(
+        "Metrics to display",
+        options=available_plot_fields,
+        default=default_fields,
+    )
+    overlay_mode = ctrl_cols[1].checkbox("Overlay mode", value=False)
+
+    render_charts(dataset, selected_fields, overlay_mode)
+
+    st.divider()
+    st.subheader("Raw data")
+    st.dataframe(dataset, width="stretch", hide_index=True)

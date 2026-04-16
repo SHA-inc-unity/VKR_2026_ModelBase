@@ -1,0 +1,21 @@
+{
+  "status": "done",
+  "total": 144,
+  "current": 144,
+  "best_params": {
+    "iterations": 100000,
+    "depth": 8,
+    "learning_rate": 0.005,
+    "l2_leaf_reg": 43.0,
+    "bagging_temperature": 1.0
+  },
+  "best_metrics": {
+    "sharpe": 0.03235337219821867,
+    "mean_rmse_cv": 0.005196080542020339,
+    "dir_acc_pct": 51.4261315115286,
+    "profit_factor": 1.1050906424172589
+  },
+  "started_at": "2026-04-16T07:08:13Z",
+  "finished_at": "2026-04-16T07:48:27Z",
+  "error_msg": null
+}

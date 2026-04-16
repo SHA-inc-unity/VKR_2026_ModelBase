@@ -1,0 +1,14 @@
+{
+  "status": "running",
+  "total": 72,
+  "current": 7,
+  "best_so_far": {
+    "sharpe": 0.03141167874626459,
+    "mean_rmse_cv": 0.007454267935611411,
+    "dir_acc_pct": 52.30469067555483,
+    "profit_factor": 1.1017768558000103
+  },
+  "started_at": "2026-04-16T08:29:33Z",
+  "finished_at": null,
+  "error_msg": null
+}

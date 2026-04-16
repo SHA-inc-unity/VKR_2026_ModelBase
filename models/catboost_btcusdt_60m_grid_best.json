@@ -1,0 +1,21 @@
+{
+  "prefix": "catboost_btcusdt_60m",
+  "saved_at": "2026-04-16T07:48:27Z",
+  "best_params": {
+    "iterations": 100000,
+    "depth": 8,
+    "learning_rate": 0.005,
+    "l2_leaf_reg": 43.0,
+    "bagging_temperature": 1.0
+  },
+  "best_metrics": {
+    "mean_rmse_cv": 0.005196080542020339,
+    "std_rmse_cv": 0.0008367243236147664,
+    "sharpe": 0.03235337219821867,
+    "dir_acc_pct": 51.4261315115286,
+    "mae_pct": 99.97555226243601,
+    "profit_factor": 1.1050906424172589,
+    "accuracy": 0.514261315115286,
+    "elapsed_s": 46.9
+  }
+}

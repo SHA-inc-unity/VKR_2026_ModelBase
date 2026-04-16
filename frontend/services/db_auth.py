@@ -29,6 +29,41 @@ def clear_local_config() -> None:
         _CONFIG_FILE.unlink()
 
 
+_GRID_PARAMS_FILE = Path(__file__).resolve().parents[2] / ".grid_params_config.json"
+
+
+def load_grid_params_config() -> dict | None:
+    """Загружает сохранённые параметры Grid Search из JSON-файла.
+
+    Возвращает словарь с ключами 'param_values' (dict[str, str]) и
+    'max_combos' (int), или None если файл отсутствует.
+    """
+    if _GRID_PARAMS_FILE.exists():
+        try:
+            return json.loads(_GRID_PARAMS_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+def save_grid_params_config(param_values_str: dict[str, str], max_combos: int) -> None:
+    """Сохраняет текущие параметры Grid Search в локальный JSON-файл.
+
+    param_values_str — словарь {param: 'v1, v2, ...'} (строковые значения из редактора).
+    """
+    payload = {
+        "param_values": param_values_str,
+        "max_combos":   int(max_combos),
+    }
+    _GRID_PARAMS_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def clear_grid_params_config() -> None:
+    """Удаляет сохранённый файл параметров Grid Search."""
+    if _GRID_PARAMS_FILE.exists():
+        _GRID_PARAMS_FILE.unlink()
+
+
 def load_db_config(overrides: dict | None = None) -> dict:
     """Читает конфигурацию PostgreSQL из окружения и необязательных override.
 
