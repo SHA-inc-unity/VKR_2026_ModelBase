@@ -1,0 +1,10 @@
+# .dockerignore — Account Service
+**/bin/
+**/obj/
+**/.git/
+**/.vs/
+**/.idea/
+**/TestResults/
+**/*.user
+.env
+!.env.example

@@ -180,6 +180,28 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# ── .NET build artifacts ─────────────────────────────────────────────────────
+**/bin/
+**/obj/
+**/TestResults/
+**/*.user
+**/*.suo
+**/.vs/
+secrets.json
+**/appsettings.*.local.json
+
+# ── ModelLine project-specific ───────────────────────────────────────────────
+
+# Trained model artefacts & cache (large binaries, regeneratable)
+models/
+catboost_info/
+
+# App KV-store (SQLite fallback for Redis)
+.app_store.db
+
+# Streamlit editor temp files
+*.tmp.*
+
 # Ignore generated outputs (backtests, models, reports)
 catboost_floader/outputs/
 outputs/

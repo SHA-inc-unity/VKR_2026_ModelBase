@@ -1,6 +1,0 @@
-{
-  "status": "error",
-  "error_msg": "grid_search_cv() got an unexpected keyword argument 'annualize_factor'",
-  "started_at": "2026-04-16T09:21:58Z",
-  "finished_at": "2026-04-16T09:21:58Z"
-}

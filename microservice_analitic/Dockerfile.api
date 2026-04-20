@@ -1,0 +1,10 @@
+FROM modelline-base:latest
+
+COPY . .
+
+EXPOSE 8000
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+CMD ["python", "-m", "backend.api.run"]

@@ -1,0 +1,16 @@
+## Build artifacts
+**/bin/
+**/obj/
+**/TestResults/
+**/*.user
+**/*.suo
+**/.vs/
+
+## Secrets / environment
+.env
+secrets.json
+**/appsettings.*.local.json
+
+## OS
+.DS_Store
+Thumbs.db

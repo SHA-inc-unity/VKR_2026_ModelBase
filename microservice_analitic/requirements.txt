@@ -1,0 +1,35 @@
+# Core ML
+catboost>=1.2
+numpy>=1.26
+pandas>=2.0
+scikit-learn>=1.4
+
+# Data source
+psycopg2-binary>=2.9
+
+# Visualisation (backend PDF reports)
+matplotlib>=3.8
+
+# Web UI
+streamlit>=1.35
+plotly>=5.20
+
+# API
+fastapi>=0.111
+uvicorn[standard]>=0.29
+pydantic>=2.7
+
+# Scheduling
+apscheduler>=3.10
+
+# Store backends (Redis optional)
+redis>=5.0
+
+# MLflow (optional — comment out if not needed)
+mlflow>=2.13
+
+# PDF
+reportlab>=4.2
+
+# Utilities
+python-dotenv>=1.0

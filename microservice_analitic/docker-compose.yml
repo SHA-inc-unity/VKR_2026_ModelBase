@@ -1,0 +1,96 @@
+services:
+  # ── Base image builder (shared deps layer) ──────────────────────────────────
+  base:
+    build:
+      context: .
+      dockerfile: Dockerfile.base
+    image: modelline-base:latest
+    profiles:
+      - build-base   # built explicitly via: docker compose --profile build-base build base
+
+  # ── Redis (опциональный KV-store для настроек) ──────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── FastAPI REST ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - models_data:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Streamlit UI ─────────────────────────────────────────────────────────────
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8501:8501"
+    volumes:
+      - models_data:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Scheduler (переобучение по расписанию) ────────────────────────────────────
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_AUTOSTART: "false"
+    volumes:
+      - models_data:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "backend.scheduler"]
+    profiles:
+      - scheduler   # запускается только явно: docker compose --profile scheduler up
+
+  # ── MLflow (опционально, раскомментировать при необходимости) ───────────────
+  # mlflow:
+  #   image: ghcr.io/mlflow/mlflow:v2.13.0
+  #   restart: unless-stopped
+  #   command: >
+  #     mlflow server
+  #     --host 0.0.0.0
+  #     --port 5000
+  #     --backend-store-uri sqlite:///mlflow.db
+  #     --default-artifact-root /mlflow/artifacts
+  #   ports:
+  #     - "5000:5000"
+  #   volumes:
+  #     - mlflow_data:/mlflow
+
+volumes:
+  redis_data:
+  models_data:
+  # mlflow_data:

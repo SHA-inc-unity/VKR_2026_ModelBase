@@ -1,0 +1,14 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.app_store.db
+models/
+catboost_info/
+tests/
+*.tmp.*
+.venv/
+venv/
