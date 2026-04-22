@@ -110,6 +110,9 @@ _T: dict[str, dict[str, str]] = {
     "download.overlay":         {"ru": "Совместить на одном графике", "en": "Overlay mode"},
     "download.raw_data":        {"ru": "Сырые данные",          "en": "Raw data"},
     "download.columns_select":  {"ru": "Столбцы для отображения", "en": "Columns to display"},
+    "download.export_csv":      {"ru": "⬇ Скачать CSV",             "en": "⬇ Download CSV"},
+    "download.export_csv_help": {"ru": "Скачать выбранные столбцы в формате CSV.",
+                                  "en": "Download the selected columns as a CSV file."},
     "download.no_db":           {"ru": "Задайте переменные окружения PostgreSQL или используйте настройки подключения выше.",
                                   "en": "Set PostgreSQL environment variables or use the connection settings above."},
 

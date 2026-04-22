@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import psycopg2
@@ -12,6 +13,7 @@ from .api import (
     fetch_instrument_details,
     fetch_open_interest,
 )
+from .timelog import now, tlog
 from .constants import DB_HOST, DB_NAME, DB_PORT
 from .core import (
     ceil_to_step,
@@ -75,6 +77,13 @@ def compute_rsi(prices: list[float], period: int) -> list[float | None]:
 
 def find_missing_timestamps(existing_timestamps: set[int], start_ms: int, end_ms: int, step_ms: int) -> list[int]:
     """Ищет отсутствующие интервалы в таблице."""
+    n_expected = (end_ms - start_ms) // step_ms + 1
+    # Быстрый выход: если в сете достаточно элементов, считаем сколько из них
+    # попадает в диапазон — это дешевле, чем материализовать весь range().
+    if len(existing_timestamps) >= n_expected:
+        n_in_range = sum(1 for ts in existing_timestamps if start_ms <= ts <= end_ms)
+        if n_in_range >= n_expected:
+            return []
     return [timestamp for timestamp in range(start_ms, end_ms + step_ms, step_ms) if timestamp not in existing_timestamps]
 
 
@@ -107,27 +116,73 @@ def fetch_range_rows(
     progress_start_ms: int | None = None,
     progress_end_ms: int | None = None,
 ) -> dict[int, dict]:
-    """Скачивает недостающий диапазон и отдает частичный прогресс загрузки."""
-    index_rows = fetch_index_prices(
-        category,
-        symbol,
-        bybit_interval,
-        range_start,
-        range_end,
-        progress_callback=progress_callback,
-        progress_start_ms=progress_start_ms,
-        progress_end_ms=progress_end_ms,
+    """Скачивает недостающий диапазон и отдает частичный прогресс загрузки.
+
+    index_price, funding_rate и open_interest загружаются параллельно,
+    что сокращает время ожидания от суммы до максимума трёх веток.
+    """
+    t0 = now()
+    tlog.info(
+        "fetch_range_rows | START symbol=%s interval=%s range=[%d,%d]",
+        symbol, bybit_interval, range_start, range_end,
     )
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_index = executor.submit(
+            fetch_index_prices,
+            category,
+            symbol,
+            bybit_interval,
+            range_start,
+            range_end,
+            progress_callback,
+            progress_start_ms,
+            progress_end_ms,
+        )
+        f_funding = executor.submit(
+            fetch_funding_rates,
+            category,
+            symbol,
+            max(0, range_start - funding_lookback_ms),
+            range_end,
+        )
+        f_oi = executor.submit(
+            fetch_open_interest,
+            category,
+            symbol,
+            open_interest_interval[0],
+            max(0, range_start - open_interest_interval[1]),
+            range_end,
+        )
+        try:
+            index_rows = f_index.result()
+        except Exception:
+            tlog.exception(
+                "fetch_range_rows | index_prices FAILED symbol=%s interval=%s wall=%.3fs",
+                symbol, bybit_interval, now() - t0,
+            )
+            raise
+        tlog.info("fetch_range_rows | index_prices done rows=%d wall=%.3fs", len(index_rows), now() - t0)
+        try:
+            funding_rows = f_funding.result()
+        except Exception:
+            tlog.exception(
+                "fetch_range_rows | funding_rates FAILED symbol=%s interval=%s wall=%.3fs",
+                symbol, bybit_interval, now() - t0,
+            )
+            raise
+        tlog.info("fetch_range_rows | funding_rates done rows=%d wall=%.3fs", len(funding_rows), now() - t0)
+        try:
+            open_interest_rows = f_oi.result()
+        except Exception:
+            tlog.exception(
+                "fetch_range_rows | open_interest FAILED symbol=%s interval=%s wall=%.3fs",
+                symbol, bybit_interval, now() - t0,
+            )
+            raise
+        tlog.info("fetch_range_rows | open_interest done rows=%d wall=%.3fs", len(open_interest_rows), now() - t0)
+
     timestamps = [timestamp for timestamp, _ in index_rows]
     prices = [price for _, price in index_rows]
-    funding_rows = fetch_funding_rates(category, symbol, max(0, range_start - funding_lookback_ms), range_end)
-    open_interest_rows = fetch_open_interest(
-        category,
-        symbol,
-        open_interest_interval[0],
-        max(0, range_start - open_interest_interval[1]),
-        range_end,
-    )
     funding_aligned = align_asof(funding_rows, timestamps)
     open_interest_aligned = align_asof(open_interest_rows, timestamps)
     result = {}
@@ -142,6 +197,10 @@ def fetch_range_rows(
             "open_interest": open_interest_aligned[index],
             "rsi": None,
         }
+    tlog.info(
+        "fetch_range_rows | DONE symbol=%s candles=%d total_elapsed=%.3fs",
+        symbol, len(result), now() - t0,
+    )
     return result
 
 
@@ -161,18 +220,26 @@ def validate_rows(rows: list[dict], period: int) -> dict:
         raise RuntimeError("Rows are not sorted by timestamp")
     if len({row["timestamp_utc"] for row in rows}) != len(rows):
         raise RuntimeError("Duplicate timestamps detected")
-    missing_counts = {
-        "index_price": sum(row["index_price"] is None for row in rows),
-        "funding_rate": sum(row["funding_rate"] is None for row in rows),
-        "open_interest": sum(row["open_interest"] is None for row in rows),
-        "rsi": sum(row["rsi"] is None for row in rows),
-    }
+    # Единственный проход по строкам: считаем None и проверяем RSI диапазон.
+    missing_counts: dict[str, int] = {"index_price": 0, "funding_rate": 0, "open_interest": 0, "rsi": 0}
+    rsi_out_of_range = False
+    for row in rows:
+        if row["index_price"] is None:
+            missing_counts["index_price"] += 1
+        if row["funding_rate"] is None:
+            missing_counts["funding_rate"] += 1
+        if row["open_interest"] is None:
+            missing_counts["open_interest"] += 1
+        rsi = row["rsi"]
+        if rsi is None:
+            missing_counts["rsi"] += 1
+        elif not 0.0 <= rsi <= 100.0:
+            rsi_out_of_range = True
     if missing_counts["index_price"]:
         raise RuntimeError("index_price contains NULL values")
-    for row in rows:
-        if row["rsi"] is not None and not 0.0 <= row["rsi"] <= 100.0:
-            raise RuntimeError("RSI value is out of range")
-    if missing_counts["rsi"] < min(period, len(rows)):
+    if rsi_out_of_range:
+        raise RuntimeError("RSI value is out of range")
+    if missing_counts["rsi"] > min(period, len(rows)):
         raise RuntimeError("Unexpected RSI warm-up size")
     return {
         "row_count": len(rows),
@@ -196,11 +263,20 @@ def rebuild_rsi_and_upsert_rows(
     rows: list[dict],
     period: int,
     add_features: bool = True,
+    on_upsert_batch=None,
 ) -> tuple[dict, int, int]:
-    """Пересчитывает RSI и сразу сохраняет строки в PostgreSQL."""
+    """Пересчитывает RSI и сразу сохраняет строки в PostgreSQL.
+
+    ``on_upsert_batch(written, total)`` вызывается после каждого батча upsert,
+    если передан — позволяет UI обновлять прогресс-бар во время записи.
+    """
+    t0 = now()
+    tlog.info("rebuild_rsi_and_upsert | START table=%s rows=%d", table_name, len(rows))
     rebuild_rsi(rows, period)
+    tlog.info("rebuild_rsi_and_upsert | rsi done elapsed=%.3fs", now() - t0)
     summary = validate_rows(rows, period)
     if add_features:
+        t_feat = now()
         features_frame = pd.DataFrame(rows)
         features_frame["timestamp_utc"] = pd.to_datetime(features_frame["timestamp_utc"], utc=True)
         features_frame = build_features(features_frame, add_target=True, warmup_candles=0)
@@ -211,7 +287,13 @@ def rebuild_rsi_and_upsert_rows(
             if hasattr(timestamp_value, "to_pydatetime"):
                 record["timestamp_utc"] = timestamp_value.to_pydatetime()
             rows.append(record)
-    inserted, updated = upsert_rows(connection, table_name, rows)
+        tlog.info("rebuild_rsi_and_upsert | features done rows=%d elapsed=%.3fs", len(rows), now() - t_feat)
+    t_db = now()
+    inserted, updated = upsert_rows(connection, table_name, rows, on_batch=on_upsert_batch)
+    tlog.info(
+        "rebuild_rsi_and_upsert | upsert done inserted=%d updated=%d db_elapsed=%.3fs total_elapsed=%.3fs",
+        inserted, updated, now() - t_db, now() - t0,
+    )
     return summary, inserted, updated
 
 

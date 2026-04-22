@@ -14,12 +14,16 @@ for _p in (ROOT, FRONTEND):
 
 from services.i18n import t
 from services.ui_components import render_lang_toggle
+from services.version import get_version as _get_version
 
 st.set_page_config(page_title="ModelLine", layout="wide", initial_sidebar_state="collapsed")
 
-# Language toggle — top right
-_hcols = st.columns([8, 1])
+# Header row: title area | version badge | language toggle
+_hcols = st.columns([7, 1.5, 1])
+_ver = _get_version()
 with _hcols[1]:
+    st.caption(_ver["display"])
+with _hcols[2]:
     render_lang_toggle(key="app_lang")
 
 st.title(t("app.title"))

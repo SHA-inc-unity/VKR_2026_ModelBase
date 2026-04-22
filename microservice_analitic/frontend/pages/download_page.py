@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -9,6 +10,13 @@ import pandas as pd
 import psycopg2
 from psycopg2 import sql
 import streamlit as st
+
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
+    from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_st_ctx
+    _HAS_ST_CTX = True
+except ImportError:
+    _HAS_ST_CTX = False
 
 # Пути: корень воркспейса (для builder) и каталог frontend (для services)
 _HERE = Path(__file__).resolve()
@@ -323,79 +331,130 @@ def download_missing(
         )
         missing_ranges = builder.group_missing_ranges(missing_refresh, request_params["step_ms"])
 
-        for range_start, range_end in missing_ranges:
-            base_loaded_candles = sum(
-                1
-                for timestamp in combined_rows
-                if request_params["start_ms"] <= timestamp <= request_params["end_ms"]
-            )
+        # Захватываем Streamlit script-run context из главного потока один раз.
+        # Он будет проброшен в воркер-потоки через add_script_run_ctx, что позволяет
+        # обновлять виджеты Streamlit прямо из fetch_index_prices → progress_callback.
+        _script_ctx = _get_st_ctx() if _HAS_ST_CTX else None
 
-            def report_range_progress(range_loaded_candles: int) -> None:
-                """Передает частичный прогресс загрузки диапазона в Streamlit."""
-                set_download_progress(
-                    progress_bar,
-                    status_placeholder,
-                    base_loaded_candles + range_loaded_candles,
-                    total_candles,
-                    final=False,
-                )
+        _start_ms = request_params["start_ms"]
+        _end_ms = request_params["end_ms"]
 
-            combined_rows.update(
-                builder.fetch_range_rows(
-                    "linear",
-                    request_params["symbol"],
-                    request_params["timeframe"],
-                    request_params["bybit_interval"],
-                    range_start,
-                    range_end,
-                    request_params["funding_lookback_ms"],
-                    request_params["open_interest_interval"],
-                    progress_callback=report_range_progress,
-                    progress_start_ms=request_params["start_ms"],
-                    progress_end_ms=request_params["end_ms"],
+        # Считаем количество уже загруженных in-range строк один раз до цикла.
+        # В цикле счётчик обновляется инкрементально: прибавляем только новые строки
+        # из текущего range. Это O(n_total) единожды вместо O(n_total) × N_ranges.
+        _in_range_count = sum(1 for ts in combined_rows if _start_ms <= ts <= _end_ms)
+
+        for _range_idx, (range_start, range_end) in enumerate(missing_ranges):
+            base_loaded_candles = _in_range_count  # O(1) — не сканируем combined_rows
+            range_candles = (range_end - range_start) // request_params["step_ms"] + 1
+
+            if status_placeholder is not None:
+                _range_info = (
+                    f" (range {_range_idx + 1}/{len(missing_ranges)})"
+                    if len(missing_ranges) > 1
+                    else ""
                 )
+                status_placeholder.text(
+                    f"Fetching from Bybit{_range_info}: {range_candles} candles..."
+                )
+            if progress_bar is not None:
+                _base_pct = base_loaded_candles / total_candles if total_candles > 0 else 0
+                progress_bar.progress(max(0.01, min(_base_pct, 0.97)))
+
+            # _base захватывается по значению через default-аргумент, чтобы избежать
+            # классической ошибки замыкания в цикле.
+            def report_range_progress(
+                range_loaded_candles: int,
+                _base: int = base_loaded_candles,
+            ) -> None:
+                """Обновляет прогресс из воркер-потока fetch_index_prices."""
+                if _HAS_ST_CTX and _script_ctx is not None:
+                    add_script_run_ctx(threading.current_thread(), _script_ctx)
+                current_visible = _base + range_loaded_candles
+                if current_visible >= total_candles:
+                    if progress_bar is not None:
+                        progress_bar.progress(0.99)
+                    if status_placeholder is not None:
+                        status_placeholder.text("Fetching RSI warm-up data...")
+                else:
+                    set_download_progress(
+                        progress_bar,
+                        status_placeholder,
+                        current_visible,
+                        total_candles,
+                        final=False,
+                    )
+
+            new_rows = builder.fetch_range_rows(
+                "linear",
+                request_params["symbol"],
+                request_params["timeframe"],
+                request_params["bybit_interval"],
+                range_start,
+                range_end,
+                request_params["funding_lookback_ms"],
+                request_params["open_interest_interval"],
+                progress_callback=report_range_progress,
+                progress_start_ms=_start_ms,
+                progress_end_ms=_end_ms,
             )
-            loaded_candles = sum(
-                1
-                for timestamp in combined_rows
-                if request_params["start_ms"] <= timestamp <= request_params["end_ms"]
-            )
-            set_download_progress(progress_bar, status_placeholder, loaded_candles, total_candles, final=False)
+            combined_rows.update(new_rows)
+
+            # Инкрементальный подсчёт: сканируем только новые строки (O(n_range)),
+            # а не весь combined_rows (O(n_total)).
+            _in_range_count += sum(1 for ts in new_rows if _start_ms <= ts <= _end_ms)
+            loaded_candles = _in_range_count
+
+            if loaded_candles >= total_candles:
+                if progress_bar is not None:
+                    progress_bar.progress(0.99)
+                if status_placeholder is not None:
+                    status_placeholder.text("Fetching RSI warm-up data...")
+            else:
+                set_download_progress(progress_bar, status_placeholder, loaded_candles, total_candles, final=False)
 
         ordered_ts = list(
             range(refresh_start, request_params["end_ms"] + request_params["step_ms"], request_params["step_ms"])
         )
         still_missing = [ts for ts in ordered_ts if ts not in combined_rows]
-        if still_missing:
+        rows_to_write = [combined_rows[ts] for ts in ordered_ts if ts in combined_rows]
+        if not rows_to_write:
             raise RuntimeError(
-                f"Bybit did not return full coverage for {len(still_missing)} timestamps "
-                f"starting at {builder.ms_to_datetime(still_missing[0]).isoformat()}"
+                "Bybit returned no data for the requested range — "
+                f"{len(still_missing)} timestamps are unavailable starting "
+                f"at {builder.ms_to_datetime(still_missing[0]).isoformat()}"
             )
 
-        rows_to_write = [combined_rows[ts] for ts in ordered_ts]
-        set_download_progress(
-            progress_bar,
-            status_placeholder,
-            total_candles - 1,
-            total_candles,
-            final=False,
-        )
-        if progress_bar is not None and status_placeholder is not None:
-            status_placeholder.text("Writing rows to PostgreSQL")
+        if progress_bar is not None:
+            progress_bar.progress(0.99)
+        if status_placeholder is not None:
+            status_placeholder.text("Computing RSI and features...")
+
+        def _on_upsert_batch(written: int, total: int) -> None:
+            if status_placeholder is not None:
+                status_placeholder.text(f"Writing to PostgreSQL: {written} / {total} rows")
+
         _, inserted, updated = builder.rebuild_rsi_and_upsert_rows(
             conn,
             request_params["table_name"],
             rows_to_write,
             rsi_period,
+            on_upsert_batch=_on_upsert_batch,
         )
+        actual_user_candles = _in_range_count  # уже посчитано инкрементально
         set_download_progress(
             progress_bar,
             status_placeholder,
-            total_candles,
-            total_candles,
+            actual_user_candles,
+            actual_user_candles,
             final=True,
         )
-        return {"inserted": inserted, "updated": updated, "downloaded_ranges": missing_ranges}
+        return {
+            "inserted": inserted,
+            "updated": updated,
+            "downloaded_ranges": missing_ranges,
+            "skipped_timestamps": len(still_missing),
+        }
     except Exception:
         conn.rollback()
         raise
@@ -632,6 +691,13 @@ else:
                     db_config, request_params,
                     progress_bar=_pb, status_placeholder=_sph,
                 )
+                if st.session_state.ds_last_download.get("skipped_timestamps", 0) > 0:
+                    _skipped = st.session_state.ds_last_download["skipped_timestamps"]
+                    st.warning(
+                        f"Bybit не вернул данные для {_skipped} временных меток "
+                        f"в начале запрошенного диапазона — они пропущены. "
+                        f"Это нормально для ранних исторических дат, когда API не имеет данных."
+                    )
                 st.session_state.ds_coverage = check_coverage(db_config, request_params)
                 _dl_status.update(label=t("download.done"), state="complete", expanded=False)
             except Exception as exc:
@@ -671,6 +737,11 @@ if st.session_state.ds_last_download is not None:
     _rc = st.columns(2)
     _rc[0].metric(t("download.inserted"), dl["inserted"])
     _rc[1].metric(t("download.updated"),  dl["updated"])
+    if dl.get("skipped_timestamps", 0) > 0:
+        st.warning(
+            f"⚠️ {dl['skipped_timestamps']} временных меток пропущено — "
+            f"Bybit не вернул эти данные (ранние исторические даты)."
+        )
     if dl["downloaded_ranges"]:
         st.dataframe(ranges_frame(dl["downloaded_ranges"]), width="stretch", hide_index=True)
 
@@ -721,4 +792,20 @@ if not st.session_state.ds_dataset.empty:
         default=_default_cols,
         key="ds_raw_cols",
     )
-    st.dataframe(dataset[_sel_cols] if _sel_cols else dataset, width="stretch", hide_index=True)
+    _display_df = dataset[_sel_cols] if _sel_cols else dataset
+    st.dataframe(_display_df, width="stretch", hide_index=True)
+
+    _csv_filename = (
+        f"{request_params['symbol'].lower()}"
+        f"_{request_params['timeframe']}"
+        f"_{start_date.isoformat()}_{end_date.isoformat()}.csv"
+        if request_params
+        else "dataset.csv"
+    )
+    st.download_button(
+        label=t("download.export_csv"),
+        data=_display_df.to_csv(index=False).encode("utf-8"),
+        file_name=_csv_filename,
+        mime="text/csv",
+        help=t("download.export_csv_help"),
+    )

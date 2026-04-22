@@ -13,6 +13,16 @@ from .constants import (
     UPSERT_BATCH_SIZE,
 )
 from .core import log, ms_to_datetime
+from .timelog import now, tlog
+
+# Предвычисленные метаданные колонок — избегают повторных операций в fetch_db_rows
+_COL_NAMES: tuple[str, ...] = tuple(DATASET_COLUMN_NAMES)
+_N_COLS: int = len(DATASET_COLUMN_NAMES)
+# Индексы, где значение возвращается как есть (timestamp_utc + текстовые колонки)
+_PASSTHROUGH_INDICES: frozenset[int] = frozenset(
+    i for i, name in enumerate(DATASET_COLUMN_NAMES)
+    if name == "timestamp_utc" or name in TEXT_DATASET_COLUMNS
+)
 
 
 def table_exists(connection: psycopg2.extensions.connection, table_name: str) -> bool:
@@ -187,53 +197,105 @@ def fetch_db_rows(connection: psycopg2.extensions.connection, table_name: str, s
             (ms_to_datetime(start_ms), ms_to_datetime(end_ms)),
         )
         result = {}
+        col_names = _COL_NAMES
+        passthrough = _PASSTHROUGH_INDICES
         for row in cursor.fetchall():
-            timestamp_ms = int(row[0].timestamp() * 1000)
-            row_dict = {}
-            for column_name, value in zip(DATASET_COLUMN_NAMES, row):
-                if column_name == "timestamp_utc":
-                    row_dict[column_name] = value
-                elif column_name in TEXT_DATASET_COLUMNS:
-                    row_dict[column_name] = value
-                else:
-                    row_dict[column_name] = float(value) if value is not None else None
-            result[timestamp_ms] = row_dict
+            ts_ms = int(row[0].timestamp() * 1000)
+            result[ts_ms] = {
+                col_names[i]: row[i] if i in passthrough else (float(row[i]) if row[i] is not None else None)
+                for i in range(_N_COLS)
+            }
         return result
 
 
-def upsert_rows(connection: psycopg2.extensions.connection, table_name: str, rows: list[dict]) -> tuple[int, int]:
-    """Пишет строки в PostgreSQL через UPSERT."""
+def upsert_rows(
+    connection: psycopg2.extensions.connection,
+    table_name: str,
+    rows: list[dict],
+    on_batch=None,
+) -> tuple[int, int]:
+    """Пишет строки в PostgreSQL через двухфазный UPSERT.
+
+    Фаза 1: данные батчами заливаются во временную staging-таблицу без
+    индексов и проверок конфликтов — это на порядок быстрее прямого INSERT.
+
+    Фаза 2: один запрос INSERT … SELECT … ON CONFLICT сливает staging в
+    основную таблицу — конфликт-чек выполняется одним проходом по B-дереву,
+    а не N раз по одной строке.
+
+    ``on_batch(written, total)`` вызывается после каждого батча в staging.
+    """
     columns = DATASET_COLUMN_NAMES
-    update_columns = [column_name for column_name in columns if column_name != "timestamp_utc"]
-    statement = sql.SQL(
+    update_columns = [c for c in columns if c != "timestamp_utc"]
+    total = len(rows)
+    tmp_table = f"_upsert_stage_{table_name}"
+
+    t0 = now()
+    tlog.info("upsert_rows | START table=%s rows=%d batch_size=%d", table_name, total, UPSERT_BATCH_SIZE)
+
+    # ── Фаза 1: staging temp table ───────────────────────────────────────────
+    # CREATE … (LIKE main) копирует имена+типы+NOT NULL, но НЕ PK и НЕ индексы,
+    # поэтому вставка без проверок — максимально быстро.
+    with connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL("CREATE TEMP TABLE IF NOT EXISTS {} (LIKE {})").format(
+                sql.Identifier(tmp_table),
+                sql.Identifier(table_name),
+            )
+        )
+        cursor.execute(sql.SQL("TRUNCATE {}").format(sql.Identifier(tmp_table)))
+
+    insert_stmt = sql.SQL(
+        "INSERT INTO {} ({columns}) VALUES %s"
+    ).format(
+        sql.Identifier(tmp_table),
+        columns=sql.SQL(", ").join(sql.Identifier(c) for c in columns),
+    ).as_string(connection)
+
+    t_staging = now()
+    batches = 0
+    for offset in range(0, total, UPSERT_BATCH_SIZE):
+        batch = rows[offset : offset + UPSERT_BATCH_SIZE]
+        values = [tuple(row.get(c) for c in columns) for row in batch]
+        with connection.cursor() as cursor:
+            execute_values(cursor, insert_stmt, values, page_size=len(values))
+        batches += 1
+        if on_batch is not None:
+            on_batch(min(offset + UPSERT_BATCH_SIZE, total), total)
+    tlog.info("upsert_rows | staging done batches=%d elapsed=%.3fs", batches, now() - t_staging)
+
+    # ── Фаза 2: merge staging → main (один конфликт-чек на весь набор) ───────
+    merge_stmt = sql.SQL(
         """
-        INSERT INTO {} ({columns}) VALUES %s
+        INSERT INTO {main} ({columns})
+        SELECT {columns} FROM {tmp}
         ON CONFLICT (timestamp_utc)
         DO UPDATE SET {updates}
         RETURNING (xmax = 0) AS inserted
         """
     ).format(
-        sql.Identifier(table_name),
-        columns=sql.SQL(", ").join(sql.Identifier(column_name) for column_name in columns),
+        main=sql.Identifier(table_name),
+        tmp=sql.Identifier(tmp_table),
+        columns=sql.SQL(", ").join(sql.Identifier(c) for c in columns),
         updates=sql.SQL(", ").join(
             sql.SQL("{} = EXCLUDED.{}").format(
-                sql.Identifier(column_name),
-                sql.Identifier(column_name),
+                sql.Identifier(c),
+                sql.Identifier(c),
             )
-            for column_name in update_columns
+            for c in update_columns
         ),
     )
-    statement_sql = statement.as_string(connection)
-    inserted = 0
-    updated = 0
-    for offset in range(0, len(rows), UPSERT_BATCH_SIZE):
-        batch = rows[offset : offset + UPSERT_BATCH_SIZE]
-        values = [tuple(row.get(column_name) for column_name in columns) for row in batch]
-        with connection.cursor() as cursor:
-            execute_values(cursor, statement_sql, values, page_size=len(values))
-            flags = cursor.fetchall()
-        batch_inserted = sum(1 for flag, in flags if flag)
-        inserted += batch_inserted
-        updated += len(flags) - batch_inserted
+    t_merge = now()
+    with connection.cursor() as cursor:
+        cursor.execute(merge_stmt)
+        flags = cursor.fetchall()
+
     connection.commit()
+
+    inserted = sum(1 for (flag,) in flags if flag)
+    updated = len(flags) - inserted
+    tlog.info(
+        "upsert_rows | DONE table=%s inserted=%d updated=%d merge_elapsed=%.3fs total_elapsed=%.3fs",
+        table_name, inserted, updated, now() - t_merge, now() - t0,
+    )
     return inserted, updated

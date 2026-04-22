@@ -211,14 +211,17 @@ def test_fetch_open_interest_success():
 
 
 def test_fetch_open_interest_pagination():
-    """Covers the cursor pagination path."""
-    items = [{"timestamp": "1704067200000", "openInterest": "1000"}]
+    """Covers the cursor pagination path within a single time window."""
+    # Use a range that fits in exactly 1 window (≤ 200 items × 1h step = 720 000 000 ms)
+    start_ms = 1_704_067_200_000
+    end_ms = start_ms + 199 * 3_600_000  # 199 hours — guaranteed single window
+    items = [{"timestamp": str(start_ms), "openInterest": "1000"}]
     first = {"retCode": 0, "result": {"list": items, "nextPageCursor": "cursor123"}}
     second = {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}}
     responses = [first, second]
 
     with patch("backend.dataset.api.api_get_json", side_effect=lambda *a, **k: responses.pop(0)):
-        rows = fetch_open_interest("linear", "BTCUSDT", "1h", 0, 2_000_000_000_000)
+        rows = fetch_open_interest("linear", "BTCUSDT", "1h", start_ms, end_ms)
     assert len(rows) == 1
 
 

@@ -8,6 +8,46 @@ services:
     profiles:
       - build-base   # built explicitly via: docker compose --profile build-base build base
 
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-crypt_date}
+      POSTGRES_USER: ${PGUSER:-postgres}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-postgres}
+    ports:
+      - "${PGPORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Performance tuning for large bulk-insert workloads (500k+ rows)
+    command: >
+      postgres
+        -c shared_buffers=2GB
+        -c work_mem=256MB
+        -c maintenance_work_mem=1GB
+        -c checkpoint_completion_target=0.9
+        -c checkpoint_timeout=30min
+        -c wal_buffers=64MB
+        -c max_wal_size=8GB
+        -c synchronous_commit=off
+        -c random_page_cost=1.1
+        -c effective_cache_size=6GB
+        -c max_worker_processes=8
+        -c max_parallel_workers=8
+        -c max_parallel_workers_per_gather=4
+        -c wal_level=minimal
+        -c max_wal_senders=0
+        -c bgwriter_lru_maxpages=200
+        -c bgwriter_delay=50ms
+        -c jit=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres} -d ${PGDATABASE:-crypt_date}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   # ── Redis (опциональный KV-store для настроек) ──────────────────────────────
   redis:
     image: redis:7-alpine
@@ -35,8 +75,11 @@ services:
       - "${API_PORT:-8000}:8000"
     volumes:
       - models_data:/app/models
+      - ./logs:/app/logs
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   # ── Streamlit UI ─────────────────────────────────────────────────────────────
@@ -52,8 +95,11 @@ services:
       - "8501:8501"
     volumes:
       - models_data:/app/models
+      - ./logs:/app/logs
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   # ── Scheduler (переобучение по расписанию) ────────────────────────────────────
@@ -70,6 +116,8 @@ services:
       - models_data:/app/models
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     command: ["python", "-m", "backend.scheduler"]
     profiles:
@@ -93,4 +141,5 @@ services:
 volumes:
   redis_data:
   models_data:
+  postgres_data:
   # mlflow_data:

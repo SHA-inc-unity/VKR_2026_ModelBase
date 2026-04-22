@@ -115,7 +115,9 @@ cd microservicestarter\
 
 ## Переменные окружения
 
-Каждый сервис имеет свой `.env.example`. Скопируйте его в `.env` внутри папки сервиса:
+При **первом запуске** через `start.sh` / `start.ps1` скрипт автоматически создаёт `.env` из `.env.example` и запрашивает пароль PostgreSQL в интерактивном режиме.
+
+Создать `.env` вручную:
 
 ```bash
 cp microservice_analitic/.env.example microservice_analitic/.env

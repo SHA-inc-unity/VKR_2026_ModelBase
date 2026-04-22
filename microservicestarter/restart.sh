@@ -67,37 +67,72 @@ restart_service() {
     pushd "$svc_dir" > /dev/null
 
     local base_tag="${name}-base:latest"
+    local compose_content
+    compose_content=$(cat "$svc_dir/docker-compose.yml" 2>/dev/null || true)
+    local has_base=0 has_api=0 has_streamlit=0
+    echo "$compose_content" | grep -qE '^  base\s*:'      && has_base=1      || true
+    echo "$compose_content" | grep -qE '^  api\s*:'       && has_api=1       || true
+    echo "$compose_content" | grep -qE '^  streamlit\s*:' && has_streamlit=1 || true
+
+    local base_found=0
+    if [[ $has_base -eq 1 ]] && docker image inspect "$base_tag" >/dev/null 2>&1; then
+        base_found=1
+    fi
 
     case "$mode" in
         deps)
-            info "[$name] Пересборка base-образа (requirements.txt изменился)..."
-            docker compose --profile build-base build --no-cache base
-            docker compose build api streamlit
+            if [[ $has_base -eq 1 ]]; then
+                info "[$name] Пересборка base-образа (requirements.txt изменился)..."
+                docker compose --profile build-base build --no-cache base
+                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+            fi
+            docker compose build
+            docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
             docker compose up -d
             ;;
         api)
-            docker compose build api
-            docker compose up -d --no-deps api
+            if [[ $has_api -eq 1 ]]; then
+                docker compose build api
+                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                docker compose up -d --no-deps api
+            else
+                docker compose build
+                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                docker compose up -d
+            fi
             success "[$name] api перезапущен."
             ;;
         streamlit)
-            docker compose build streamlit
-            docker compose up -d --no-deps streamlit
+            if [[ $has_streamlit -eq 1 ]]; then
+                docker compose build streamlit
+                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                docker compose up -d --no-deps streamlit
+            else
+                docker compose build
+                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                docker compose up -d
+            fi
             success "[$name] streamlit перезапущен."
             ;;
         full)
-            if ! docker image inspect "$base_tag" >/dev/null 2>&1; then
+            if [[ $has_base -eq 1 && $base_found -eq 0 ]]; then
                 docker compose --profile build-base build base
+                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
             fi
-            docker compose --profile scheduler build api streamlit scheduler
             docker compose --profile scheduler up -d
             ;;
         core|"")
-            if ! docker image inspect "$base_tag" >/dev/null 2>&1; then
+            if [[ $has_base -eq 1 && $base_found -eq 0 ]]; then
                 info "[$name] Сборка base-образа..."
                 docker compose --profile build-base build base
+                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
             fi
-            docker compose build api streamlit
+            if [[ $has_api -eq 1 && $has_streamlit -eq 1 ]]; then
+                docker compose build api streamlit
+            else
+                docker compose build
+            fi
+            docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
             docker compose up -d
             ;;
         *)

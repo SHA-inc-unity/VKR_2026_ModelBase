@@ -6,10 +6,11 @@ DB_PORT = 5432
 DB_NAME = "crypt_date"
 REQUEST_TIMEOUT_SECONDS = 20
 MAX_RETRIES = 4
-PAGE_LIMIT_KLINE = 1000
+PAGE_LIMIT_KLINE = 1000          # Bybit API hard maximum per request
 PAGE_LIMIT_FUNDING = 200
 PAGE_LIMIT_OPEN_INTEREST = 200
-UPSERT_BATCH_SIZE = 1000
+UPSERT_BATCH_SIZE = 10000        # rows per staging-table batch (raised for large datasets)
+MAX_PARALLEL_API_WORKERS = 10   # concurrent Bybit API page requests (well within 120 req/s IP limit)
 
 TIMEFRAMES = {
     "1m": ("1", 60_000),
@@ -23,6 +24,12 @@ TIMEFRAMES = {
     "360m": ("360", 21_600_000),
     "720m": ("720", 43_200_000),
     "1d": ("D", 86_400_000),
+}
+
+# Maps Bybit interval string → step size in milliseconds (for parallel page-window computation)
+INTERVAL_TO_STEP_MS: dict[str, int] = {
+    bybit_interval: step_ms
+    for _, (bybit_interval, step_ms) in TIMEFRAMES.items()
 }
 
 TIMEFRAME_ALIASES = {

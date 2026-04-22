@@ -67,45 +67,79 @@ function Restart-Microservice {
     Write-Info "[$Name] Перезапуск (mode=$RunMode)..."
     Push-Location $SvcDir
 
-    $BaseTag = "${Name}-base:latest"
-    $baseExists = docker image inspect $BaseTag 2>$null
-    $baseFound = ($LASTEXITCODE -eq 0)
+    $composeFile    = Join-Path $SvcDir "docker-compose.yml"
+    $composeContent = Get-Content $composeFile -Raw
+    $hasBase      = $composeContent -match '(?m)^\s{2}base\s*:'
+    $hasApi       = $composeContent -match '(?m)^\s{2}api\s*:'
+    $hasStreamlit = $composeContent -match '(?m)^\s{2}streamlit\s*:'
+
+    $baseFound = $false
+    if ($hasBase) {
+        $BaseTag = "${Name}-base:latest"
+        try { docker image inspect $BaseTag 2>&1 | Out-Null; $baseFound = ($LASTEXITCODE -eq 0) } catch { $baseFound = $false }
+    }
 
     switch ($RunMode) {
         "deps" {
-            Write-Info "[$Name] Пересборка base-образа (requirements.txt изменился)..."
-            docker compose --profile build-base build --no-cache base
-            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
-            docker compose build api streamlit
+            if ($hasBase) {
+                Write-Info "[$Name] Пересборка base-образа (requirements.txt изменился)..."
+                docker compose --profile build-base build --no-cache base
+                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
+                $dangling = docker images -f "dangling=true" -q 2>$null
+                if ($dangling) { docker image prune -f | Out-Null }
+            }
+            docker compose build
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
             docker compose up -d
         }
         "api" {
-            docker compose build api
-            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build api провалился." }
-            docker compose up -d --no-deps api
+            if ($hasApi) {
+                docker compose build api
+                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build api провалился." }
+                docker compose up -d --no-deps api
+            } else {
+                docker compose build
+                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
+                docker compose up -d
+            }
             Write-Ok "[$Name] api перезапущен."
         }
         "streamlit" {
-            docker compose build streamlit
-            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build streamlit провалился." }
-            docker compose up -d --no-deps streamlit
+            if ($hasStreamlit) {
+                docker compose build streamlit
+                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build streamlit провалился." }
+                docker compose up -d --no-deps streamlit
+            } else {
+                docker compose build
+                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
+                docker compose up -d
+            }
             Write-Ok "[$Name] streamlit перезапущен."
         }
         "full" {
-            if (-not $baseFound) {
+            if ($hasBase -and -not $baseFound) {
                 Write-Info "[$Name] Сборка base-образа..."
                 docker compose --profile build-base build base
+                $dangling = docker images -f "dangling=true" -q 2>$null
+                if ($dangling) { docker image prune -f | Out-Null }
             }
-            docker compose --profile scheduler build api streamlit scheduler
             docker compose --profile scheduler up -d
         }
         default {
-            if (-not $baseFound) {
+            if ($hasBase -and -not $baseFound) {
                 Write-Info "[$Name] Сборка base-образа..."
                 docker compose --profile build-base build base
+                $dangling = docker images -f "dangling=true" -q 2>$null
+                if ($dangling) { docker image prune -f | Out-Null }
             }
-            docker compose build api streamlit
+            if ($hasApi -and $hasStreamlit) {
+                docker compose build api streamlit
+            } else {
+                docker compose build
+            }
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
+            $dangling = docker images -f "dangling=true" -q 2>$null
+            if ($dangling) { docker image prune -f | Out-Null }
             docker compose up -d
         }
     }

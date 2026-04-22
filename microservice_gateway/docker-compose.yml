@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   gateway-service:
     build:
@@ -15,10 +13,8 @@ services:
       Jwt__SecretKey: ${JWT_SECRET_KEY}
       Jwt__Issuer: ${JWT_ISSUER:-exchange-app}
       Jwt__Audience: ${JWT_AUDIENCE:-exchange-app-mobile}
-      DownstreamServices__Account__BaseUrl: http://account-service:5000
+      DownstreamServices__Account__BaseUrl: http://host.docker.internal:5010
       DownstreamServices__Account__Enabled: "true"
-    depends_on:
-      - account-service
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5020/health"]
       interval: 30s
@@ -26,21 +22,3 @@ services:
       retries: 3
       start_period: 15s
     restart: unless-stopped
-
-  account-service:
-    image: exchange-app/account-service:local
-    container_name: exchange-account
-    ports:
-      - "5010:5000"
-    environment:
-      ASPNETCORE_ENVIRONMENT: Production
-      ASPNETCORE_URLS: http://+:5000
-      Jwt__SecretKey: ${JWT_SECRET_KEY}
-      Jwt__Issuer: ${JWT_ISSUER:-exchange-app}
-      Jwt__Audience: ${JWT_AUDIENCE:-exchange-app-mobile}
-      ConnectionStrings__DefaultConnection: ${ACCOUNT_DB_CONNECTION}
-    restart: unless-stopped
-
-networks:
-  default:
-    name: exchange-app-network
