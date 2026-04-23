@@ -11,6 +11,8 @@ from backend.dataset.database import (
     ensure_dataset_schema,
     ensure_table,
     fetch_db_rows,
+    fetch_db_timestamps,
+    find_missing_timestamps_sql,
     read_table_schema,
     table_exists,
     upsert_rows,
@@ -159,7 +161,8 @@ def test_fetch_db_rows_returns_dict():
     conn, cursor = _make_conn()
     ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
     row = [ts] + ["BTCUSDT", "bybit", "60m"] + [40000.0] + [None] * (len(DATASET_COLUMN_NAMES) - 5)
-    cursor.fetchall.return_value = [row]
+    # fetchmany: first call returns one batch, second returns empty (signals end)
+    cursor.fetchmany.side_effect = [[row], []]
     cursor.description = [(col,) for col in DATASET_COLUMN_NAMES]
     result = fetch_db_rows(conn, "btcusdt_60m", 0, 2_000_000_000_000)
     assert isinstance(result, dict)
@@ -167,12 +170,54 @@ def test_fetch_db_rows_returns_dict():
 
 
 # ---------------------------------------------------------------------------
+# fetch_db_timestamps
+# ---------------------------------------------------------------------------
+
+def test_fetch_db_timestamps_returns_set():
+    conn, cursor = _make_conn()
+    ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    cursor.fetchall.return_value = [(ts,)]
+    result = fetch_db_timestamps(conn, "btcusdt_60m", 0, 2_000_000_000_000)
+    assert isinstance(result, set)
+    assert len(result) == 1
+    assert int(ts.timestamp() * 1000) in result
+
+
+def test_fetch_db_timestamps_empty_table():
+    conn, cursor = _make_conn()
+    cursor.fetchall.return_value = []
+    result = fetch_db_timestamps(conn, "btcusdt_60m", 0, 2_000_000_000_000)
+    assert result == set()
+
+
+# ---------------------------------------------------------------------------
+# find_missing_timestamps_sql
+# ---------------------------------------------------------------------------
+
+def test_find_missing_timestamps_sql_returns_missing():
+    conn, cursor = _make_conn()
+    step_ms = 3_600_000
+    start_ms = 1_704_067_200_000
+    missing_ms = start_ms + step_ms
+    cursor.fetchall.return_value = [(missing_ms,)]
+    result = find_missing_timestamps_sql(conn, "btcusdt_60m", start_ms, start_ms + 2 * step_ms, step_ms)
+    assert missing_ms in result
+    assert isinstance(result, list)
+
+
+def test_find_missing_timestamps_sql_returns_empty_when_full():
+    conn, cursor = _make_conn()
+    cursor.fetchall.return_value = []
+    result = find_missing_timestamps_sql(conn, "btcusdt_60m", 0, 3_600_000, 3_600_000)
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
 # upsert_rows
 # ---------------------------------------------------------------------------
 
-@patch("backend.dataset.database.execute_values")
 @patch("backend.dataset.database.sql")
-def test_upsert_rows_inserts_and_updates(mock_sql, mock_ev):
+def test_upsert_rows_inserts_and_updates(mock_sql):
     from backend.dataset.constants import DATASET_COLUMN_NAMES
     conn, cursor = _make_conn()
     # Make sql.SQL(...).format(...).as_string(conn) return a plain string

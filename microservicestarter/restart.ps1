@@ -4,18 +4,20 @@
 # git pull + перезапускает один или все микросервисы.
 #
 # Использование:
-#   .\restart.ps1                                          - git pull + все сервисы
-#   .\restart.ps1 -Service microservice_analitic           - git pull + конкретный
-#   .\restart.ps1 -Service all                             - git pull + все
-#   .\restart.ps1 -Service microservice_analitic -Mode full     - core + scheduler
-#   .\restart.ps1 -Service microservice_analitic -Mode api      - только api
-#   .\restart.ps1 -Service microservice_analitic -Mode streamlit - только streamlit
-#   .\restart.ps1 -Service microservice_analitic -Mode deps     - пересобрать base
+#   .\restart.ps1                                                 - git pull + все сервисы
+#   .\restart.ps1 -Service microservice_analitic                  - git pull + конкретный
+#   .\restart.ps1 -Service all                                    - git pull + все
+#   .\restart.ps1 -Service microservice_analitic -Mode full       - core + scheduler
+#   .\restart.ps1 -Service microservice_analitic -Mode api        - только api
+#   .\restart.ps1 -Service microservice_analitic -Mode streamlit  - только streamlit
+#   .\restart.ps1 -Service microservice_analitic -Mode deps       - пересобрать base
+#   .\restart.ps1 -Service microservice_analitic -Mode postgres   - только postgres (без rebuild)
+#   .\restart.ps1 -Service microservice_analitic -Mode redis      - только redis (без rebuild)
 # =============================================================================
 
 param(
     [string]$Service = "all",
-    [ValidateSet("core","full","api","streamlit","deps","")]
+    [ValidateSet("core","full","api","streamlit","deps","postgres","redis","")]
     [string]$Mode = "core"
 )
 
@@ -39,6 +41,11 @@ Get-Content $ConfFile | ForEach-Object {
     if ($line -match '^\s*#' -or $line -eq '') { return }
     $parts = $line -split '\s+', 2
     if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1] }
+}
+
+function Remove-DanglingImages {
+    $dangling = docker images -f "dangling=true" -q 2>$null
+    if ($dangling) { docker image prune -f | Out-Null }
 }
 
 # git pull — выполняется один раз для всего репозитория
@@ -85,12 +92,13 @@ function Restart-Microservice {
                 Write-Info "[$Name] Пересборка base-образа (requirements.txt изменился)..."
                 docker compose --profile build-base build --no-cache base
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
-                $dangling = docker images -f "dangling=true" -q 2>$null
-                if ($dangling) { docker image prune -f | Out-Null }
+                Remove-DanglingImages
             }
             docker compose build
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
+            Remove-DanglingImages
             docker compose up -d
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
         "api" {
             if ($hasApi) {
@@ -102,7 +110,7 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
                 docker compose up -d
             }
-            Write-Ok "[$Name] api перезапущен."
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск api провалился." }
         }
         "streamlit" {
             if ($hasStreamlit) {
@@ -114,23 +122,24 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
                 docker compose up -d
             }
-            Write-Ok "[$Name] streamlit перезапущен."
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск streamlit провалился." }
+        }
+        "postgres" {
+            Write-Info "[$Name] Перезапуск postgres (применение новых параметров из docker-compose.yml)..."
+            docker compose up -d --no-deps postgres
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Перезапуск postgres провалился." }
+        }
+        "redis" {
+            Write-Info "[$Name] Перезапуск redis..."
+            docker compose up -d --no-deps redis
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Перезапуск redis провалился." }
         }
         "full" {
             if ($hasBase -and -not $baseFound) {
                 Write-Info "[$Name] Сборка base-образа..."
                 docker compose --profile build-base build base
-                $dangling = docker images -f "dangling=true" -q 2>$null
-                if ($dangling) { docker image prune -f | Out-Null }
-            }
-            docker compose --profile scheduler up -d
-        }
-        default {
-            if ($hasBase -and -not $baseFound) {
-                Write-Info "[$Name] Сборка base-образа..."
-                docker compose --profile build-base build base
-                $dangling = docker images -f "dangling=true" -q 2>$null
-                if ($dangling) { docker image prune -f | Out-Null }
+                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
+                Remove-DanglingImages
             }
             if ($hasApi -and $hasStreamlit) {
                 docker compose build api streamlit
@@ -138,12 +147,28 @@ function Restart-Microservice {
                 docker compose build
             }
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
-            $dangling = docker images -f "dangling=true" -q 2>$null
-            if ($dangling) { docker image prune -f | Out-Null }
+            Remove-DanglingImages
+            docker compose --profile scheduler up -d
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
+        }
+        default {
+            if ($hasBase -and -not $baseFound) {
+                Write-Info "[$Name] Сборка base-образа..."
+                docker compose --profile build-base build base
+                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
+                Remove-DanglingImages
+            }
+            if ($hasApi -and $hasStreamlit) {
+                docker compose build api streamlit
+            } else {
+                docker compose build
+            }
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
+            Remove-DanglingImages
             docker compose up -d
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
     }
-    if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Перезапуск провалился." }
 
     Pop-Location
     Write-Ok "[$Name] Перезапущен."

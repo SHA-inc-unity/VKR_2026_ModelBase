@@ -60,3 +60,43 @@ if _file_handler is not None and not tlog.handlers:
 def now() -> float:
     """Монотонный счётчик для замера интервалов (секунды, float)."""
     return time.perf_counter()
+
+
+from contextlib import contextmanager
+from typing import Iterator
+
+
+@contextmanager
+def perf_stage(name: str, **context) -> Iterator[dict]:
+    """Контекст-менеджер для замера длительности стадии и структурированного лога.
+
+    Пример:
+        with perf_stage("download_missing.find_gaps", table=table_name):
+            missing = builder.find_missing_timestamps_sql(...)
+
+    Лог получит строку вида:
+        download_missing.find_gaps | START table=...
+        download_missing.find_gaps | DONE elapsed=0.045s table=... extra=...
+
+    Внутри блока можно мутировать yielded dict, чтобы добавить метрики
+    (например rows=len(result)), которые попадут в финальную строку DONE.
+    """
+    ctx = dict(context)
+    ctx_str = " ".join(f"{k}={v}" for k, v in ctx.items()) if ctx else ""
+    tlog.info("%s | START %s", name, ctx_str)
+    t0 = time.perf_counter()
+    extra: dict = {}
+    try:
+        yield extra
+    except Exception as exc:
+        elapsed = time.perf_counter() - t0
+        extra_str = " ".join(f"{k}={v}" for k, v in {**ctx, **extra}.items())
+        tlog.exception(
+            "%s | FAILED elapsed=%.3fs %s error=%s",
+            name, elapsed, extra_str, type(exc).__name__,
+        )
+        raise
+    else:
+        elapsed = time.perf_counter() - t0
+        extra_str = " ".join(f"{k}={v}" for k, v in {**ctx, **extra}.items())
+        tlog.info("%s | DONE elapsed=%.3fs %s", name, elapsed, extra_str)

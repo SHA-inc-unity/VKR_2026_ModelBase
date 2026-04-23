@@ -54,22 +54,17 @@ def _system_status() -> dict:
     try:
         from services.db_auth import load_db_config, load_local_config
         from services.store import store
-        import psycopg2
+        from backend.db import get_connection
         result["store"] = store.backend_name
         cfg = load_db_config(load_local_config())
-        params: dict = {"host": cfg["host"], "port": cfg["port"], "dbname": cfg["database"]}
-        if cfg.get("user"):
-            params["user"] = cfg["user"]
-        if cfg.get("password"):
-            params["password"] = cfg["password"]
-        conn = psycopg2.connect(**params, connect_timeout=3)
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM information_schema.tables "
-                "WHERE table_schema='public'"
-            )
-            result["tables"] = int(cur.fetchone()[0])
-        conn.close()
+        # use_pool=False — для health-check не стоит держать пул на локальный конфиг
+        with get_connection(cfg, use_pool=False) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_schema='public'"
+                )
+                result["tables"] = int(cur.fetchone()[0])
         result["db_ok"] = True
     except Exception:
         pass

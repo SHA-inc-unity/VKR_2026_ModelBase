@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from urllib import error, parse, request
 
 from .constants import (
@@ -60,6 +61,7 @@ def api_get_json(path: str, params: dict[str, object]) -> dict:
     raise RuntimeError(f"Exhausted retries for {path}")
 
 
+@lru_cache(maxsize=64)
 def fetch_instrument_details(category: str, symbol: str) -> tuple[int, int]:
     """Получает launchTime и fundingInterval по инструменту."""
     payload = api_get_json(

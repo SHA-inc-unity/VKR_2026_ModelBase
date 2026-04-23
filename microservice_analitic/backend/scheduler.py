@@ -195,8 +195,7 @@ class Scheduler:
 
     def _run_retrain(self, job: SchedulerJob) -> None:
         """Выполняет полный цикл переобучения для одного задания."""
-        import psycopg2
-
+        from backend.db import get_connection
         from backend.dataset.core import make_table_name
         from backend.model import (
             load_training_data,
@@ -213,20 +212,11 @@ class Scheduler:
         timeframe  = job.timeframe.lower()
         table_name = make_table_name(symbol, timeframe)
 
-        # 1. Подключение к БД
-        conn = psycopg2.connect(
-            host=self._db_config["host"],
-            port=self._db_config["port"],
-            dbname=self._db_config["database"],
-            user=self._db_config["user"],
-            password=self._db_config["password"],
-        )
-        try:
+        # 1. Подключение к БД через единый пул (backend.db)
+        with get_connection(self._db_config) as conn:
             X, y, feature_cols, timestamps = load_training_data(
                 conn, table_name, target_col=job.target_col
             )
-        finally:
-            conn.close()
 
         if X is None or len(X) == 0:
             _LOG.warning("[scheduler] нет данных для %s — пропуск", table_name)

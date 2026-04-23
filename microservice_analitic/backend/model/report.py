@@ -158,9 +158,8 @@ def save_grid_results(
     prefix: str = "catboost",
 ) -> Path:
     """Сохраняет таблицу grid search в CSV и выводит в консоль."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{prefix}_grid_results.csv"
-    grid_df.to_csv(path, index=False)
+    from backend.csv_io import save_csv
+    path = save_csv(grid_df, output_dir / f"{prefix}_grid_results.csv")
     log(f"[report] Grid results → {path}")
 
     # Краткая таблица в stdout
@@ -515,7 +514,10 @@ def load_grid_session_result(
     if not (csv_path.exists() and best_path.exists()):
         return None
     try:
-        grid_df     = pd.read_csv(str(csv_path))
+        from backend.csv_io import load_csv, CsvLoadError
+        grid_df = load_csv(csv_path, missing_ok=False)
+        if grid_df is None:
+            return None
         best        = json.loads(best_path.read_text(encoding="utf-8"))
         best_params = best.get("best_params", {})
         if not best_params or grid_df.empty:
@@ -525,6 +527,8 @@ def load_grid_session_result(
             "best_params": best_params,
             "prefix":      prefix,
         }
+    except (CsvLoadError, json.JSONDecodeError, FileNotFoundError):
+        return None
     except Exception:
         return None
 
@@ -540,9 +544,8 @@ def save_optuna_results(
     prefix: str = "catboost",
 ) -> Path:
     """Сохраняет таблицу Optuna-трайлов в CSV ({prefix}_optuna_results.csv)."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{prefix}_optuna_results.csv"
-    trials_df.to_csv(path, index=False)
+    from backend.csv_io import save_csv
+    path = save_csv(trials_df, output_dir / f"{prefix}_optuna_results.csv")
     log(f"[report] Optuna results → {path}")
     return path
 
@@ -612,7 +615,10 @@ def load_optuna_session_result(
     if not (csv_path.exists() and best_path.exists()):
         return None
     try:
-        trials_df   = pd.read_csv(str(csv_path))
+        from backend.csv_io import load_csv, CsvLoadError
+        trials_df = load_csv(csv_path, missing_ok=False)
+        if trials_df is None:
+            return None
         best        = json.loads(best_path.read_text(encoding="utf-8"))
         best_params = best.get("best_params", {})
         if not best_params or trials_df.empty:
@@ -622,6 +628,8 @@ def load_optuna_session_result(
             "best_params": best_params,
             "prefix":      prefix,
         }
+    except (CsvLoadError, json.JSONDecodeError, FileNotFoundError):
+        return None
     except Exception:
         return None
 
@@ -703,14 +711,13 @@ def save_shap_summary(
     prefix: str = "catboost",
 ) -> Path:
     """Сохраняет сводку SHAP (mean |SHAP| по признакам) в {prefix}_shap_summary.csv."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{prefix}_shap_summary.csv"
+    from backend.csv_io import save_csv
     series = shap_result["mean_abs"]
     df = pd.DataFrame({
         "feature":       series.index.tolist(),
         "mean_abs_shap": series.values.tolist(),
     })
-    df.to_csv(path, index=False)
+    path = save_csv(df, output_dir / f"{prefix}_shap_summary.csv")
     log(f"[report] SHAP summary → {path}")
     return path
 
@@ -721,14 +728,15 @@ def load_shap_summary(
     models_dir: Path = MODELS_DIR,
 ) -> "pd.Series | None":
     """Загружает сохранённую сводку SHAP. Возвращает pd.Series или None."""
+    from backend.csv_io import load_csv, CsvLoadError
     path = models_dir / f"{prefix}_shap_summary.csv"
-    if not path.exists():
-        return None
     try:
-        df = pd.read_csv(str(path))
-        return pd.Series(df["mean_abs_shap"].values, index=df["feature"].values)
-    except Exception:
+        df = load_csv(path, required_columns=["feature", "mean_abs_shap"])
+    except CsvLoadError:
         return None
+    if df is None:
+        return None
+    return pd.Series(df["mean_abs_shap"].values, index=df["feature"].values)
 
 
 # ---------------------------------------------------------------------------

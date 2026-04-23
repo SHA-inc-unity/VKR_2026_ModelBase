@@ -13,8 +13,8 @@
 
 param(
     [string]$Service = "all",
-    [ValidateSet("stop","clean","prune","")]
-    [string]$Mode = "stop"
+    [ValidateSet("clean","prune","")]
+    [string]$Mode = ""
 )
 
 $ErrorActionPreference = "Stop"

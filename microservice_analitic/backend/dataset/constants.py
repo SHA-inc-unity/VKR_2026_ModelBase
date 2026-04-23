@@ -9,8 +9,8 @@ MAX_RETRIES = 4
 PAGE_LIMIT_KLINE = 1000          # Bybit API hard maximum per request
 PAGE_LIMIT_FUNDING = 200
 PAGE_LIMIT_OPEN_INTEREST = 200
-UPSERT_BATCH_SIZE = 10000        # rows per staging-table batch (raised for large datasets)
-MAX_PARALLEL_API_WORKERS = 10   # concurrent Bybit API page requests (well within 120 req/s IP limit)
+UPSERT_BATCH_SIZE = 50000        # rows per staging-table batch (raised for large datasets)
+MAX_PARALLEL_API_WORKERS = 20   # concurrent Bybit API page requests (well within 120 req/s IP limit)
 
 TIMEFRAMES = {
     "1m": ("1", 60_000),

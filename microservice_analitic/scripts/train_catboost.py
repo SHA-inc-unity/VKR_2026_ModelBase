@@ -99,15 +99,18 @@ def main() -> int:
         f"GPU={'да' if use_gpu else 'нет'}")
     log(f"[main] Annualize factor (баров/год): {annualize_factor:.0f}")
 
-    # --- Подключение к БД ---
+    # --- Подключение к БД (через единый модуль backend.db) ---
+    from backend.db import get_connection
+    _db_cfg = {
+        "host":     args.postgres_host,
+        "port":     args.postgres_port,
+        "database": args.postgres_db,
+        "user":     args.postgres_user,
+        "password": args.postgres_password,
+    }
     try:
-        connection = psycopg2.connect(
-            host=args.postgres_host,
-            port=args.postgres_port,
-            dbname=args.postgres_db,
-            user=args.postgres_user,
-            password=args.postgres_password,
-        )
+        _conn_cm = get_connection(_db_cfg, use_pool=False)
+        connection = _conn_cm.__enter__()
     except Exception as exc:
         log(f"[main] Ошибка подключения к PostgreSQL: {exc}")
         return 1
@@ -116,7 +119,7 @@ def main() -> int:
         # --- Загрузка данных ---
         X, y, feature_cols, timestamps = load_training_data(connection, table_name)
     finally:
-        connection.close()
+        _conn_cm.__exit__(None, None, None)
 
     # --- Walk-forward split (70% train / 30% test по времени) ---
     train_size, test_size = walk_forward_split(len(X))

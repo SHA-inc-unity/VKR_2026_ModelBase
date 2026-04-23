@@ -173,8 +173,7 @@ async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
     Возвращает немедленно; следите за статусом через /registry или /metrics.
     """
     try:
-        import psycopg2
-
+        from backend.db import get_connection
         from backend.dataset.core import make_table_name
         from backend.model import load_training_data
         from backend.model.config import TRAIN_FRACTION
@@ -186,21 +185,11 @@ async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
         prefix    = f"catboost_{symbol.lower()}_{timeframe}"
         table_name = make_table_name(symbol, timeframe)
 
-        db_config = {
-            "host":     os.getenv("PGHOST",     "localhost"),
-            "port":     int(os.getenv("PGPORT", "5432")),
-            "dbname":   os.getenv("PGDATABASE", "crypt_date"),
-            "user":     os.getenv("PGUSER",     ""),
-            "password": os.getenv("PGPASSWORD", ""),
-        }
-
-        conn = psycopg2.connect(**db_config)
-        try:
+        # Подключение к БД через единый пул (backend.db). Конфиг берётся из env.
+        with get_connection() as conn:
             X, y, feature_cols, timestamps = load_training_data(
                 conn, table_name, target_col=req.target_col
             )
-        finally:
-            conn.close()
 
         if X is None or len(X) == 0:
             return RetrainResponse(
