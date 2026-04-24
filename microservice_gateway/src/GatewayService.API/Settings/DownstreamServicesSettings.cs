@@ -4,7 +4,6 @@ public sealed class DownstreamServicesSettings
 {
     public const string SectionName = "DownstreamServices";
 
-    public ServiceEndpointSettings Account { get; init; } = new();
     public ServiceEndpointSettings Portfolio { get; init; } = new();
     public ServiceEndpointSettings Market { get; init; } = new();
     public ServiceEndpointSettings News { get; init; } = new();

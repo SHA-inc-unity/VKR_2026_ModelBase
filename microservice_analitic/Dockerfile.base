@@ -24,5 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m venv /app/venv
 
 # Heavy deps that rarely change - cached in this layer
-COPY requirements.txt .
+COPY microservice_analitic/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install shared package (modelline_shared)
+COPY shared/ /tmp/shared/
+RUN pip install --no-cache-dir /tmp/shared/ && rm -rf /tmp/shared/

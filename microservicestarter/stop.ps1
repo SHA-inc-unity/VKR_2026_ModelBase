@@ -32,11 +32,12 @@ docker info 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Fail "Docker daemon не запущен." }
 
 $ServicePaths = @{}
+$ServiceOrder = @()
 Get-Content $ConfFile | ForEach-Object {
     $line = $_.Trim()
     if ($line -match '^\s*#' -or $line -eq '') { return }
     $parts = $line -split '\s+', 2
-    if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1] }
+    if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1]; $script:ServiceOrder += $parts[0] }
 }
 
 function Stop-Microservice {
@@ -70,7 +71,7 @@ function Stop-Microservice {
 }
 
 if ($Service -eq "all") {
-    foreach ($svc in $ServicePaths.Keys) { Stop-Microservice -Name $svc -RunMode $Mode }
+    foreach ($svc in $ServiceOrder) { Stop-Microservice -Name $svc -RunMode $Mode }
 } else {
     Stop-Microservice -Name $Service -RunMode $Mode
 }

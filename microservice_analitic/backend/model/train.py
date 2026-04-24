@@ -612,8 +612,8 @@ def train_final_model(
     try:
         _best_iter = model.get_best_iteration()
         log(f"[train] best_iteration = {_best_iter}")
-    except Exception:
-        pass
+    except Exception as _e:
+        log(f"[train] best_iteration unavailable: {_e}")
 
     y_pred = model.predict(X_test.values)
     metrics = compute_metrics(y_test.values, y_pred, annualize_factor=annualize_factor)
@@ -718,7 +718,8 @@ def compute_overfitting_diagnostics(
     try:
         best_iter = int(model.get_best_iteration() or 0)
         log(f"[overfit] best_iteration = {best_iter}")
-    except Exception:
+    except Exception as _e:
+        log(f"[overfit] best_iteration unavailable: {_e}")
         best_iter = 0
 
     # Train RMSE при best_iteration (предсказание уже учитывает use_best_model)

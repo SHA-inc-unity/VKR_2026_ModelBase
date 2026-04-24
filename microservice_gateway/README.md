@@ -4,6 +4,10 @@ ASP.NET Core 8 API Gateway (Backend for Frontend) for the Exchange App Flutter c
 
 The gateway is the **single entry point** for the mobile app. It aggregates responses from multiple downstream services, handles authentication, and returns partial/degraded responses when a service is unavailable.
 
+Downstream IPC is **Kafka-only** (Redpanda broker). The former HTTP client to
+`microservice_account` was replaced with `KafkaRequestClient` (async
+request/reply on a per-instance `reply.gateway.{instanceId}` inbox).
+
 ---
 
 ## Architecture
@@ -14,16 +18,16 @@ Flutter App
     ▼
 API Gateway  :5020
     ├── GET /api/app/bootstrap    ← aggregates: Account (optional)
-    ├── GET /api/account/me       ← proxies:    Account Service
+    ├── GET /api/account/me       ← proxies:    Account Service (via Kafka)
     ├── GET /api/dashboard        ← aggregates: Portfolio + Market + News (parallel)
     ├── GET /api/news             ← proxies:    News Service (stub)
     └── GET /api/notifications    ← proxies:    Notifications Service (stub)
     │
-    ├── Account Service   :5010  (real)
-    ├── Portfolio Service :5030  (stub — not yet implemented)
-    ├── Market Service    :5040  (stub — not yet implemented)
-    ├── News Service      :5050  (stub — not yet implemented)
-    └── Notifications     :5060  (stub — not yet implemented)
+    ├── Account Service        (Kafka: cmd.account.*)
+    ├── Portfolio Service      (stub — not yet implemented)
+    ├── Market Service         (stub — not yet implemented)
+    ├── News Service           (stub — not yet implemented)
+    └── Notifications          (stub — not yet implemented)
 ```
 
 ---
@@ -50,7 +54,9 @@ All responses include `X-Correlation-Id` header.
 2. Account Service returns `{ accessToken, refreshToken }`.
 3. Client passes `Authorization: Bearer <accessToken>` on all gateway requests.
 4. Gateway validates the JWT using the shared `SecretKey` (same as Account Service).
-5. Gateway forwards the raw `Bearer` token to downstream services along with `X-User-Id` header.
+5. Gateway extracts the `sub` / `nameid` claim from the already-validated JWT
+   and sends `{ user_id }` over Kafka (`cmd.account.get_user`) instead of
+   forwarding the raw bearer downstream.
 
 ---
 
@@ -71,7 +77,7 @@ The gateway **never returns 500 for downstream failures**. Instead:
 | `JWT_SECRET_KEY` | Yes | — | Shared HMAC secret (≥32 chars, same as Account Service) |
 | `JWT_ISSUER` | No | `exchange-app` | JWT issuer claim |
 | `JWT_AUDIENCE` | No | `exchange-app-mobile` | JWT audience claim |
-| `ACCOUNT_SERVICE_URL` | No | `http://localhost:5010` | Account Service base URL |
+| `KAFKA_BOOTSTRAP_SERVERS` | No | `redpanda:29092` | Kafka bootstrap (Redpanda) |
 
 Copy `.env.example` → `.env` and fill in the values.
 
@@ -128,10 +134,11 @@ dotnet test
 src/
   GatewayService.API/
     Aggregators/         — BFF orchestration logic (Bootstrap, Dashboard)
-    Clients/             — Typed HttpClients per downstream service
+    Clients/             — Downstream clients (Account via Kafka; rest are stubs)
     Controllers/         — Thin ASP.NET controllers
     DTOs/                — Response contracts and ErrorResponse
     Extensions/          — ServiceCollectionExtensions
+    Kafka/               — KafkaSettings, Topics, KafkaRequestClient (request/reply)
     Middleware/          — CorrelationId, GlobalException
     Settings/            — Strongly typed config sections
 tests/
@@ -161,6 +168,6 @@ tests/
 | Package | Version | Purpose |
 |---------|---------|---------|
 | `Microsoft.AspNetCore.Authentication.JwtBearer` | 8.* | JWT validation |
-| `Microsoft.Extensions.Http.Resilience` | 8.* | Polly v8 retry/circuit breaker |
+| `Confluent.Kafka` | 2.* | Kafka producer/consumer for request/reply to downstream services |
 | `Serilog.AspNetCore` | 8.* | Structured logging |
 | `Swashbuckle.AspNetCore` | 6.* | Swagger/OpenAPI |

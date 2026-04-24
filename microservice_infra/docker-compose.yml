@@ -1,0 +1,177 @@
+# microservice_infra — shared infrastructure layer.
+#
+# Runs the common pieces every other service depends on:
+#   - Redpanda   : Kafka-API compatible broker (KRaft, single node)
+#   - Redpanda Console : Web UI for topics / consumers (http://localhost:8080)
+#   - MinIO      : S3-compatible object store for claim-check payloads
+#   - MinIO Console    : Web UI (http://localhost:9001)
+#
+# Creates the shared docker network `modelline_net`. Other services attach
+# to it as `external: true`.
+#
+# Run (from this folder):
+#   docker compose up -d
+#
+# Broker endpoint (inside network): redpanda:9092
+# S3   endpoint (inside network)  : http://minio:9000
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.1.9
+    container_name: redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --memory
+      - "2G"
+      - --reserve-memory
+      - "200M"
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29092,EXTERNAL://localhost:9092
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - modelline_net
+
+  # One-shot: raise the per-shard partition budget so the single-node broker
+  # can host many ephemeral reply.* topics without tripping error_code=37
+  # ("Can not increase partition count due to memory limit").
+  redpanda-init:
+    image: redpandadata/redpanda:v24.1.9
+    container_name: redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh","-c"]
+    command:
+      - |
+        set -e
+        rpk --api-urls redpanda:9644 cluster config set topic_partitions_per_shard 10000
+        rpk --api-urls redpanda:9644 cluster config set auto_create_topics_enabled true
+        echo "✓ redpanda cluster config applied"
+    restart: "no"
+    networks:
+      - modelline_net
+
+  # Periodic cleanup of orphaned ephemeral reply-inbox topics. Each
+  # request/reply call in microservice_admin / microservice_analitic creates
+  # a unique reply.<service>.<uuid> topic; if a caller crashes before the
+  # finally-block cleanup runs, the topic is leaked. This janitor sweeps
+  # them every 5 minutes.
+  redpanda-janitor:
+    image: redpandadata/redpanda:v24.1.9
+    container_name: redpanda-janitor
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+    entrypoint: ["/bin/sh","-c"]
+    command:
+      - |
+        while true; do
+          sleep 300
+          rpk -X brokers=redpanda:29092 topic delete --regex '^reply\..*' || true
+        done
+    networks:
+      - modelline_net
+
+  redpanda-console:
+    image: redpandadata/console:v2.6.0
+    container_name: redpanda-console
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - modelline_net
+
+  minio:
+    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+    container_name: minio
+    restart: unless-stopped
+    command: server --console-address ":9001" /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-modelline_secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - modelline_net
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-09-16T17-43-14Z
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/modelline-blobs &&
+      mc anonymous set download local/modelline-blobs &&
+      echo '✓ bucket modelline-blobs ready'
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-modelline_secret}
+    networks:
+      - modelline_net
+
+  # Nginx reverse proxy — routes sha-trade.tech/admin → admin panel.
+  # Listens on port 80. Requires admin container on modelline_net.
+  # DNS: point A-record sha-trade.tech → <server public IP>.
+  # HTTPS: add certbot + ssl.conf volume; port 443 open in firewall.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: modelline-nginx
+    restart: unless-stopped
+    profiles: ["proxy"]
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - modelline_net
+
+volumes:
+  redpanda_data:
+  minio_data:
+
+networks:
+  modelline_net:
+    name: modelline_net

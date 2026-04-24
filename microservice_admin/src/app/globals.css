@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* shadcn/ui CSS variables — dark-only panel */
+    --background:         222 47% 7%;
+    --foreground:         210 40% 92%;
+
+    --card:               222 47% 16%;
+    --card-foreground:    210 40% 92%;
+
+    --popover:            222 47% 16%;
+    --popover-foreground: 210 40% 92%;
+
+    --primary:            217 91% 60%;
+    --primary-foreground: 222 47% 7%;
+
+    --secondary:          217 33% 20%;
+    --secondary-foreground: 210 40% 92%;
+
+    --muted:              217 33% 20%;
+    --muted-foreground:   215 20% 65%;
+
+    --accent:             217 33% 25%;
+    --accent-foreground:  210 40% 92%;
+
+    --destructive:        0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border:             217 33% 22%;
+    --input:              217 33% 20%;
+    --ring:               217 91% 60%;
+
+    --success:            142 71% 45%;
+    --warning:            38 92% 50%;
+
+    --radius:             0.625rem;
+
+    /* ── Fluid type scale: min @ 1280px → max @ 2560px ──────────────────
+       Formula: clamp(min, slope·vw + intercept, max)
+       slope    = (max_px - min_px) / 1280 * 100
+       intercept= min_px - slope * 12.8  (px → rem ÷ 16)
+    ─────────────────────────────────────────────────────────────────── */
+    --font-size-xs:   clamp(0.625rem,  0.23vw + 0.44rem,  0.8125rem);
+    --font-size-sm:   clamp(0.75rem,   0.23vw + 0.565rem, 0.9375rem);
+    --font-size-base: clamp(0.875rem,  0.31vw + 0.625rem, 1.125rem);
+    --font-size-lg:   clamp(1rem,      0.31vw + 0.75rem,  1.25rem);
+    --font-size-xl:   clamp(1.125rem,  0.47vw + 0.75rem,  1.5rem);
+    --font-size-2xl:  clamp(1.5rem,    0.94vw + 0.75rem,  2.25rem);
+    --font-size-3xl:  clamp(1.875rem,  1.41vw + 0.75rem,  3rem);
+  }
+
+  /* Force dark — this is a dark-only admin panel */
+  * { border-color: hsl(var(--border)); }
+
+  body {
+    background-color: hsl(var(--background));
+    color:            hsl(var(--foreground));
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* ── Pulsing ring for service status dot ─────────────────────────────── */
+.status-dot-ok {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+  /* ── Skeleton (shimmer) ────────────────────────────────── */
+@layer components {
+  .skeleton {
+    @apply animate-pulse rounded-md bg-primary/10;
+  }
+}
+
+/* ── Fluid type scale: override Tailwind's fixed font-size utilities ──────
+   Placed in @layer utilities so these declarations win over the generated
+   Tailwind ones (same layer, later source order wins).
+─────────────────────────────────────────────────────────────────────────── */
+@layer utilities {
+  .text-xs   { font-size: var(--font-size-xs); }
+  .text-sm   { font-size: var(--font-size-sm); }
+  .text-base { font-size: var(--font-size-base); }
+  .text-lg   { font-size: var(--font-size-lg); }
+  .text-xl   { font-size: var(--font-size-xl); }
+  .text-2xl  { font-size: var(--font-size-2xl); }
+  .text-3xl  { font-size: var(--font-size-3xl); }
+}

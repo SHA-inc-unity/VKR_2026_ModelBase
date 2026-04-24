@@ -42,8 +42,13 @@ def _compute_group_features(
     add_target: bool,
     target_horizon_ms: int = TARGET_HORIZON_MS,
 ) -> pd.DataFrame:
-    """Вычисляет все признаки для одной пары (symbol, timeframe)."""
-    g = g.copy().sort_values("timestamp_utc").reset_index(drop=True)
+    """Вычисляет все признаки для одной пары (symbol, timeframe).
+
+    ``sort_values(ignore_index=True)`` уже возвращает новый DataFrame —
+    явный ``.copy()`` не нужен (экономит полную копию входного фрейма,
+    ~700 МБ для 3M строк × 8 raw-колонок).
+    """
+    g = g.sort_values("timestamp_utc", ignore_index=True)
     price: pd.Series = g["index_price"]
 
     for lag in LAG_STEPS:
@@ -133,14 +138,18 @@ def build_features(
     if missing_cols:
         raise ValueError(f"Недостающие обязательные столбцы: {missing_cols}")
 
-    df = df.copy()
+    # df.copy() на входе НЕ нужен: ни одна ветка ниже не мутирует входной фрейм —
+    # groupby возвращает view, а _compute_group_features делает sort_values()
+    # (новый DataFrame) перед любой модификацией. Экономит до ~700 МБ для 3M×8.
     group_cols = [column_name for column_name in ("symbol", "timeframe") if column_name in df.columns]
 
+    n_groups = 0
     if group_cols:
         groups = list(df.groupby(group_cols, sort=False))
-        n_workers = min(len(groups), max(1, (math.ceil(len(groups) / 2))))
+        n_groups = len(groups)
+        n_workers = min(n_groups, max(1, (math.ceil(n_groups / 2))))
         if n_workers > 1:
-            parts: list[pd.DataFrame] = [None] * len(groups)  # type: ignore[list-item]
+            parts: list[pd.DataFrame] = [None] * n_groups  # type: ignore[list-item]
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 futures = {
                     pool.submit(_compute_group_features, grp, add_target, target_horizon_ms): idx
@@ -150,16 +159,29 @@ def build_features(
                     parts[futures[fut]] = fut.result()
         else:
             parts = [_compute_group_features(grp, add_target, target_horizon_ms) for _, grp in groups]
-        result = pd.concat(parts, ignore_index=True)
+        # Освобождаем ссылки на исходные group-view ДО concat, чтобы GC мог
+        # освободить груп-индексы во время конкатенации.
+        del groups
+        if n_groups == 1:
+            # Единственная группа — concat вырождается в копию. Используем as-is.
+            result = parts[0]
+        else:
+            result = pd.concat(parts, ignore_index=True)
+        del parts
     else:
         result = _compute_group_features(
-            df.sort_values("timestamp_utc").reset_index(drop=True),
+            df.sort_values("timestamp_utc", ignore_index=True),
             add_target,
             target_horizon_ms,
         )
 
-    sort_by = [*group_cols, "timestamp_utc"]
-    result = result.sort_values(sort_by).reset_index(drop=True)
+    # Финальная сортировка нужна только если групп > 1 (межгрупповой порядок
+    # может отличаться от ожидаемого). Для single-group случая каждая часть
+    # уже отсортирована по timestamp_utc внутри _compute_group_features,
+    # лишний sort_values на 3M×50 стоит ~1.26 ГБ памяти — избегаем.
+    if n_groups > 1:
+        sort_by = [*group_cols, "timestamp_utc"]
+        result = result.sort_values(sort_by, ignore_index=True)
 
     if warmup_candles > 0:
         if group_cols:

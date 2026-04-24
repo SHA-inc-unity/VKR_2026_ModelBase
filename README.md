@@ -8,7 +8,7 @@
 
 | Сервис | Технологии | Порты | Описание |
 |--------|-----------|-------|----------|
-| [microservice_analitic](microservice_analitic/README.md) | Python 3.12, CatBoost, FastAPI, Streamlit, PostgreSQL, Redis | API: `8000`, UI: `8501` | ML-сервис: обучение, прогнозы, аналитика рынка |
+| [microservice_analitic](microservice_analitic/README.md) | Python 3.12, CatBoost, FastAPI, PostgreSQL, Redis | API: `8000` | ML-сервис: обучение, прогнозы, аналитика рынка |
 | [microservice_account](microservice_account/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Redis | `5010` | Сервис аутентификации и управления аккаунтами (Clean Architecture) |
 | [microservice_gateway](microservice_gateway/README.md) | .NET 8, ASP.NET Core | `5020` | Mobile BFF Gateway — маршрутизация и агрегация запросов |
 
@@ -106,7 +106,6 @@ cd microservicestarter\
 | `build`     | Пересборка образов без кеша + запуск                               |
 | `logs`      | Показать live-логи (только `start`)                                |
 | `api`       | Пересобрать и перезапустить только api-контейнер (только `restart`)|
-| `streamlit` | Пересобрать и перезапустить только streamlit (только `restart`)    |
 | `deps`      | Пересобрать base-образ + всё сверху (только `restart`)             |
 | `clean`     | Остановить + удалить volumes (только `stop`) — **СБРОС БД!**       |
 | `prune`     | Остановить + удалить Docker-образы сервиса (только `stop`)         |

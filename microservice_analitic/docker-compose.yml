@@ -2,55 +2,11 @@ services:
   # ── Base image builder (shared deps layer) ──────────────────────────────────
   base:
     build:
-      context: .
-      dockerfile: Dockerfile.base
+      context: ..
+      dockerfile: microservice_analitic/Dockerfile.base
     image: modelline-base:latest
     profiles:
       - build-base   # built explicitly via: docker compose --profile build-base build base
-
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
-  postgres:
-    image: postgres:16-bookworm
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      POSTGRES_DB: ${PGDATABASE:-crypt_date}
-      POSTGRES_USER: ${PGUSER:-postgres}
-      POSTGRES_PASSWORD: ${PGPASSWORD:-postgres}
-    ports:
-      - "${PGPORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    # Performance tuning for large bulk-insert workloads (500k+ rows)
-    command: >
-      postgres
-        -c shared_buffers=4GB
-        -c work_mem=64MB
-        -c maintenance_work_mem=512MB
-        -c autovacuum_work_mem=128MB
-        -c checkpoint_completion_target=0.9
-        -c checkpoint_timeout=30min
-        -c wal_buffers=64MB
-        -c max_wal_size=4GB
-        -c synchronous_commit=off
-        -c random_page_cost=1.1
-        -c effective_cache_size=6GB
-        -c max_worker_processes=8
-        -c max_parallel_workers=8
-        -c max_parallel_workers_per_gather=4
-        -c wal_level=minimal
-        -c max_wal_senders=0
-        -c bgwriter_lru_maxpages=200
-        -c bgwriter_delay=50ms
-        -c jit=off
-        -c shared_preload_libraries='pg_prewarm'
-        -c pg_prewarm.autoprewarm=on
-        -c pg_prewarm.autoprewarm_interval=300
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres} -d ${PGDATABASE:-crypt_date}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
 
   # ── Redis (опциональный KV-store для настроек) ──────────────────────────────
   redis:
@@ -65,6 +21,8 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    networks:
+      - modelline_net
 
   # ── FastAPI REST ─────────────────────────────────────────────────────────────
   api:
@@ -75,6 +33,7 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -83,28 +42,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
-
-  # ── Streamlit UI ─────────────────────────────────────────────────────────────
-  streamlit:
-    build:
-      context: .
-      dockerfile: Dockerfile.streamlit
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-    ports:
-      - "8501:8501"
-    volumes:
-      - models_data:/app/models
-      - ./logs:/app/logs
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+    networks:
+      - modelline_net
 
   # ── Scheduler (переобучение по расписанию) ────────────────────────────────────
   scheduler:
@@ -116,16 +55,17 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       SCHEDULER_AUTOSTART: "false"
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
     volumes:
       - models_data:/app/models
     depends_on:
       redis:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
     command: ["python", "-m", "backend.scheduler"]
     profiles:
       - scheduler   # запускается только явно: docker compose --profile scheduler up
+    networks:
+      - modelline_net
 
   # ── MLflow (опционально, раскомментировать при необходимости) ───────────────
   # mlflow:
@@ -141,9 +81,15 @@ services:
   #     - "5000:5000"
   #   volumes:
   #     - mlflow_data:/mlflow
+  #   networks:
+  #     - modelline_net
 
 volumes:
   redis_data:
   models_data:
-  postgres_data:
   # mlflow_data:
+
+networks:
+  modelline_net:
+    external: true
+

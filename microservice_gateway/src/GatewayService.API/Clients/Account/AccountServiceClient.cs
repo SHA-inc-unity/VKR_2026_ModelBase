@@ -1,48 +1,118 @@
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
+using System.IdentityModel.Tokens.Jwt;
+using System.Text.Json;
 using GatewayService.API.Clients.Account.Dtos;
 using GatewayService.API.Common;
+using GatewayService.API.Kafka;
 
 namespace GatewayService.API.Clients.Account;
 
+/// <summary>
+/// Kafka-backed client for microservice_account. Sends a `cmd.account.get_user`
+/// request (user_id extracted from the bearer JWT) and parses the reply envelope.
+/// </summary>
 public sealed class AccountServiceClient : IAccountServiceClient
 {
-    private readonly HttpClient _http;
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+    private static readonly JwtSecurityTokenHandler TokenHandler = new();
+
+    private readonly KafkaRequestClient _kafka;
     private readonly ILogger<AccountServiceClient> _logger;
 
-    public AccountServiceClient(HttpClient http, ILogger<AccountServiceClient> logger)
+    public AccountServiceClient(KafkaRequestClient kafka, ILogger<AccountServiceClient> logger)
     {
-        _http = http;
+        _kafka  = kafka;
         _logger = logger;
     }
 
-    public async Task<ServiceResult<AccountUserDto>> GetCurrentUserAsync(string bearerToken, CancellationToken ct = default)
+    public async Task<ServiceResult<AccountUserDto>> GetCurrentUserAsync(
+        string bearerToken, CancellationToken ct = default)
+    {
+        var userId = ExtractUserId(bearerToken);
+        if (userId is null)
+            return ServiceResult<AccountUserDto>.Fail("Bearer token has no user id claim");
+
+        JsonElement reply;
+        try
+        {
+            reply = await _kafka.RequestAsync(
+                Topics.CmdAccountGetUser,
+                new { user_id = userId },
+                RequestTimeout,
+                ct);
+        }
+        catch (TimeoutException ex)
+        {
+            _logger.LogWarning(ex, "Account Kafka request timed out");
+            return ServiceResult<AccountUserDto>.Fail("Account service timeout");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Account Kafka request failed");
+            return ServiceResult<AccountUserDto>.Fail(ex.Message);
+        }
+
+        if (reply.ValueKind == JsonValueKind.Object &&
+            reply.TryGetProperty("error", out var errEl))
+        {
+            return ServiceResult<AccountUserDto>.Fail(errEl.GetString() ?? "account error");
+        }
+
+        var dto = ParseUser(reply);
+        return dto is not null
+            ? ServiceResult<AccountUserDto>.Ok(dto)
+            : ServiceResult<AccountUserDto>.Fail("Account service returned invalid payload");
+    }
+
+    private static string? ExtractUserId(string bearerToken)
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, "api/account/me");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
+            var jwt = TokenHandler.ReadJwtToken(bearerToken);
+            var sub = jwt.Claims.FirstOrDefault(c => c.Type is "sub" or "nameid" or "nameidentifier");
+            return sub?.Value;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
-            using var response = await _http.SendAsync(request, ct);
+    private static AccountUserDto? ParseUser(JsonElement el)
+    {
+        if (el.ValueKind != JsonValueKind.Object) return null;
 
-            if (!response.IsSuccessStatusCode)
+        try
+        {
+            var id       = el.TryGetProperty("id", out var idEl)           ? idEl.GetGuid()       : Guid.Empty;
+            var email    = el.TryGetProperty("email", out var em)          ? em.GetString() ?? "" : "";
+            var username = el.TryGetProperty("username", out var un)       ? un.GetString() ?? "" : "";
+            var status   = el.TryGetProperty("status", out var st)         ? st.GetString() ?? "" : "";
+
+            var roles = new List<string>();
+            if (el.TryGetProperty("roles", out var rolesEl) && rolesEl.ValueKind == JsonValueKind.Array)
             {
-                _logger.LogWarning("Account service returned {StatusCode} for /me", response.StatusCode);
-                return ServiceResult<AccountUserDto>.Fail($"Account service returned {(int)response.StatusCode}");
+                foreach (var r in rolesEl.EnumerateArray())
+                    if (r.ValueKind == JsonValueKind.String && r.GetString() is { } s) roles.Add(s);
             }
 
-            var user = await response.Content.ReadFromJsonAsync<AccountUserDto>(
-                options: new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true },
-                cancellationToken: ct);
+            var createdAt = el.TryGetProperty("created_at", out var ca) && ca.TryGetDateTimeOffset(out var cao)
+                ? cao
+                : default;
 
-            return user is not null
-                ? ServiceResult<AccountUserDto>.Ok(user)
-                : ServiceResult<AccountUserDto>.Fail("Account service returned empty body");
+            return new AccountUserDto
+            {
+                Id        = id,
+                Email     = email,
+                Username  = username,
+                Status    = status,
+                Roles     = roles,
+                CreatedAt = createdAt,
+                UpdatedAt = createdAt,
+            };
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        catch
         {
-            _logger.LogWarning(ex, "Account service call failed");
-            return ServiceResult<AccountUserDto>.Fail(ex.Message);
+            return null;
         }
     }
 }

@@ -83,7 +83,6 @@ class Scheduler:
     def __init__(
         self,
         jobs: list[SchedulerJob],
-        db_config: dict[str, Any],
         models_dir: Path | None = None,
         timezone: str = "UTC",
     ) -> None:
@@ -92,7 +91,6 @@ class Scheduler:
                 "APScheduler не установлен. Запустите: pip install apscheduler"
             )
         self._jobs = jobs
-        self._db_config = db_config
         self._models_dir = models_dir or (Path(__file__).parent.parent / "models")
         self._timezone = timezone
         self._scheduler = BackgroundScheduler(timezone=timezone)
@@ -113,17 +111,8 @@ class Scheduler:
             jobs_dicts = []
 
         jobs = [SchedulerJob.from_dict(d) for d in jobs_dicts]
-
-        db_config = {
-            "host":     os.getenv("PGHOST",     "localhost"),
-            "port":     int(os.getenv("PGPORT",     "5432")),
-            "database": os.getenv("PGDATABASE", "crypt_date"),
-            "user":     os.getenv("PGUSER",     ""),
-            "password": os.getenv("PGPASSWORD", ""),
-        }
-
         timezone = os.getenv("SCHEDULER_TIMEZONE", "UTC")
-        return cls(jobs=jobs, db_config=db_config, timezone=timezone)
+        return cls(jobs=jobs, timezone=timezone)
 
     # ------------------------------------------------------------------
     # Public API
@@ -195,10 +184,10 @@ class Scheduler:
 
     def _run_retrain(self, job: SchedulerJob) -> None:
         """Выполняет полный цикл переобучения для одного задания."""
-        from backend.db import get_connection
+        from backend import data_client as _dc
         from backend.dataset.core import make_table_name
         from backend.model import (
-            load_training_data,
+            load_training_data_from_rows,
             save_model,
             train_final_model,
         )
@@ -212,11 +201,17 @@ class Scheduler:
         timeframe  = job.timeframe.lower()
         table_name = make_table_name(symbol, timeframe)
 
-        # 1. Подключение к БД через единый пул (backend.db)
-        with get_connection(self._db_config) as conn:
-            X, y, feature_cols, timestamps = load_training_data(
-                conn, table_name, target_col=job.target_col
-            )
+        # 1. Загружаем данные через Kafka (microservice_data)
+        import time as _time
+        end_ms   = int(_time.time() * 1000) + 86_400_000  # now + 1 day buffer
+        start_ms = 0  # load all available history
+        rows = _get_rows(table_name, start_ms, end_ms)
+        if not rows:
+            _LOG.warning("[scheduler] нет данных для %s — пропуск", table_name)
+            return
+        X, y, feature_cols, timestamps = load_training_data_from_rows(
+            rows, target_col=job.target_col
+        )
 
         if X is None or len(X) == 0:
             _LOG.warning("[scheduler] нет данных для %s — пропуск", table_name)

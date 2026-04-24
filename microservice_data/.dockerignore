@@ -1,0 +1,13 @@
+**/.git
+**/.gitignore
+**/bin
+**/obj
+**/.vs
+**/.vscode
+**/TestResults
+**/coverage
+*.user
+*.suo
+.env
+.env.*
+!.env.example

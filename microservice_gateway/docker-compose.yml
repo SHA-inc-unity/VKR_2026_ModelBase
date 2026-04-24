@@ -13,8 +13,7 @@ services:
       Jwt__SecretKey: ${JWT_SECRET_KEY}
       Jwt__Issuer: ${JWT_ISSUER:-exchange-app}
       Jwt__Audience: ${JWT_AUDIENCE:-exchange-app-mobile}
-      DownstreamServices__Account__BaseUrl: http://host.docker.internal:5010
-      DownstreamServices__Account__Enabled: "true"
+      Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5020/health"]
       interval: 30s
@@ -22,3 +21,10 @@ services:
       retries: 3
       start_period: 15s
     restart: unless-stopped
+    networks:
+      - modelline_net
+
+networks:
+  modelline_net:
+    name: modelline_net
+    external: true

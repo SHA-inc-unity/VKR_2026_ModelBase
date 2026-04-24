@@ -1,5 +1,4 @@
 using GatewayService.API.Aggregators.Bootstrap;
-using GatewayService.API.Middleware;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 

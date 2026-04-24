@@ -9,7 +9,6 @@
 #   .\restart.ps1 -Service all                                    - git pull + все
 #   .\restart.ps1 -Service microservice_analitic -Mode full       - core + scheduler
 #   .\restart.ps1 -Service microservice_analitic -Mode api        - только api
-#   .\restart.ps1 -Service microservice_analitic -Mode streamlit  - только streamlit
 #   .\restart.ps1 -Service microservice_analitic -Mode deps       - пересобрать base
 #   .\restart.ps1 -Service microservice_analitic -Mode postgres   - только postgres (без rebuild)
 #   .\restart.ps1 -Service microservice_analitic -Mode redis      - только redis (без rebuild)
@@ -17,7 +16,7 @@
 
 param(
     [string]$Service = "all",
-    [ValidateSet("core","full","api","streamlit","deps","postgres","redis","")]
+    [ValidateSet("core","full","api","deps","postgres","redis","")]
     [string]$Mode = "core"
 )
 
@@ -36,11 +35,12 @@ docker info 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Fail "Docker daemon не запущен. Запустите Docker Desktop." }
 
 $ServicePaths = @{}
+$ServiceOrder = @()
 Get-Content $ConfFile | ForEach-Object {
     $line = $_.Trim()
     if ($line -match '^\s*#' -or $line -eq '') { return }
     $parts = $line -split '\s+', 2
-    if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1] }
+    if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1]; $script:ServiceOrder += $parts[0] }
 }
 
 function Remove-DanglingImages {
@@ -78,12 +78,29 @@ function Restart-Microservice {
     $composeContent = Get-Content $composeFile -Raw
     $hasBase      = $composeContent -match '(?m)^\s{2}base\s*:'
     $hasApi       = $composeContent -match '(?m)^\s{2}api\s*:'
-    $hasStreamlit = $composeContent -match '(?m)^\s{2}streamlit\s*:'
 
     $baseFound = $false
     if ($hasBase) {
         $BaseTag = "${Name}-base:latest"
         try { docker image inspect $BaseTag 2>&1 | Out-Null; $baseFound = ($LASTEXITCODE -eq 0) } catch { $baseFound = $false }
+    }
+
+    # Nginx port forwarding prompt (only for microservice_infra)
+    $composeProfile = @()
+    if ($Name -eq 'microservice_infra') {
+        Write-Host ""
+        $ans = Read-Host "[nginx] Включить проброс порта в хост-сеть? [Y/N]"
+        if ($ans -match '^[Yy]') {
+            $port = ''
+            while ($port -notin @('80','443')) {
+                $port = Read-Host "[nginx] Выберите порт: 80 или 443"
+            }
+            $env:NGINX_PORT = $port
+            $composeProfile = @('--profile', 'proxy')
+            Write-Info "[nginx] Nginx будет запущен на порту $port."
+        } else {
+            Write-Info "[nginx] Nginx запущен без проброса в хост-сеть."
+        }
     }
 
     switch ($RunMode) {
@@ -94,36 +111,21 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
                 Remove-DanglingImages
             }
-            docker compose build
+            docker compose $composeProfile build
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
             Remove-DanglingImages
-            docker compose up -d
+            docker compose $composeProfile up -d
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
         "api" {
             if ($hasApi) {
-                docker compose build api
-                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build api провалился." }
-                docker compose up -d --no-deps api
+                docker compose $composeProfile up -d --no-deps --build api
             } else {
-                docker compose build
-                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
-                docker compose up -d
+                docker compose $composeProfile up -d --build
             }
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск api провалился." }
         }
-        "streamlit" {
-            if ($hasStreamlit) {
-                docker compose build streamlit
-                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build streamlit провалился." }
-                docker compose up -d --no-deps streamlit
-            } else {
-                docker compose build
-                if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
-                docker compose up -d
-            }
-            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск streamlit провалился." }
-        }
+
         "postgres" {
             Write-Info "[$Name] Перезапуск postgres (применение новых параметров из docker-compose.yml)..."
             docker compose up -d --no-deps postgres
@@ -141,14 +143,7 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
                 Remove-DanglingImages
             }
-            if ($hasApi -and $hasStreamlit) {
-                docker compose build api streamlit
-            } else {
-                docker compose build
-            }
-            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
-            Remove-DanglingImages
-            docker compose --profile scheduler up -d
+            docker compose $composeProfile --profile scheduler up -d --build
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
         default {
@@ -158,14 +153,7 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
                 Remove-DanglingImages
             }
-            if ($hasApi -and $hasStreamlit) {
-                docker compose build api streamlit
-            } else {
-                docker compose build
-            }
-            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
-            Remove-DanglingImages
-            docker compose up -d
+            docker compose $composeProfile up -d --build
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
     }
@@ -177,7 +165,7 @@ function Restart-Microservice {
 Invoke-GitPull
 
 if ($Service -eq "all") {
-    foreach ($svc in $ServicePaths.Keys) { Restart-Microservice -Name $svc -RunMode $Mode }
+    foreach ($svc in $ServiceOrder) { Restart-Microservice -Name $svc -RunMode $Mode }
 } else {
     Restart-Microservice -Name $Service -RunMode $Mode
 }

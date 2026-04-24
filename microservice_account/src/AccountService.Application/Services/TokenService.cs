@@ -76,7 +76,7 @@ public sealed class TokenService : ITokenService
             if (!handler.CanReadToken(token)) return null;
             return handler.ReadJwtToken(token).Id;
         }
-        catch
+        catch (Exception)
         {
             return null;
         }
@@ -91,7 +91,7 @@ public sealed class TokenService : ITokenService
             var sub = handler.ReadJwtToken(token).Subject;
             return Guid.TryParse(sub, out var id) ? id : null;
         }
-        catch
+        catch (Exception)
         {
             return null;
         }

@@ -33,11 +33,12 @@ if ($LASTEXITCODE -ne 0) { Write-Fail "Docker daemon не запущен. Зап
 
 # ── Реестр сервисов ──────────────────────────────────────────────────────────
 $ServicePaths = @{}
+$ServiceOrder = @()
 Get-Content $ConfFile | ForEach-Object {
     $line = $_.Trim()
     if ($line -match '^\s*#' -or $line -eq '') { return }
     $parts = $line -split '\s+', 2
-    if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1] }
+    if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1]; $script:ServiceOrder += $parts[0] }
 }
 
 # ── Первичная настройка .env с интерактивным запросом паролей ────────────────
@@ -111,12 +112,30 @@ function Start-Microservice {
         }
     }
 
+    # Nginx port forwarding prompt (only for microservice_infra)
+    $composeProfile = @()
+    if ($Name -eq 'microservice_infra') {
+        Write-Host ""
+        $ans = Read-Host "[nginx] Включить проброс порта в хост-сеть? [Y/N]"
+        if ($ans -match '^[Yy]') {
+            $port = ''
+            while ($port -notin @('80','443')) {
+                $port = Read-Host "[nginx] Выберите порт: 80 или 443"
+            }
+            $env:NGINX_PORT = $port
+            $composeProfile = @('--profile', 'proxy')
+            Write-Info "[nginx] Nginx будет запущен на порту $port."
+        } else {
+            Write-Info "[nginx] Nginx запущен без проброса в хост-сеть."
+        }
+    }
+
     switch ($RunMode) {
-        "build"     { docker compose build --no-cache; Remove-DanglingImages; docker compose up -d }
-        "full"      { docker compose --profile scheduler up -d }
+        "build"     { docker compose $composeProfile build --no-cache; Remove-DanglingImages; docker compose $composeProfile up -d }
+        "full"      { docker compose $composeProfile --profile scheduler up -d }
         "scheduler" { docker compose --profile scheduler up -d scheduler }
         "logs"      { docker compose logs -f }
-        default     { docker compose up -d }
+        default     { docker compose $composeProfile up -d }
     }
     if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
 
@@ -125,7 +144,7 @@ function Start-Microservice {
 }
 
 if ($Service -eq "all") {
-    foreach ($svc in $ServicePaths.Keys) { Start-Microservice -Name $svc -RunMode $Mode }
+    foreach ($svc in $ServiceOrder) { Start-Microservice -Name $svc -RunMode $Mode }
 } else {
     Start-Microservice -Name $Service -RunMode $Mode
 }

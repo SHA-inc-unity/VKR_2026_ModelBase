@@ -1,4 +1,5 @@
 using System.Text;
+using AccountService.API.Kafka;
 using AccountService.Application.Common.Settings;
 using AccountService.Application.Interfaces.Cache;
 using AccountService.Application.Interfaces.Repositories;
@@ -27,6 +28,11 @@ public static class ServiceCollectionExtensions
         // Settings
         services.Configure<JwtSettings>(config.GetSection(JwtSettings.SectionName));
         services.Configure<PasswordSettings>(config.GetSection(PasswordSettings.SectionName));
+        services.Configure<KafkaSettings>(config.GetSection(KafkaSettings.SectionName));
+
+        // Kafka
+        services.AddSingleton<KafkaProducer>();
+        services.AddHostedService<KafkaConsumerService>();
 
         // Database
         services.AddDbContext<AccountDbContext>(opt =>

@@ -1,0 +1,33 @@
+# microservice_admin — standalone docker-compose.
+#
+# TypeScript / Next.js 14 admin panel.
+# IPC: Kafka only. Requires `microservice_infra` running (provides Redpanda
+# and the shared `modelline_net`).
+#
+# Run:
+#   cd microservice_admin
+#   docker compose up -d --build
+#   → http://localhost:8501
+
+services:
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
+      REDPANDA_ADMIN_URL: ${REDPANDA_ADMIN_URL:-redpanda:9644}
+      MINIO_URL: ${MINIO_URL:-minio:9000}
+      ACCOUNT_URL: ${ACCOUNT_URL:-account_service_api:5000}
+      GATEWAY_URL: ${GATEWAY_URL:-exchange-gateway:5020}
+      NODE_ENV: production
+    ports:
+      - "${ADMIN_PORT:-8501}:3000"
+    networks:
+      - modelline_net
+
+networks:
+  modelline_net:
+    name: modelline_net
+    external: true

@@ -1,29 +1,46 @@
-# ModelLine
+# microservice_analitic
 
-CatBoost-модель для прогнозирования доходности криптовалютных инструментов.  
-Данные хранятся в PostgreSQL, интерфейс — Streamlit, REST API — FastAPI.
+**Роль:** ML-сервис платформы ModelLine. Обучение CatBoost-моделей прогнозирования доходности и REST API (FastAPI).
+
+> **Архитектура:** Сервис работает только внутри контейнеров. Данные получает от `microservice_data` через Kafka (`cmd.data.dataset.*`). Команды управления обучением принимает через `cmd.analytics.*`. Прямого подключения к PostgreSQL нет — БД принадлежит `microservice_data`. UI: `microservice_admin` (Next.js).
+
+### Kafka-обработчики (`cmd.analytics.*`)
+
+`backend/data_client.py` поднимает `KafkaClient` сервиса `analitic` и подписывается на:
+
+- `cmd.analytics.health` — liveness (обрабатывает `_handle_health`).
+- `cmd.analytics.model.list` — список версий моделей. `_handle_model_list`
+  вызывает `backend.model.report.load_registry(models_dir=MODELS_DIR, limit=1000)`
+  и возвращает `{"models": [...]}` для `microservice_admin` (дашборд читает
+  `response.models.length`).
+
+`data_client.get_coverage(table)` возвращает `{rows, min_ts_ms, max_ts_ms}` либо
+`None` — парсит ответ `cmd.data.dataset.coverage` на верхнем уровне
+(`exists`/`rows`/`min_ts_ms`/`max_ts_ms`) без вложенного ключа `coverage`.
+
+**Активный стек (Docker):** FastAPI `:8000`, Redis (опционально `:6379`). Сеть: `modelline_net` (внешняя, создаётся `microservice_infra`).
 
 ---
 
 ## Архитектура
 
 ```text
-┌─────────────────────────────────────────────────────────┐
-│                     Docker Compose                       │
-│                                                         │
-│  postgres:5432  ←──┐                                    │
-│  redis:6379     ←──┼──  api:8000   (FastAPI REST)       │
-│                    ├──  streamlit:8501  (UI)             │
-│                    └──  scheduler  (переобучение по cron)│
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     Docker Compose                            │
+│                                                              │
+│  redis:6379  ←──┐                                            │
+│                 ├──  api:8000      (FastAPI REST)             │
+│                 └──  scheduler     (переобучение по cron)     │
+│                                                              │
+│  microservice_data ──Kafka──▶ data_client (внутри api/sched) │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-| Сервис     | Адрес                  | Описание                            |
-|------------|------------------------|-------------------------------------|
-| Streamlit  | `localhost:8501`       | Web-UI: данные, обучение, сравнение |
-| REST API   | `localhost:8000`       | FastAPI + Swagger `/docs`           |
-| PostgreSQL | `localhost:5432`       | Хранение рыночных данных            |
-| Redis      | `localhost:6379`       | KV-store настроек (fallback SQLite) |
+| Сервис             | Адрес            | Описание                            |
+|--------------------|------------------|-------------------------------------|
+| REST API           | `localhost:8000` | FastAPI + Swagger `/docs`           |
+| Redis              | `localhost:6379` | KV-store настроек (fallback SQLite) |
+| microservice_data  | Kafka (внутри)   | Источник данных (PostgreSQL, Bybit) |
 
 ---
 
@@ -36,11 +53,10 @@ CatBoost-модель для прогнозирования доходности
 
 ### 1. Настройка окружения
 
-Скопируйте `.env.example` в `.env` и укажите пароль PostgreSQL:
+Скопируйте `.env.example` в `.env` и при необходимости задайте `KAFKA_BOOTSTRAP_SERVERS`:
 
 ```bash
 cp .env.example .env
-# Откройте .env и заполните PGPASSWORD
 ```
 
 Скрипты запуска создадут `.env` автоматически при первом старте, если файла нет.
@@ -60,7 +76,7 @@ chmod +x microservicestarter/start.sh microservicestarter/stop.sh microservicest
 .\microservicestarter\start.ps1
 ```
 
-После запуска откройте в браузере: **`http://localhost:8501`**
+После запуска откройте в браузере: **`http://localhost:8501`** (microservice_admin)
 
 ### 3. Остановка
 
@@ -85,7 +101,6 @@ chmod +x microservicestarter/start.sh microservicestarter/stop.sh microservicest
 ```bash
 ./microservicestarter/restart.sh          # пересобрать и перезапустить core
 ./microservicestarter/restart.sh api      # только API
-./microservicestarter/restart.sh streamlit  # только Streamlit
 ```
 
 **Windows (PowerShell):**
@@ -93,7 +108,6 @@ chmod +x microservicestarter/start.sh microservicestarter/stop.sh microservicest
 ```powershell
 .\microservicestarter\restart.ps1           # пересобрать и перезапустить core
 .\microservicestarter\restart.ps1 api       # только API
-.\microservicestarter\restart.ps1 streamlit # только Streamlit
 ```
 
 ---
@@ -106,7 +120,7 @@ chmod +x microservicestarter/start.sh microservicestarter/stop.sh microservicest
 
 | Аргумент    | Что запускает                                   |
 |-------------|-------------------------------------------------|
-| *(нет)*     | Core: postgres + redis + api + streamlit        |
+| *(нет)*     | Core: postgres + redis + api                    |
 | `full`      | Core + scheduler (переобучение по расписанию)   |
 | `scheduler` | Только scheduler (core уже должен быть запущен) |
 | `build`     | Пересборка образов + запуск core                |
@@ -119,7 +133,7 @@ chmod +x microservicestarter/start.sh microservicestarter/stop.sh microservicest
 | *(нет)*     | Пересобрать код и перезапустить core                              | ~5 с     |
 | `full`      | Пересобрать код и перезапустить core + scheduler                  | ~5 с     |
 | `api`       | Пересобрать и перезапустить только API                            | ~3 с     |
-| `streamlit` | Пересобрать и перезапустить только Streamlit                      | ~3 с     |
+
 | `deps`      | Пересобрать базовый образ (при изменении `requirements.txt`)      | ~2 мин   |
 
 > **Как работает кеш:** зависимости Python хранятся в базовом образе `modelline-base`.
@@ -185,63 +199,17 @@ curl -X POST http://localhost:8000/retrain \
 
 ---
 
-## Запуск без Docker (локальная разработка)
-
-### Зависимости Python
-
-- Python 3.11+
-- PostgreSQL доступен
-
-```bash
-python -m venv .venv
-
-# Linux / macOS
-source .venv/bin/activate
-
-# Windows
-.\.venv\Scripts\Activate.ps1
-
-pip install -r requirements.txt
-```
-
-### Запуск Streamlit UI
-
-```bash
-streamlit run frontend/app.py
-```
-
-### Запуск FastAPI
-
-```bash
-python -m backend.api.run
-# или
-uvicorn backend.api.app:app --host 0.0.0.0 --port 8000 --reload
-```
-
-### Запуск Scheduler
-
-```bash
-# Задайте SCHEDULER_JOBS в .env, затем:
-python -m backend.scheduler
-```
-
----
-
 ## Переменные окружения
 
 Все параметры задаются в `.env` (скопируйте из `.env.example`):
 
-| Переменная           | По умолчанию               | Описание                           |
-|----------------------|----------------------------|------------------------------------|
-| `PGHOST`             | `localhost`                | Хост PostgreSQL                    |
-| `PGPORT`             | `5432`                     | Порт PostgreSQL                    |
-| `PGDATABASE`         | `crypt_date`               | Имя базы данных                    |
-| `PGUSER`             | `postgres`                 | Пользователь PostgreSQL            |
-| `PGPASSWORD`         | —                          | Пароль PostgreSQL (**обязателен**) |
-| `REDIS_URL`          | `redis://localhost:6379/0` | URL Redis                          |
-| `API_PORT`           | `8000`                     | Порт FastAPI                       |
-| `SCHEDULER_JOBS`     | `[]`                       | JSON-список заданий scheduler      |
-| `SCHEDULER_TIMEZONE` | `UTC`                      | Временная зона для cron            |
+| Переменная                | По умолчанию               | Описание                                        |
+|---------------------------|----------------------------|-------------------------------------------------|
+| `KAFKA_BOOTSTRAP_SERVERS` | `redpanda:29092`           | Kafka (Redpanda) — источник данных              |
+| `REDIS_URL`               | `redis://localhost:6379/0` | URL Redis                                       |
+| `API_PORT`                | `8000`                     | Порт FastAPI                                    |
+| `SCHEDULER_JOBS`          | `[]`                       | JSON-список заданий scheduler                   |
+| `SCHEDULER_TIMEZONE`      | `UTC`                      | Временная зона для cron                         |
 
 ---
 
@@ -254,10 +222,6 @@ ModelLine/
 │   ├── dataset/        # Загрузка и обработка рыночных данных
 │   ├── model/          # CatBoost: обучение, метрики, реестр, кеш
 │   └── scheduler.py    # APScheduler — переобучение по расписанию
-├── frontend/
-│   ├── app.py          # Главная страница Streamlit
-│   ├── pages/          # download_page, model_page, compare_page
-│   └── services/       # trainer, store, db_auth, colors, charts
 ├── microservicestarter/
 │   ├── start.sh        # Запуск (Linux/macOS)
 │   ├── stop.sh         # Остановка (Linux/macOS)
@@ -265,11 +229,9 @@ ModelLine/
 │   ├── start.ps1       # Запуск (Windows PowerShell)
 │   ├── stop.ps1        # Остановка (Windows PowerShell)
 │   └── restart.ps1     # Перезапуск после изменений кода (Windows PowerShell)
-├── scripts/            # Утилиты: build_dataset.py, train_catboost.py
 ├── tests/              # pytest — 234 теста
 ├── docker-compose.yml
 ├── Dockerfile.api
-├── Dockerfile.streamlit
 ├── requirements.txt
 └── .env.example
 ```
@@ -283,13 +245,8 @@ ModelLine/
 docker compose ps
 
 # Логи конкретного сервиса
-docker compose logs -f streamlit
 docker compose logs -f api
-
-# Перезапустить один сервис
-docker compose restart streamlit
 
 # Зайти в контейнер
 docker compose exec api bash
-docker compose exec postgres psql -U postgres -d crypt_date
 ```

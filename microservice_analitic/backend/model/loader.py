@@ -178,3 +178,75 @@ def _validate_features(df: pd.DataFrame, feature_cols: list[str]) -> list[str]:
         log(f"[loader] WARN: {len(warn_high_nan)} признаков с NaN > 30%: {preview}{more}")
 
     return kept
+
+
+def load_training_data_from_rows(
+    rows: list[dict],
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_rows: int = 200,
+    target_col: str | None = None,
+) -> tuple[pd.DataFrame, pd.Series, list[str], pd.Series]:
+    """Загружает обучающие данные из предварительно полученных строк (data_client.get_rows()).
+
+    Принимает list[dict] (результат Kafka-запроса к microservice_data) и возвращает
+    тот же кортеж (X, y, feature_cols, timestamps), что и load_training_data().
+
+    Используется scheduler._run_retrain() и api.trigger_retrain() в Docker-среде,
+    где прямое подключение к PostgreSQL недоступно.
+    """
+    target = target_col or TARGET_COLUMN
+
+    if not rows:
+        raise ValueError("Пустой список строк — нет данных для обучения.")
+
+    df = pd.DataFrame(rows)
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+    df = df.sort_values("timestamp_utc").reset_index(drop=True)
+
+    if date_from:
+        df = df[df["timestamp_utc"] >= pd.Timestamp(date_from, tz="UTC")]
+    if date_to:
+        df = df[df["timestamp_utc"] <= pd.Timestamp(date_to, tz="UTC")]
+    df = df.reset_index(drop=True)
+
+    log(
+        f"[loader] Загружено {len(df)} строк из Kafka-ответа, "
+        f"столбцов: {len(df.columns)}, target={target!r}"
+    )
+
+    if target not in df.columns:
+        raise ValueError(
+            f"Колонка-цель {target!r} отсутствует в полученных данных. "
+            f"Доступные target-колонки: "
+            f"{[c for c in df.columns if c.startswith(TARGET_COLUMN_PREFIX)]}"
+        )
+
+    excluded = META_COLUMNS | {
+        c for c in df.columns if c.startswith(TARGET_COLUMN_PREFIX)
+    }
+    feature_cols = [
+        col for col in df.columns
+        if col not in excluded
+        and pd.api.types.is_numeric_dtype(df[col])
+    ]
+
+    before = len(df)
+    df = df.dropna(subset=[target]).reset_index(drop=True)
+    log(f"[loader] Удалено {before - len(df)} строк с NaN в {target!r}")
+
+    if len(df) < min_rows:
+        raise ValueError(
+            f"Недостаточно данных: {len(df)} строк после удаления NaN "
+            f"(минимум {min_rows})."
+        )
+
+    feature_cols = _validate_features(df, feature_cols)
+
+    X = df[feature_cols].copy()
+    y = df[target].copy()
+    timestamps = df["timestamp_utc"].copy()
+
+    log(f"[loader] X: {X.shape}, y: {y.shape}, признаков: {len(feature_cols)}")
+    return X, y, feature_cols, timestamps

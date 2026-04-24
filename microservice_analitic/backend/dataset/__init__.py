@@ -62,6 +62,8 @@ from .database import (
     upsert_rows,
     validate_database,
 )
+from .dataset_cache import DatasetCache, CacheKey, dataset_cache
+from .export import export_dataset_csv
 from .features import build_features, get_feature_columns, prepare_for_catboost
 from .pipeline import (
     align_asof,
@@ -75,11 +77,14 @@ from .pipeline import (
     print_summary,
     rebuild_rsi,
     rebuild_rsi_and_upsert_rows,
+    rebuild_rsi_and_upsert_rows_sql,
     validate_rows,
 )
 
 __all__ = [
     "BYBIT_BASE_URL",
+    "CacheKey",
+    "DatasetCache",
     "DATASET_COLUMN_NAMES",
     "DB_HOST",
     "DB_NAME",
@@ -114,6 +119,7 @@ __all__ = [
     "create_market_table",
     "ensure_dataset_schema",
     "ensure_table",
+    "export_dataset_csv",
     "fetch_db_rows",
     "fetch_db_rows_raw",
     "fetch_db_timestamps",
@@ -141,9 +147,11 @@ __all__ = [
     "read_table_schema",
     "rebuild_rsi",
     "rebuild_rsi_and_upsert_rows",
+    "rebuild_rsi_and_upsert_rows_sql",
     "table_exists",
     "upsert_dataframe",
     "upsert_rows",
     "validate_database",
     "validate_rows",
+    "dataset_cache",
 ]

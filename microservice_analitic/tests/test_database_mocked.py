@@ -199,6 +199,8 @@ def test_find_missing_timestamps_sql_returns_missing():
     step_ms = 3_600_000
     start_ms = 1_704_067_200_000
     missing_ms = start_ms + step_ms
+    # Fast-path COUNT(*) returns less than expected_count (3) → fallback to generate_series.
+    cursor.fetchone.return_value = (2,)
     cursor.fetchall.return_value = [(missing_ms,)]
     result = find_missing_timestamps_sql(conn, "btcusdt_60m", start_ms, start_ms + 2 * step_ms, step_ms)
     assert missing_ms in result
@@ -207,9 +209,21 @@ def test_find_missing_timestamps_sql_returns_missing():
 
 def test_find_missing_timestamps_sql_returns_empty_when_full():
     conn, cursor = _make_conn()
+    # expected_count = (3_600_000 - 0) // 3_600_000 + 1 = 2; COUNT==2 ⇒ fast-path returns [].
+    cursor.fetchone.return_value = (2,)
     cursor.fetchall.return_value = []
     result = find_missing_timestamps_sql(conn, "btcusdt_60m", 0, 3_600_000, 3_600_000)
     assert result == []
+
+
+def test_find_missing_timestamps_sql_fastpath_skips_generate_series():
+    """COUNT(*) == expected_count must short-circuit (no fetchall call)."""
+    conn, cursor = _make_conn()
+    cursor.fetchone.return_value = (2,)
+    cursor.fetchall.return_value = [(12345,)]  # if called, would pollute result
+    result = find_missing_timestamps_sql(conn, "btcusdt_60m", 0, 3_600_000, 3_600_000)
+    assert result == []
+    cursor.fetchall.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -239,3 +253,56 @@ def test_upsert_rows_inserts_and_updates(mock_sql):
     assert isinstance(inserted, int)
     assert isinstance(updated, int)
     assert conn.commit.called
+
+
+# ---------------------------------------------------------------------------
+# Round 2 Fix A: no-op UPDATE skipping via IS DISTINCT FROM
+# ---------------------------------------------------------------------------
+
+def test_upsert_rows_skips_noop_updates_when_fetchall_is_short():
+    """Когда merge возвращает меньше строк чем прислано — это skipped no-op UPDATEs.
+
+    WHERE (m.*) IS DISTINCT FROM (EXCLUDED.*) в merge_stmt заставляет PostgreSQL
+    пропустить запись строк с идентичными значениями. RETURNING возвращает
+    только реально записанные строки, поэтому `skipped = total - len(flags)`.
+    Функция должна корректно трактовать такой результат: inserted+updated < total.
+    """
+    from backend.dataset.constants import DATASET_COLUMN_NAMES
+    with patch("backend.dataset.database.sql"):
+        conn, cursor = _make_conn()
+        # 3 rows sent, но merge вернул только 1 (остальные skipped как no-op)
+        cursor.fetchall.return_value = [(False,)]  # единственная реально обновлённая
+
+        ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        row = {col: None for col in DATASET_COLUMN_NAMES}
+        row["timestamp_utc"] = ts
+        row["index_price"] = 40000.0
+        row["symbol"] = "BTCUSDT"
+        row["exchange"] = "bybit"
+        row["timeframe"] = "60m"
+
+        inserted, updated = upsert_rows(conn, "btcusdt_60m", [row, row, row])
+        # 3 sent → 1 returned → 2 skipped (no-op, values identical)
+        assert inserted == 0
+        assert updated == 1
+        assert conn.commit.called
+
+
+def test_upsert_rows_merge_stmt_contains_is_distinct_from():
+    """SQL merge_stmt должен содержать WHERE ... IS DISTINCT FROM ... — Fix A.
+
+    Иначе no-op UPDATEs не будут пропускаться, и при загрузке на уже
+    заполненной БД PostgreSQL будет переписывать миллионы строк с идентичными
+    значениями (что мы и наблюдали: updated=3.86M при inserted=595k).
+    """
+    import inspect
+    from backend.dataset import database
+    src_rows = inspect.getsource(database.upsert_rows)
+    src_df = inspect.getsource(database.upsert_dataframe)
+    for src, name in ((src_rows, "upsert_rows"), (src_df, "upsert_dataframe")):
+        assert "IS DISTINCT FROM" in src, (
+            f"{name}: merge_stmt must include 'IS DISTINCT FROM' to skip no-op UPDATEs"
+        )
+        assert "AS m" in src, (
+            f"{name}: merge_stmt must alias target table for row-comparison"
+        )

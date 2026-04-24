@@ -25,7 +25,7 @@ from .config import (
     expand_param_grid,
     timeframe_to_ms,
 )
-from .loader import list_target_candidates, load_training_data
+from .loader import list_target_candidates, load_training_data, load_training_data_from_rows
 from .mlflow_utils import log_session_to_mlflow, mlflow_available
 from .pdf_report import generate_session_pdf, generate_session_pdf_bytes
 from .metrics import compute_direction_metrics, compute_metrics, compute_trading_metrics

@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
-import psycopg2
 
 from .api import (
     fetch_funding_rates,
@@ -15,7 +14,6 @@ from .api import (
     fetch_open_interest,
 )
 from .timelog import now, tlog
-from .constants import DB_HOST, DB_NAME, DB_PORT
 from .core import (
     ceil_to_step,
     choose_open_interest_interval,
@@ -292,7 +290,6 @@ def has_persisted_rsi(rows: list[dict], period: int) -> bool:
 
 
 def rebuild_rsi_and_upsert_rows(
-    connection: psycopg2.extensions.connection,
     table_name: str,
     rows: list[dict],
     period: int,
@@ -317,7 +314,14 @@ def rebuild_rsi_and_upsert_rows(
     summary = validate_rows(rows, period)
     if add_features:
         t_feat = now()
-        features_frame = pd.DataFrame(rows)
+        # Колоночное построение DataFrame ~2-3× быстрее pd.DataFrame(list-of-dicts)
+        # и не требует инференса схемы по всем 3M строкам.
+        _raw_cols = ("timestamp_utc", "symbol", "exchange", "timeframe",
+                     "index_price", "funding_rate", "open_interest", "rsi")
+        features_frame = pd.DataFrame({c: [r[c] for r in rows] for c in _raw_cols})
+        # rows больше не нужен — освобождаем ~1.5 ГБ (3M dicts × ~500 байт)
+        # ДО запуска тяжёлого build_features, чтобы GC мог их забрать.
+        rows.clear()
         features_frame["timestamp_utc"] = pd.to_datetime(features_frame["timestamp_utc"], utc=True)
         features_frame = build_features(features_frame, add_target=True, warmup_candles=0)
         if write_start_ms is not None:
@@ -329,16 +333,65 @@ def rebuild_rsi_and_upsert_rows(
         tlog.info("rebuild_rsi_and_upsert | features done rows=%d elapsed=%.3fs", len(features_frame), now() - t_feat)
         t_db = now()
         # DataFrame → COPY напрямую: C-level to_csv избегает to_dict + per-row цикла
-        inserted, updated = upsert_dataframe(connection, table_name, features_frame, on_batch=on_upsert_batch)
+        inserted, updated = upsert_dataframe(table_name, features_frame, on_batch=on_upsert_batch)
+        # Явно освобождаем features_frame (~1.26 ГБ для 3M × 50 float64) до возврата.
+        del features_frame
     else:
         if write_start_ms is not None:
             _write_start_dt = ms_to_datetime(write_start_ms)
             rows = [r for r in rows if r["timestamp_utc"] >= _write_start_dt]
         t_db = now()
-        inserted, updated = upsert_rows(connection, table_name, rows, on_batch=on_upsert_batch)
+        inserted, updated = upsert_rows(table_name, rows, on_batch=on_upsert_batch)
     tlog.info(
         "rebuild_rsi_and_upsert | upsert done inserted=%d updated=%d db_elapsed=%.3fs total_elapsed=%.3fs",
         inserted, updated, now() - t_db, now() - t0,
+    )
+    return summary, inserted, updated
+
+
+def rebuild_rsi_and_upsert_rows_sql(
+    table_name: str,
+    rows: list[dict],
+    period: int,
+    timeframe: str,
+    warmup_start_ms: int,
+    write_start_ms: int,
+    on_upsert_batch=None,
+) -> tuple[dict, int, int]:
+    """SQL-first вариант `rebuild_rsi_and_upsert_rows` (Round 3).
+
+    Путь:
+      1. `rebuild_rsi` в Python — для узкого окна (после Fix B — маленький объём).
+      2. `upsert_with_sql_features` — COPY raw + один SQL с window-функциями
+         для всех 42 feature-колонок + merge с IS DISTINCT FROM.
+
+    Python **не** материализует feature-DataFrame, что экономит ~1.26 ГБ RAM
+    для больших батчей. Feature-вычисления выполняет PostgreSQL на своей стороне.
+
+    Семантика feature-формул совпадает с `build_features`
+    (см. `backend.dataset.features_sql`).
+    """
+    from .pipeline_sql import upsert_with_sql_features
+
+    t0 = now()
+    tlog.info(
+        "rebuild_rsi_and_upsert_sql | START table=%s rows=%d tf=%s "
+        "warmup_start=%s write_start=%s",
+        table_name, len(rows), timeframe, warmup_start_ms, write_start_ms,
+    )
+    rebuild_rsi(rows, period)
+    summary = validate_rows(rows, period)
+    inserted, updated = upsert_with_sql_features(
+        table_name=table_name,
+        raw_rows=rows,
+        warmup_start_ms=warmup_start_ms,
+        write_start_ms=write_start_ms,
+        timeframe=timeframe,
+        on_upsert_batch=on_upsert_batch,
+    )
+    tlog.info(
+        "rebuild_rsi_and_upsert_sql | DONE table=%s inserted=%d updated=%d total=%.3fs",
+        table_name, inserted, updated, now() - t0,
     )
     return summary, inserted, updated
 
@@ -355,122 +408,45 @@ def print_summary(summary: dict, missing_ranges: list[tuple[int, int]], table_na
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    """Создает минимальный CLI для демо-скрипта."""
-    parser = argparse.ArgumentParser(description="Build a Bybit demo dataset and store it in PostgreSQL.")
+    """Создает CLI для запуска ingestion через microservice_data."""
+    parser = argparse.ArgumentParser(description="Trigger Bybit dataset ingestion via microservice_data (Kafka).")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--timeframe", default="60m")
     parser.add_argument("--category", default="linear", choices=["linear", "inverse"])
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
-    parser.add_argument("--postgres-user", default=os.getenv("PGUSER"))
-    parser.add_argument("--postgres-password", default=os.getenv("PGPASSWORD"))
     parser.add_argument("--rsi-period", type=int, default=14)
     parser.add_argument(
         "--skip-features",
         action="store_true",
-        help="Не вычислять признаки после загрузки данных.",
+        help="Ignored (features are computed by microservice_data).",
     )
     return parser
 
 
 def main() -> int:
-    """Запускает полный demo-поток от Bybit до PostgreSQL."""
+    """Triggers data ingestion via microservice_data (Kafka).
+
+    Delegates fetching from Bybit and storing in PostgreSQL to microservice_data
+    through the cmd.data.dataset.ingest Kafka topic.  The heavy lifting
+    (RSI, features, upsert) is no longer done in this service.
+    """
     parser = build_argument_parser()
     args = parser.parse_args()
-    if not args.postgres_user:
-        parser.error("--postgres-user is required unless PGUSER is set")
-    if args.postgres_password is None:
-        parser.error("--postgres-password is required unless PGPASSWORD is set")
 
     symbol = args.symbol.upper().strip()
-    timeframe, bybit_interval, step_ms = normalize_timeframe(args.timeframe)
+    timeframe, _bybit_interval, step_ms = normalize_timeframe(args.timeframe)
     start_ms, end_ms = normalize_window(
         parse_timestamp_to_ms(args.start),
         parse_timestamp_to_ms(args.end),
         step_ms,
     )
-    launch_time_ms, funding_lookback_ms = fetch_instrument_details(args.category, symbol)
-    if launch_time_ms:
-        start_ms = max(start_ms, ceil_to_step(launch_time_ms, step_ms))
-        if start_ms > end_ms:
-            raise RuntimeError("Requested range is before the instrument launch time")
 
-    table_name = make_table_name(symbol, timeframe)
-    open_interest_interval = choose_open_interest_interval(step_ms)
+    from backend import data_client
 
-    try:
-        connection = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=args.postgres_user,
-            password=args.postgres_password,
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to connect to PostgreSQL database {DB_NAME} on {DB_HOST}:{DB_PORT}: {exc}"
-        ) from exc
+    log(f"Triggering ingestion via microservice_data: {symbol} {timeframe} "
+        f"{ms_to_datetime(start_ms).isoformat()} → {ms_to_datetime(end_ms).isoformat()}")
+    result = data_client.ingest(symbol, timeframe, start_ms, end_ms)
+    log(f"Ingestion result: {result}")
+    return 0
 
-    try:
-        validate_database(connection, table_name)
-
-        # SQL generate_series находит пропуски целиком на стороне PG —
-        # для полностью загруженного датасета никаких строк по сети не передаётся.
-        missing_requested = find_missing_timestamps_sql(connection, table_name, start_ms, end_ms, step_ms)
-        if not missing_requested:
-            log("No missing intervals found. Refreshing RSI seed window.")
-
-        refresh_start = max(ceil_to_step(launch_time_ms, step_ms), start_ms - args.rsi_period * step_ms)
-        combined_rows = fetch_db_rows_raw(connection, table_name, refresh_start, end_ms)
-        if not missing_requested:
-            persisted_rows = [combined_rows[timestamp] for timestamp in sorted(combined_rows)]
-            if has_persisted_rsi(persisted_rows, args.rsi_period):
-                log("No missing intervals found. RSI loaded from PostgreSQL.")
-                return 0
-            log("No missing intervals found. Computing and saving missing RSI.")
-
-        missing_refresh = find_missing_timestamps(set(combined_rows), refresh_start, end_ms, step_ms)
-        missing_ranges = group_missing_ranges(missing_refresh, step_ms)
-
-        for range_start, range_end in missing_ranges:
-            combined_rows.update(
-                fetch_range_rows(
-                    args.category,
-                    symbol,
-                    timeframe,
-                    bybit_interval,
-                    range_start,
-                    range_end,
-                    funding_lookback_ms,
-                    open_interest_interval,
-                )
-            )
-
-        ordered_timestamps = list(range(refresh_start, end_ms + step_ms, step_ms))
-        still_missing = [timestamp for timestamp in ordered_timestamps if timestamp not in combined_rows]
-        if still_missing:
-            raise RuntimeError(
-                f"Bybit did not return full coverage for {len(still_missing)} timestamps starting at "
-                f"{ms_to_datetime(still_missing[0]).isoformat()}"
-            )
-
-        rows_to_write = [combined_rows[timestamp] for timestamp in ordered_timestamps]
-        summary, inserted, updated = rebuild_rsi_and_upsert_rows(
-            connection,
-            table_name,
-            rows_to_write,
-            args.rsi_period,
-            add_features=not args.skip_features,
-            write_start_ms=start_ms,
-        )
-        print_summary(summary, missing_ranges, table_name)
-        log(f"Inserted rows: {inserted}")
-        log(f"Updated rows: {updated}")
-        if not args.skip_features:
-            log("Признаки сохранены в основные столбцы таблицы датасета.")
-        return 0
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()

@@ -10,7 +10,6 @@
 #   ./restart.sh all                           — git pull + перезапустить все
 #   ./restart.sh microservice_analitic full    — core + scheduler
 #   ./restart.sh microservice_analitic api     — только api-контейнер
-#   ./restart.sh microservice_analitic streamlit — только streamlit-контейнер
 #   ./restart.sh microservice_analitic deps    — пересобрать base + перезапустить
 # =============================================================================
 
@@ -69,10 +68,9 @@ restart_service() {
     local base_tag="${name}-base:latest"
     local compose_content
     compose_content=$(cat "$svc_dir/docker-compose.yml" 2>/dev/null || true)
-    local has_base=0 has_api=0 has_streamlit=0
+    local has_base=0 has_api=0
     echo "$compose_content" | grep -qE '^  base\s*:'      && has_base=1      || true
     echo "$compose_content" | grep -qE '^  api\s*:'       && has_api=1       || true
-    echo "$compose_content" | grep -qE '^  streamlit\s*:' && has_streamlit=1 || true
 
     local base_found=0
     if [[ $has_base -eq 1 ]] && docker image inspect "$base_tag" >/dev/null 2>&1; then
@@ -102,23 +100,18 @@ restart_service() {
             fi
             success "[$name] api перезапущен."
             ;;
-        streamlit)
-            if [[ $has_streamlit -eq 1 ]]; then
-                docker compose build streamlit
-                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
-                docker compose up -d --no-deps streamlit
-            else
-                docker compose build
-                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
-                docker compose up -d
-            fi
-            success "[$name] streamlit перезапущен."
-            ;;
+
         full)
             if [[ $has_base -eq 1 && $base_found -eq 0 ]]; then
                 docker compose --profile build-base build base
                 docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
             fi
+            if [[ $has_api -eq 1 ]]; then
+                docker compose build api
+            else
+                docker compose build
+            fi
+            docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
             docker compose --profile scheduler up -d
             ;;
         core|"")
@@ -127,8 +120,8 @@ restart_service() {
                 docker compose --profile build-base build base
                 docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
             fi
-            if [[ $has_api -eq 1 && $has_streamlit -eq 1 ]]; then
-                docker compose build api streamlit
+            if [[ $has_api -eq 1 ]]; then
+                docker compose build api
             else
                 docker compose build
             fi

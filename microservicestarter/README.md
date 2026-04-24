@@ -33,3 +33,17 @@
 ```
 
 Подробная документация и таблица режимов — в корневом [README.md](../README.md).
+
+## Режимы restart.ps1
+
+| Режим | Команда | Поведение |
+|-------|---------|-----------|
+| `core` (default) | `.\restart.ps1` | `docker compose up -d --build` — атомарная сборка + запуск |
+| `api` | `.\restart.ps1 api` | `docker compose up -d --no-deps --build api` — только api-сервис |
+| `full` | `.\restart.ps1 full` | `docker compose --profile scheduler up -d --build` — со scheduler |
+| `deps` | `.\restart.ps1 deps` | двухшаговый: сначала `build --no-cache base`, затем `up -d` |
+| `postgres` | `.\restart.ps1 postgres` | перезапуск postgres |
+| `redis` | `.\restart.ps1 redis` | перезапуск redis |
+
+> **Примечание:** в режимах `core`, `api`, `full` используется атомарная команда `up --build`.
+> Отдельный вызов `docker compose build` применяется только в режиме `deps` (для пересборки base-образа без кэша).

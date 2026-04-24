@@ -1,15 +1,15 @@
 using System.Text;
 using GatewayService.API.Aggregators.Bootstrap;
-using GatewayService.API.Middleware;
 using GatewayService.API.Aggregators.Dashboard;
+using GatewayService.API.Middleware;
 using GatewayService.API.Clients.Account;
 using GatewayService.API.Clients.Market;
 using GatewayService.API.Clients.News;
 using GatewayService.API.Clients.Notifications;
 using GatewayService.API.Clients.Portfolio;
+using GatewayService.API.Kafka;
 using GatewayService.API.Settings;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.Extensions.Http.Resilience;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
@@ -30,16 +30,15 @@ public static class ServiceCollectionExtensions
             configuration.GetSection(FeatureFlagsSettings.SectionName));
         services.Configure<ResilienceSettings>(
             configuration.GetSection(ResilienceSettings.SectionName));
+        services.Configure<KafkaSettings>(
+            configuration.GetSection(KafkaSettings.SectionName));
 
-        var downstream = configuration
-            .GetSection(DownstreamServicesSettings.SectionName)
-            .Get<DownstreamServicesSettings>() ?? new();
+        // Kafka request/reply — singleton + hosted service for the consume loop
+        services.AddSingleton<KafkaRequestClient>();
+        services.AddHostedService(sp => sp.GetRequiredService<KafkaRequestClient>());
 
-        // Typed HTTP clients with resilience pipelines
-        services
-            .AddHttpClient<IAccountServiceClient, AccountServiceClient>(c =>
-                ConfigureBase(c, downstream.Account.BaseUrl))
-            .AddStandardResilienceHandler(opt => ConfigureResilience(opt, configuration));
+        // Account client — Kafka-backed (no HttpClient)
+        services.AddScoped<IAccountServiceClient, AccountServiceClient>();
 
         // Stub clients — no HttpClient needed (no real HTTP calls yet)
         services.AddTransient<IPortfolioServiceClient, PortfolioServiceClient>();
@@ -129,22 +128,4 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
-
-    private static void ConfigureBase(HttpClient client, string baseUrl)
-    {
-        if (!string.IsNullOrEmpty(baseUrl))
-            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + '/');
-    }
-
-    private static void ConfigureResilience(HttpStandardResilienceOptions opt, IConfiguration configuration)
-    {
-        var s = configuration.GetSection(ResilienceSettings.SectionName).Get<ResilienceSettings>() ?? new();
-
-        opt.Retry.MaxRetryAttempts = s.RetryCount;
-        opt.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(s.TimeoutSeconds * (s.RetryCount + 1));
-        opt.AttemptTimeout.Timeout = TimeSpan.FromSeconds(s.TimeoutSeconds);
-        opt.CircuitBreaker.MinimumThroughput = s.CircuitBreakerFailureThreshold;
-        opt.CircuitBreaker.BreakDuration = TimeSpan.FromSeconds(s.CircuitBreakerDurationSeconds);
-    }
 }

@@ -37,22 +37,22 @@ public sealed class DashboardAggregator : IDashboardAggregator
         var degraded = new List<string>();
 
         PortfolioSummaryDto? portfolio = null;
-        var portfolioResult = portfolioTask.Result;
+        var portfolioResult = await portfolioTask;
         if (portfolioResult.IsSuccess) portfolio = portfolioResult.Value;
         else { degraded.Add("portfolio"); Log("portfolio", portfolioResult.Error); }
 
         MarketOverviewDto? marketOverview = null;
-        var marketResult = marketTask.Result;
+        var marketResult = await marketTask;
         if (marketResult.IsSuccess) marketOverview = marketResult.Value;
         else { degraded.Add("market"); Log("market", marketResult.Error); }
 
         IReadOnlyList<TrendingAssetDto> trending = [];
-        var trendingResult = trendingTask.Result;
+        var trendingResult = await trendingTask;
         if (trendingResult.IsSuccess) trending = trendingResult.Value ?? [];
         // trending doesn't mark the whole market as degraded if overview also failed (already added)
 
         IReadOnlyList<NewsTeaserDto> newsTeasers = [];
-        var newsResult = newsTask.Result;
+        var newsResult = await newsTask;
         if (newsResult.IsSuccess && newsResult.Value is { } newsItems)
         {
             newsTeasers = newsItems

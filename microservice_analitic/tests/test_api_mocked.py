@@ -125,13 +125,17 @@ def test_fetch_instrument_details_success():
 
 
 def test_fetch_instrument_details_not_found_raises():
+    # Clear lru_cache: previous tests may have cached ("linear", "BTCUSDT").
+    fetch_instrument_details.cache_clear()
     payload = {"retCode": 0, "result": {"list": []}}
     with patch("backend.dataset.api.api_get_json", return_value=payload):
         with pytest.raises(RuntimeError, match="Instrument not found"):
             fetch_instrument_details("linear", "BTCUSDT")
+    fetch_instrument_details.cache_clear()
 
 
 def test_fetch_instrument_details_zero_funding_uses_default():
+    fetch_instrument_details.cache_clear()
     payload = {
         "retCode": 0,
         "result": {"list": [{"launchTime": "0", "fundingInterval": 0}]},
@@ -139,6 +143,7 @@ def test_fetch_instrument_details_zero_funding_uses_default():
     with patch("backend.dataset.api.api_get_json", return_value=payload):
         _, funding_ms = fetch_instrument_details("linear", "BTCUSDT")
     assert funding_ms == 28_800_000  # default
+    fetch_instrument_details.cache_clear()
 
 
 # ---------------------------------------------------------------------------

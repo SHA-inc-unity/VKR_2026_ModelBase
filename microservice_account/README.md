@@ -2,6 +2,10 @@
 
 Microservice for authentication and user management. ASP.NET Core 8, Clean Architecture, PostgreSQL, JWT.
 
+Inter-service IPC is **Kafka-only** (Redpanda broker). The service exposes HTTP
+only for end-user traffic (login/register/refresh) and the `/health` liveness
+endpoint — other ModelLine services talk to it via `cmd.account.*` topics.
+
 ---
 
 ## Stack
@@ -15,6 +19,7 @@ Microservice for authentication and user management. ASP.NET Core 8, Clean Archi
 | Validation | FluentValidation 11 |
 | Docs | Swagger / OpenAPI |
 | Logging | Serilog → Console |
+| IPC | Kafka (Confluent.Kafka 2.*) — request/reply via `cmd.account.*` topics |
 | Cache (opt) | Redis — access token blacklist |
 | Tests | xUnit + Moq + FluentAssertions + Testcontainers |
 
@@ -28,7 +33,7 @@ microservice_account/
 │   ├── AccountService.Domain/        # Entities, Enums — no dependencies
 │   ├── AccountService.Application/   # DTOs, Interfaces, Services, Validators
 │   ├── AccountService.Infrastructure/# EF Core, Repositories, Cache
-│   └── AccountService.API/           # Controllers, Middleware, Program.cs
+│   └── AccountService.API/           # Controllers, Middleware, Program.cs, Kafka/
 ├── tests/
 │   ├── AccountService.UnitTests/
 │   ├── AccountService.IntegrationTests/  # Testcontainers PostgreSQL
@@ -67,6 +72,23 @@ microservice_account/
 | GET | `/internal/users/{id}` | Get user by ID |
 | GET | `/internal/users/by-email/{email}` | Get user by email |
 | GET | `/internal/users/{id}/roles` | Get user roles |
+
+### Kafka (inter-service IPC)
+
+Topics are consumed by `KafkaConsumerService` (GroupId `microservice_account`).
+Incoming envelope: `{ correlation_id, reply_to, payload }`. The reply is
+published to `reply_to` as `{ correlation_id, payload }`.
+
+| Topic | Payload | Reply |
+|-------|---------|-------|
+| `cmd.account.health`   | `{}` | `{ status: "ok", service: "microservice_account", version: "1.0.0" }` |
+| `cmd.account.get_user` | `{ user_id: Guid }` | `{ id, email, username, status, roles[], created_at }` or `{ error: "not_found" }` |
+
+Bootstrap: `Kafka__BootstrapServers` (env), default `redpanda:29092`. Registered
+in `ServiceCollectionExtensions.AddAccountServices`: `KafkaSettings` (config
+section `Kafka`), `KafkaProducer` (singleton), `KafkaConsumerService`
+(`AddHostedService`). Compose attaches the service to both `account_net` and
+the external `modelline_net` so it can reach Redpanda.
 
 ---
 

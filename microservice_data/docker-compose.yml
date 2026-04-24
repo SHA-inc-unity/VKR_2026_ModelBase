@@ -1,0 +1,70 @@
+# microservice_data — standalone docker-compose.
+#
+# Inter-service IPC is Kafka-only. This compose brings up Postgres (internal
+# to data) and the data service itself. The Kafka broker + MinIO are
+# provided by `microservice_infra` (shared network `modelline_net`).
+#
+# Prerequisite: `microservice_infra` up first (it creates `modelline_net`).
+#
+# Run:
+#   cd microservice_data
+#   docker compose up -d --build
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-crypt_date}
+      POSTGRES_USER: ${PGUSER:-postgres}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-postgres}
+    volumes:
+      - data_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres} -d ${PGDATABASE:-crypt_date}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # No ports exposed — postgres is reachable only inside data_internal_net.
+    networks:
+      - data_internal_net
+
+  data:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${PGDATABASE:-crypt_date}
+      PGUSER: ${PGUSER:-postgres}
+      PGPASSWORD: ${PGPASSWORD:-postgres}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-modelline_secret}
+      MINIO_BUCKET: modelline-blobs
+      ASPNETCORE_URLS: http://+:8100
+      ASPNETCORE_ENVIRONMENT: Production
+    ports:
+      - "${DATA_API_PORT:-8100}:8100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data_internal_net   # postgres access
+      - modelline_net       # Kafka + MinIO access
+
+volumes:
+  data_postgres_data:
+
+networks:
+  # Internal-only network: only postgres and data containers join it.
+  # No other service on modelline_net can reach postgres.
+  data_internal_net:
+    internal: true
+
+  modelline_net:
+    name: modelline_net
+    external: true

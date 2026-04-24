@@ -96,8 +96,20 @@ outputs/
 Thumbs.db
 desktop.ini
 
+# ── Node.js / Next.js ───────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+.npm/
+.yarn/
+.pnp.*
+
 # ── Misc ─────────────────────────────────────────────────────────────────────
 *.log
+*.log.[0-9]*
+logs/
 *.tmp
 *.tmp.*
 *.bak

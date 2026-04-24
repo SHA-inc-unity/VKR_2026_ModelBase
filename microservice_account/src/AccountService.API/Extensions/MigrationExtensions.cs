@@ -1,4 +1,3 @@
-using AccountService.Domain.Entities;
 using AccountService.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 

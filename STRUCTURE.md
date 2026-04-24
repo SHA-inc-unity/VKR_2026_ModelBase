@@ -2,6 +2,38 @@
 
 Полное описание всех микросервисов, файлов, модулей и классов.
 
+> **Детальная структура каждого сервиса** — в его собственном `STRUCTURE.md`.
+
+---
+
+## Архитектура платформы
+
+```
+                        ┌──────────────────────────────────────┐
+                        │         microservice_infra           │
+                        │  Redpanda (Kafka) :9092              │
+                        │  MinIO (S3)       :9000              │
+                        │  Nginx (proxy)    :80                │
+                        │  modelline_net (docker bridge)       │
+                        └──────────────┬───────────────────────┘
+                                       │ Kafka IPC only
+              ┌────────────────────────┼────────────────────────┐
+              │                        │                        │
+   ┌──────────▼──────────┐  ┌──────────▼──────────┐  ┌─────────▼─────────┐
+   │ microservice_data   │  │ microservice_analitic│  │ microservice_admin│
+   │ C#/.NET 8           │  │ Python 3.12          │  │ Next.js 14        │
+   │ PostgreSQL :5433    │  │ FastAPI :8000        │  │ React/TS :3000    │
+   │ Kafka consumer      │  │                      │  │ Admin UI :8501    │
+   └─────────────────────┘  └──────────────────────┘  └───────────────────┘
+
+   microservice_account (.NET 8, :5010)  ─── REST (JWT auth)
+   microservice_gateway (.NET 8, :5020)  ─── Mobile BFF (HTTP routing)
+
+   Nginx (в infra, :80): sha-trade.tech/admin → admin:3000
+```
+
+**Правило:** межсервисная коммуникация внутри ML-платформы — только Kafka. HTTP между сервисами запрещён. `account` и `gateway` — отдельный независимый стек (REST + JWT).
+
 ---
 
 ## Корень репозитория
@@ -9,12 +41,18 @@
 | Файл / Папка | Описание |
 |---|---|
 | `README.md` | Главный README — быстрый старт, команды, описание сервисов |
-| `STRUCTURE.md` | Этот файл — полная карта репозитория |
-| `.gitignore` | Правила Git для Python, .NET, Docker, IDE, OS и ML-артефактов |
+| `STRUCTURE.md` | Этот файл — карта репозитория и архитектура |
+| `.gitignore` | Git-правила: Python, .NET, Docker, IDE, OS, ML-артефакты |
 | `microservicestarter/` | Единый менеджер запуска всех сервисов |
-| `microservice_analitic/` | ML-сервис (Python) |
-| `microservice_account/` | Сервис аккаунтов (C#/.NET 8, Clean Architecture) |
+| `microservice_infra/` | Shared инфраструктура: Redpanda + MinIO |
+| `microservice_analitic/` | ML-сервис: обучение, прогнозы (Python) |
+| `microservice_data/` | Data-сервис: PostgreSQL + Kafka (C#/.NET 8) |
+| `microservice_admin/` | Admin UI: Next.js + Kafka (TypeScript) |
+| `microservice_account/` | Auth-сервис: JWT, аккаунты (C#/.NET 8) |
 | `microservice_gateway/` | Mobile BFF Gateway (C#/.NET 8) |
+| `shared/` | Общий Python-пакет `modelline_shared` (Kafka client, schemas) |
+
+---
 
 ---
 
@@ -27,7 +65,7 @@
 | `services.conf` | Реестр сервисов: `имя  относительный_путь` (по одному на строку) |
 | `start.ps1` / `start.sh` | Запуск сервисов. При первом запуске создаёт `.env` и запрашивает пароль PostgreSQL. Собирает base-образ если нужен. После сборки удаляет dangling-образы Docker. |
 | `stop.ps1` / `stop.sh` | Остановка контейнеров. Режимы: `stop` (default), `clean` (удалить volumes), `prune` (удалить образы). |
-| `restart.ps1` / `restart.sh` | `git pull` + пересборка + перезапуск. Режимы: `core`, `full`, `deps`, `api`, `streamlit`. После сборки удаляет dangling-образы. |
+| `restart.ps1` / `restart.sh` | `git pull` + пересборка + перезапуск. Режимы: `core`, `full`, `deps`, `api`. После сборки удаляет dangling-образы. |
 | `update.ps1` / `update.sh` | Только `git pull` без рестарта контейнеров. |
 | `status.ps1` / `status.sh` | Показывает `docker compose ps` для каждого сервиса. |
 
@@ -41,7 +79,6 @@
 | `build` | Пересборка без кеша + запуск |
 | `logs` | Live-логи (только `start`) |
 | `api` | Пересобрать и перезапустить только api-контейнер (только `restart`) |
-| `streamlit` | Пересобрать и перезапустить только streamlit (только `restart`) |
 | `deps` | Пересобрать base-образ + зависимые сервисы (только `restart`) |
 | `clean` | Остановить + удалить volumes — **СБРОС БД** (только `stop`) |
 | `prune` | Остановить + удалить образы сервиса (только `stop`) |
@@ -50,18 +87,17 @@
 
 ## microservice_analitic/
 
-**Стек:** Python 3.12, FastAPI, Streamlit, CatBoost, PostgreSQL, Redis (опционально)  
-**Порты:** API `8000`, Streamlit UI `8501`  
-**Docker:** multi-stage (`Dockerfile.base` → `Dockerfile.api` / `Dockerfile.streamlit`)
+**Стек:** Python 3.12, FastAPI, CatBoost, PostgreSQL, Redis (опционально). UI: microservice_admin (Next.js `:8501`)  
+**Порты:** API `8000`  
+**Docker:** multi-stage (`Dockerfile.base` → `Dockerfile.api`)
 
 ### Корень сервиса
 
 | Файл | Описание |
 |---|---|
-| `docker-compose.yml` | Определяет сервисы `base` (profile `build-base`), `api`, `streamlit`, `scheduler` (profile `scheduler`), `postgres`, `redis` (profile `with-redis`) |
+| `docker-compose.yml` | Определяет сервисы `base` (profile `build-base`), `api`, `scheduler` (profile `scheduler`), `postgres`, `redis` (profile `with-redis`) |
 | `Dockerfile.base` | Базовый образ Python с зависимостями (requirements.txt) |
 | `Dockerfile.api` | FastAPI-сервер; FROM base |
-| `Dockerfile.streamlit` | Streamlit UI; FROM base |
 | `.env.example` | Шаблон конфига: `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `API_HOST/PORT`, `SCHEDULER_*` |
 | `requirements.txt` | Python-зависимости |
 | `README.md` | Документация сервиса |
@@ -106,31 +142,9 @@
 | `scheduler.py` | `Scheduler`, `setup_scheduler()` | APScheduler-задачи: автообновление датасета, переобучение |
 | `utils.py` | `get_logger()`, `format_duration()`, … | Вспомогательные утилиты: логирование, форматирование |
 
-### frontend/
+### frontend/ (microservice_analitic)
 
-| Файл | Описание |
-|---|---|
-| `app.py` | Точка входа Streamlit: навигация, `st.navigation`, базовый layout |
-
-### frontend/pages/
-
-| Файл | Ключевые объекты | Описание |
-|---|---|---|
-| `model_page.py` | `render_model_page()` | Страница модели: обучение, прогноз, метрики, grid search |
-| `download_page.py` | `render_download_page()` | Страница данных: загрузка с Bybit, статус PostgreSQL |
-| `compare_page.py` | `render_compare_page()` | Страница сравнения нескольких моделей |
-
-### frontend/services/
-
-| Файл | Ключевые объекты | Описание |
-|---|---|---|
-| `trainer.py` | `TrainerService` | HTTP-клиент к FastAPI: обучение, прогноз, статус |
-| `db_auth.py` | `DbAuthService` | Подключение к PostgreSQL из Streamlit, проверка таблиц |
-| `charts.py` | `render_predictions_chart()`, `render_metrics_chart()` | Plotly-графики прогнозов и метрик |
-| `store.py` | `AppStore` | Глобальное Streamlit-состояние (session_state обёртка) |
-| `ui_components.py` | `render_db_status()`, `render_metric_card()`, … | Переиспользуемые UI-блоки |
-| `colors.py` | `PALETTE`, `theme_color()` | Цветовая палитра и тема |
-| `i18n.py` | `t()`, `STRINGS` | Локализация строк интерфейса |
+> UI переехал в `microservice_admin` (Next.js). Папка `frontend/` устарела и не используется.
 
 ### tests/ (microservice_analitic)
 
@@ -313,6 +327,54 @@
 
 ---
 
+## microservice_infra/
+
+**Роль:** Shared инфраструктура платформы. Поднимается первым, создаёт `modelline_net`.  
+**Детали:** [microservice_infra/STRUCTURE.md](microservice_infra/STRUCTURE.md)
+
+| Компонент | Порт (host) | Назначение |
+|-----------|------------|------------|
+| Redpanda | `9092` | Kafka-API broker. Внутри сети: `redpanda:29092` |
+| Redpanda Console | `8080` | Web UI топиков |
+| MinIO | `9000` | S3 claim-check хранилище |
+| MinIO Console | `9001` | Web UI MinIO |
+
+---
+
+## microservice_data/
+
+**Стек:** C#, .NET 8, ASP.NET Core, PostgreSQL 16, Kafka (Redpanda), MinIO  
+**Порт:** `8100`  
+**Детали:** [microservice_data/STRUCTURE.md](microservice_data/STRUCTURE.md)
+
+Единственный владелец рыночных данных. Все команды — через Kafka (`cmd.data.*`).
+
+---
+
+## microservice_admin/
+
+**Стек:** Next.js 14, React 18, TypeScript, Tailwind, kafkajs  
+**Порт:** `3000`  
+**Детали:** [microservice_admin/STRUCTURE.md](microservice_admin/STRUCTURE.md)
+
+Admin UI. Общается с `data` и `analytics` через Kafka (via server-side Route Handler proxy).
+
+---
+
+## shared/
+
+**Роль:** Общий Python-пакет `modelline_shared` для ML-сервисов.  
+**Детали:** [shared/STRUCTURE.md](shared/STRUCTURE.md)
+
+| Модуль | Описание |
+|--------|----------|
+| `modelline_shared.schemas` | Shared Pydantic схемы (`HealthResponse`) |
+| `modelline_shared.messaging.schemas` | `Envelope`, `HealthReply` |
+| `modelline_shared.messaging.topics` | Все Kafka-топики как константы |
+| `modelline_shared.messaging.client` | `KafkaClient` (aiokafka, request/reply) |
+
+---
+
 ## Схема взаимодействия сервисов
 
 ```
@@ -321,12 +383,18 @@
       ▼ :5020
 microservice_gateway  ──── JWT validation (local)
       │
-      ├──► http://host.docker.internal:5010  (microservice_account)
-      │         └── account-api (ASP.NET Core) → PostgreSQL
-      │
-      └──► (future) microservice_analitic :8000  (FastAPI ML API)
+      └──► http://host.docker.internal:5010  (microservice_account)
+                └── account-api (ASP.NET Core) → PostgreSQL
 
-microservice_analitic
-      ├── FastAPI :8000  ──► PostgreSQL (market data)
-      └── Streamlit :8501  ──► FastAPI :8000
+Admin UI (Next.js :3000)
+      │ POST /api/kafka (server-side proxy)
+      ▼
+   Redpanda (Kafka) ─────────────────────────────┐
+      │                                           │
+      ▼                                           ▼
+microservice_data (.NET :8100)      microservice_analitic (Python :8000/:8501)
+      └── PostgreSQL (market data)       └── CatBoost models
+              │                                   │
+              └─── MinIO (claim-check blobs) ─────┘
 ```
+

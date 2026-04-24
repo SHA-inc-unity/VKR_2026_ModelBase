@@ -51,7 +51,19 @@ _scheduler = None
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):  # noqa: ARG001
+    import asyncio
+
     global _scheduler
+
+    # Eagerly start the background Kafka client so incoming commands
+    # (e.g. cmd.analytics.health) are served before any outbound data
+    # request triggers the lazy _ensure_client() path.
+    try:
+        from backend import data_client as _dc
+        await asyncio.to_thread(_dc.start)
+    except Exception as exc:
+        _LOG.warning("[api] Kafka client не запущен при старте: %s", exc)
+
     auto_start = os.getenv("SCHEDULER_AUTOSTART", "false").lower() == "true"
     if auto_start:
         try:
@@ -87,6 +99,14 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
+    import asyncio
+    from backend import data_client as _dc
+    try:
+        ok = await asyncio.get_event_loop().run_in_executor(None, _dc.db_ping)
+    except Exception:
+        ok = False
+    if not ok:
+        return HealthResponse(status="degraded", version="1.0.0")
     return HealthResponse()
 
 
@@ -168,14 +188,12 @@ async def get_metrics(prefix: str) -> MetricsSummaryResponse:
 async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
     """Запускает переобучение модели в фоновом потоке.
 
-    Использует тот же механизм что и Streamlit UI (`frontend/services/trainer.py`),
-    но вызывается напрямую через REST.
     Возвращает немедленно; следите за статусом через /registry или /metrics.
     """
     try:
-        from backend.db import get_connection
+        from backend import data_client as _dc
         from backend.dataset.core import make_table_name
-        from backend.model import load_training_data
+        from backend.model import load_training_data_from_rows
         from backend.model.config import TRAIN_FRACTION
         from backend.model.report import load_grid_best_params
         from backend.model.config import DEFAULT_PARAM_VALUES
@@ -185,11 +203,13 @@ async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
         prefix    = f"catboost_{symbol.lower()}_{timeframe}"
         table_name = make_table_name(symbol, timeframe)
 
-        # Подключение к БД через единый пул (backend.db). Конфиг берётся из env.
-        with get_connection() as conn:
-            X, y, feature_cols, timestamps = load_training_data(
-                conn, table_name, target_col=req.target_col
-            )
+        # Загружаем данные через Kafka (microservice_data)
+        import time as _time
+        end_ms   = int(_time.time() * 1000) + 86_400_000  # now + 1 day buffer
+        rows = _dc.get_rows(table_name, 0, end_ms)
+        X, y, feature_cols, timestamps = load_training_data_from_rows(
+            rows, target_col=req.target_col
+        )
 
         if X is None or len(X) == 0:
             return RetrainResponse(

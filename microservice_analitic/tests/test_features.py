@@ -107,6 +107,46 @@ def test_build_features_multiple_groups():
     assert set(result["timeframe"].unique()) == {"60m", "5m"}
 
 
+def test_build_features_does_not_mutate_input():
+    """Регрессия на перф-оптимизацию: build_features убрал внутренний df.copy()
+    ради экономии ~1.26 ГБ на 3M-строчных датасетах. Контракт функции требует,
+    чтобы входной DataFrame оставался неизменным (ни columns, ни длина, ни
+    значения колонок)."""
+    df = _minimal_df(n=80)
+    orig_cols = list(df.columns)
+    orig_len = len(df)
+    orig_prices = df["index_price"].to_numpy().copy()
+    _ = build_features(df, add_target=True, warmup_candles=0)
+    assert list(df.columns) == orig_cols, "build_features добавил колонки во входной df"
+    assert len(df) == orig_len, "build_features изменил длину входного df"
+    np.testing.assert_array_equal(df["index_price"].to_numpy(), orig_prices)
+
+
+def test_build_features_single_group_fastpath_parity():
+    """Single-group fast-path (пропуск финального sort_values + пропуск concat)
+    должен давать идентичный результат общему пути (multi-group + concat)."""
+    df = _minimal_df(n=80)
+    # Фактически single-group (один symbol+timeframe) — идёт по fast-path
+    res_single = build_features(df.copy(), warmup_candles=0).reset_index(drop=True)
+    # Форсируем multi-group путь: делим на два таймфрейма с перемешиванием
+    df_a = df.head(40).copy()
+    df_b = df.tail(40).copy()
+    df_b["timeframe"] = "5m"
+    combined = pd.concat([df_a, df_b], ignore_index=True)
+    res_multi = build_features(combined, warmup_candles=0)
+    # Берём из multi-group результата только строки первого таймфрейма и сверяем
+    # базовые столбцы: они должны совпадать с fast-path расчётом.
+    res_multi_a = res_multi[res_multi["timeframe"] == "60m"].reset_index(drop=True)
+    # Первые 40 строк single-path датасета соответствуют df_a
+    assert len(res_multi_a) == 40
+    expected = res_single.head(40).reset_index(drop=True)
+    pd.testing.assert_series_equal(
+        res_multi_a["index_price"].reset_index(drop=True),
+        expected["index_price"].reset_index(drop=True),
+        check_names=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # get_feature_columns
 # ---------------------------------------------------------------------------

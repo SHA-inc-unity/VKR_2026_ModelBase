@@ -9,8 +9,8 @@
   <ItemGroup>
     <!-- Auth -->
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.*" />
-    <!-- HTTP Resilience (Polly v8 based) -->
-    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="8.*" />
+    <!-- Kafka -->
+    <PackageReference Include="Confluent.Kafka" Version="2.*" />
     <!-- Logging -->
     <PackageReference Include="Serilog.AspNetCore" Version="8.*" />
     <PackageReference Include="Serilog.Sinks.Console" Version="5.*" />
