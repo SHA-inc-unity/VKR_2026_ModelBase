@@ -61,7 +61,7 @@ def test_feature_select_without_target():
     fs = build_feature_select_clause(step_ms=3_600_000, add_target=False)
     assert "target_return_1" not in fs.column_names
     # всё остальное должно быть
-    assert "oi_to_funding" in fs.column_names
+    assert "oi_return_1" in fs.column_names
     assert "hour_sin" in fs.column_names
 
 
@@ -96,16 +96,13 @@ def test_feature_select_uses_nullif_for_divisions():
 
 def test_ffill_cte_uses_count_based_grouping():
     """PG14 не поддерживает IGNORE NULLS — используется COUNT-based grouping."""
-    assert "COUNT(funding_rate)" in str(FFILL_CTE_COLUMNS)
     assert "COUNT(open_interest)" in str(FFILL_CTE_COLUMNS)
-    assert "_funding_grp" in str(FFILL_CTE_COLUMNS)
     assert "_oi_grp" in str(FFILL_CTE_COLUMNS)
 
 
 def test_ffill_select_extracts_via_max_over_partition():
-    assert "MAX(funding_rate)" in str(FFILL_SELECT_COLUMNS)
-    assert "PARTITION BY _funding_grp" in str(FFILL_SELECT_COLUMNS)
-    assert "funding_ffill" in str(FFILL_SELECT_COLUMNS)
+    assert "MAX(open_interest)" in str(FFILL_SELECT_COLUMNS)
+    assert "PARTITION BY _oi_grp" in str(FFILL_SELECT_COLUMNS)
     assert "oi_ffill" in str(FFILL_SELECT_COLUMNS)
 
 

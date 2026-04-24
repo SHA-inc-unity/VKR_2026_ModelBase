@@ -2,11 +2,48 @@
 
 **Роль:** Admin UI платформы ModelLine. Next.js 14 (App Router). Коммуницирует с `microservice_data` и `microservice_analitic` **исключительно через Kafka** (Redpanda). Никакого прямого HTTP между application-сервисами.
 
-**Стек:** Next.js 14, React 18, TypeScript 5, Tailwind CSS 3, shadcn/ui, Radix UI, kafkajs, recharts  
+**Стек:** Next.js 14, React 18, TypeScript 5, Tailwind CSS 3, shadcn/ui, Radix UI, kafkajs, ioredis, recharts  
 **Конфиги:** `tailwind.config.js` + `postcss.config.js` (последний критичен — регистрирует `tailwindcss` и `autoprefixer` как PostCSS плагины, без него `@tailwind` директивы не обрабатываются)  
 **Порт:** `3000`  
 **Base path:** `/admin` — приложение обслуживается по пути `/admin` (настроено через `basePath` и `assetPrefix` в `next.config.js`). Nginx пробрасывает `sha-trade.tech/admin` → `admin:3000`. Статика `_next/static/*` тоже проксируется корректно. Next.js **не** применяет `basePath` автоматически к `fetch()` и `EventSource` — все клиентские обращения к API используют `process.env.NEXT_PUBLIC_BASE_PATH ?? ''` как префикс (`healthClient.ts`, `kafkaClient.ts`, `useEvents.ts`).
-**Зависимости:** `microservice_infra` (Redpanda broker)
+**Зависимости:** `microservice_infra` (Redpanda broker, Redis)
+
+## Redis Cache Layer
+
+Страницы кешируют результаты дорогих Kafka-запросов в Redis, чтобы UI мгновенно
+отображал предыдущие данные при перезагрузке страницы, не дожидаясь нового запроса.
+
+### Компоненты
+
+| Файл | Описание |
+|------|----------|
+| `src/lib/redisCache.ts` | **Server-only.** Singleton `ioredis` клиент (URL из `REDIS_URL`). Быстрые fast-fail параметры: `connectTimeout:2000`, `commandTimeout:1000`, `retryStrategy:()=>null`. Если Redis недоступен — ошибки поглощаются, fallback прозрачен. |
+| `src/lib/cacheClient.ts` | **Browser-safe.** Не импортирует ioredis. `cacheRead<T>(key)` и `cacheWrite(key, value, ttl)` общаются с `/api/cache` через `fetch`. |
+| `src/app/api/cache/route.ts` | Route Handler. GET `?key=X` → `{value}`. POST `{key,value,ttl?}` → `{ok:true}`. |
+
+### Переменная окружения
+
+| Переменная | Описание |
+|-----------|----------|
+| `REDIS_URL` | URL подключения к Redis. Пример: `redis://redis:6379`. Опциональна — отсутствие/недоступность Redis не вызывает ошибок. |
+
+### Ключи и TTL
+
+| Страница | Ключ | TTL | Что кешируется |
+|----------|------|-----|----------------|
+| Dashboard | `modelline:dashboard:v1` | 60 мин | `tables`, `coverage`, `modelCount` |
+| Anomaly | `modelline:anomaly:v1:{symbol}:{timeframe}` | 30 мин | `stats`, `coverage` |
+| Download | `modelline:dataset-tables:v1` | 60 мин | список таблиц (`DataTableInfo[]`) |
+| Download | `modelline:dataset-coverage:v1:{symbol}:{timeframe}` | 30 мин | coverage для одного TF |
+| Download | `modelline:dataset-allcoverage:v1:{symbol}` | 30 мин | coverage по всем TF (`AllCoverageItem[]`) |
+
+### Паттерн
+
+1. На маунте / смене параметров — `cacheRead` (если есть → мгновенно отображаем).
+2. Параллельно / следом — Kafka-запрос за свежими данными.
+3. После Kafka-ответа — `cacheWrite` fire-and-forget.
+
+Здоровье сервисов (health-чеки), гистограммы и browse-строки **не** кешируются.
 
 ## Архитектура запросов
 
@@ -77,13 +114,24 @@ request-reply) и `src/app/api/events/route.ts` (EVT_* топики для SSE).
 - `--accent: 217 33% 25%` — hover/accent фон
 - `--success: 142 71% 45%` / `--destructive: 0 84% 60%` / `--warning: 38 92% 50%`
 
-**Fluid typography (`--font-size-*`):** CSS custom properties с `clamp()`, минимум при 1280px, максимум при 2560px. Семь ступеней: `xs` / `sm` / `base` / `lg` / `xl` / `2xl` / `3xl`. Переопределяют Tailwind-утилиты `.text-*` через `@layer utilities` (более поздний source-order).
+**Fluid typography (`--font-size-*`):** CSS custom properties с `clamp()`, минимум при 360 px, максимум при 2560 px (Δ = 2200 px). Семь ступеней: `xs` / `sm` / `base` / `lg` / `xl` / `2xl` / `3xl`. Переопределяют Tailwind-утилиты `.text-*` через `@layer utilities` (более поздний source-order), поэтому на узких экранах (portrait/phone) текст автоматически сжимается, а на 4K — растягивается.
 
 **Шрифт:** Inter (загружен через `next/font/google`)
 
 **Брейкпоинты:**
 - Стандартные Tailwind: `sm` 640 px, `md` 768 px, `lg` 1024 px, `xl` 1280 px, `2xl` 1536 px
-- Кастомные: `3xl` 1920 px (Full HD), `4xl` 2560 px (4K)
+- Кастомные: `xs` 480 px (phone landscape / small portrait), `3xl` 1920 px (Full HD), `4xl` 2560 px (4K)
+
+**Адаптивный дизайн (20:9 → 9:20):**
+- **Root layout** (`src/app/layout.tsx`): `flex flex-col md:flex-row` — на `< md` сайдбар становится нижней навигацией (`order-last`), на `md+` возвращается слева. `<main>` имеет `pb-14 md:pb-5 lg:pb-6` чтобы контент не прятался под bottom-nav. Контент ограничен `max-w-[1920px]` только с `md:`, на узких — `max-w-full`.
+- **Sidebar** (`src/components/Sidebar.tsx`): три режима по `window.innerWidth`:
+  - `≥ 1024 px` — **expanded-collapsible**: full label `w-56` с toggle-кнопкой; свёрнутое состояние `w-14` (только иконки) сохраняется в `localStorage('sidebar:collapsed')`.
+  - `768 – 1023 px` — **icon-only**: всегда `w-14` (иконки + tooltip), toggle-кнопка скрыта, `localStorage` игнорируется.
+  - `< 768 px` — **bottom-nav**: горизонтальная полоса `h-14 border-t` снизу экрана, пункты flex-row, показывается только иконка с `aria-label` (текст скрыт для экономии места). Режим определяется в `useEffect` + `resize` listener.
+- **CSS variables**: `--sidebar-width` в `globals.css` — `0px` на мобилке, `3.5rem` с `md`, `14rem` с `lg`. Используется для страниц, которым нужно знать текущую ширину сайдбара.
+- **Fluid padding**: контейнеры страниц используют `gap-4 sm:gap-6`, `p-3 sm:p-4`, сетки — `grid-cols-1 xs:grid-cols-2 md:grid-cols-4`.
+- **Таблицы**: все `<Table>` обёрнуты в `<div className="overflow-x-auto">` чтобы на узких экранах появлялся горизонтальный скролл.
+- **Контролы**: на `< xs` Select/Button/Input растягиваются на всю ширину (`w-full xs:w-auto`, `min-w-0 flex-1 xs:min-w-[180px]`).
 
 **Анимации:**
 - `pulse-dot` — пульсирующая точка (`.status-dot-ok` класс) для Kafka-статуса
@@ -139,10 +187,10 @@ request-reply) и `src/app/api/events/route.ts` (EVT_* топики для SSE).
 | Страница | Описание |
 |----------|----------|
 | `/` (Dashboard) | Bento Grid: Row 1 — 4 StatCard с `border-l-4 border-l-{color}` акцентами (`grid-cols-2 xl:grid-cols-4`). Row 2 — 2 колонки: стек из 4 ServiceCard (2 application через Kafka: `data`, `analitic`; 2 infra через HTTP `/api/health`: `Redpanda`, `MinIO`) + `CoverageBar` (recharts BarChart horizontal). Row 3 — shadcn Table датасетов с `pct.toFixed(1)%`. Кнопка Refresh обновляет все карточки одновременно. |
-| `/download` | 2-колоночный layout (`lg:grid-cols-[380px,1fr]`): левая — Dataset Configuration (Select/Input/кнопки); правая — Coverage Card с `CoverageBar` (один бар) + 3 stat строки, появляется после Check Coverage. Ниже: Available Tables + Action History на всю ширину. Таймфрейм `ALL` поддерживается в `handleIngest` (sequential loop), `handleCheckCoverage` (parallel) и `handleDeleteRows` (sequential loop с confirm-диалогом). `handleDeleteRows` при `ALL`: confirm упоминает все таймфреймы, удаляет последовательно через `CMD_DATA_DATASET_DELETE_ROWS`, ошибка отдельного TF → info-toast, итог — success-toast с суммой строк и числом TF. |
+| `/download` | 2-колоночный layout (`lg:grid-cols-[380px,1fr]`): левая — Dataset Configuration (Select/Input/кнопки); правая — Coverage Card с `CoverageBar` (один бар) + 3 stat строки, появляется после Check Coverage. Ниже: Available Tables + Action History на всю ширину. Таймфрейм `ALL` поддерживается в `handleIngest` (**concurrent batches**, concurrency = 2: батчи по 2 TF, каждый батч `Promise.allSettled`, один TF ошибка не прерывает второй), `handleCheckCoverage` (parallel), `handleDeleteRows` (sequential loop с confirm-диалогом). **Export CSV**: `handleExportCsv` — синхронная функция, один `<a>.click()` в рамках пользовательского жеста (никаких `await` до клика — иначе Chromium блокирует программное скачивание). Для `timeframe !== 'ALL'` URL вида `${NEXT_PUBLIC_BASE_PATH}/api/export/csv?table=&start_ms=&end_ms=`, `a.download="${table}.csv"`; сервер отвечает 302 на MinIO presigned URL (DataService стримит `COPY TO STDOUT` прямо в MinIO). Для `timeframe === 'ALL'` URL вида `?symbol=&timeframe=ALL&start_ms=&end_ms=`, `a.download="${symbol}_ALL.zip"`; `src/app/api/export/csv/route.ts` разворачивает список из `TIMEFRAMES`, шлёт `{ tables, start_ms, end_ms }` (таймаут 300 с), получает `{ claim_check }` → `@aws-sdk/client-s3` `GetObjectCommand` → `Response(bytes)` с `Content-Type: application/zip`, `Content-Disposition: attachment; filename="${symbol}_ALL.zip"`. Старый цикл `for (const tf of TIMEFRAMES) a.click(); await sleep(300)` удалён — Chromium пропускал только первые 3–5 загрузок. `handleDeleteRows` при `ALL`: confirm упоминает все таймфреймы, удаляет последовательно через `CMD_DATA_DATASET_DELETE_ROWS`, ошибка отдельного TF → info-toast, итог — success-toast. **Redis cache**: список таблиц, coverage и allCoverages восстанавливаются из Redis при маунте / смене symbol+timeframe (ключи см. таблицу выше). |
 | `/train` | Кастомный tab-switcher в header (без Radix Tabs). 2-колоночный grid на `lg+`: левая — Config + Status Card с `ProgressLine` (recharts LineChart, показывается после ≥2 точек прогресса); правая — Training History table. `progressHistory` state сбрасывается при каждом новом запуске. |
 | `/compare` | CSS grid 2 колонки, shadcn Card в каждой, shadcn Select, Button экспорта |
-| `/anomaly` | Инспекция / очистка / обработка датасетов. 4 свёртываемых секции (Inspect / Anomalies / Clean / Process). Stage 1 (Inspect): df.info-таблица + lazy-гистограммы численных колонок. Anomalies/Clean/Process — «Coming soon» (см. roadmap). |
+| `/anomaly` | Инспекция / очистка / обработка датасетов. 5 свёртываемых секций (Inspect / Browse / Anomalies / Clean / Process). **Inspect**: df.info-таблица + lazy-гистограммы численных колонок. **Browse**: постраничный просмотр сырых строк (`cmd.data.dataset.browse`), clickable-заголовки числовых колонок → `BrowseAreaChart`. Anomalies/Clean/Process — «Coming soon». **Redis cache**: stats+coverage восстанавливаются при смене symbol/timeframe, сохраняются после Analyze. |
 
 ## Roadmap
 

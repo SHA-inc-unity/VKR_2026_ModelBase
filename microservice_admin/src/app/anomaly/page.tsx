@@ -1,6 +1,7 @@
 'use client';
 import dynamic from 'next/dynamic';
 import { Fragment, useEffect, useRef, useState } from 'react';
+import { cacheRead, cacheWrite } from '@/lib/cacheClient';
 import { Loader2, RefreshCw, ShieldAlert } from 'lucide-react';
 import { kafkaCall } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
@@ -23,7 +24,17 @@ const HistogramChart = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-[240px] w-full" /> },
 );
 
+const BrowseAreaChart = dynamic(
+  () => import('@/components/charts/BrowseAreaChart').then(m => m.BrowseAreaChart),
+  { ssr: false, loading: () => <Skeleton className="h-[220px] w-full" /> },
+);
+
 const PARAMS_KEY = 'modelline:params:anomaly';
+const ANOMALY_CACHE_TTL = 1800; // 30 minutes
+
+function anomalyCacheKey(symbol: string, timeframe: string): string {
+  return `modelline:anomaly:v1:${symbol}:${timeframe}`;
+}
 
 function loadParams() {
   if (typeof window === 'undefined') return null;
@@ -66,6 +77,15 @@ interface HistogramResponse {
   error?: string;
 }
 
+interface BrowseResponse {
+  table: string;
+  page: number;
+  page_size: number;
+  total_rows: number;
+  rows: Record<string, unknown>[];
+  error?: string;
+}
+
 // ── Numeric dtype detection (mirrors backend whitelist) ──────────────────────
 
 const NUMERIC_TYPES = new Set([
@@ -99,17 +119,58 @@ export default function AnomalyPage() {
   const [stats,    setStats]    = useState<ColumnStatsResponse | null>(null);
   const [coverage, setCoverage] = useState<TableCoverage | null>(null);
 
+  // Restore from cache when symbol or timeframe changes
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      // On first render, restore from cache for the initial symbol/timeframe
+    }
+    async function tryRestoreCache() {
+      const cached = await cacheRead<{ stats: ColumnStatsResponse; coverage: TableCoverage | null }>(
+        anomalyCacheKey(symbol, timeframe),
+      );
+      if (cached) {
+        setStats(cached.stats);
+        setCoverage(cached.coverage);
+      } else {
+        setStats(null);
+        setCoverage(null);
+      }
+    }
+    void tryRestoreCache();
+  }, [symbol, timeframe]);
+
   // Expanded column → histogram cache / loading state
   const [expandedCol,  setExpandedCol]  = useState<string | null>(null);
   const [histogram,    setHistogram]    = useState<HistogramResponse | null>(null);
   const [histogramFor, setHistogramFor] = useState<string | null>(null);
   const [loadingHist,  setLoadingHist]  = useState(false);
 
+  // ── Browse state ─────────────────────────────────────────────────────────
+  const [browsePage,      setBrowsePage]      = useState(0);
+  const [browsePageSize,  setBrowsePageSize]  = useState(50);
+  const [browseOrderDesc, setBrowseOrderDesc] = useState(true);
+  const [browseRows,      setBrowseRows]      = useState<Record<string, unknown>[] | null>(null);
+  const [browseTotalRows, setBrowseTotalRows] = useState<number | null>(null);
+  const [browseLoading,   setBrowseLoading]   = useState(false);
+  const [browseChartCol,  setBrowseChartCol]  = useState<string | null>(null);
+  const [browseChartData, setBrowseChartData] = useState<{ ts: number; val: number }[] | null>(null);
+  const [browseChartLoading, setBrowseChartLoading] = useState(false);
+  const [browseColumns,   setBrowseColumns]   = useState<string[]>([]);
+
   const handleAnalyze = async () => {
     setLoadingAnalyze(true);
     setExpandedCol(null);
     setHistogram(null);
     setHistogramFor(null);
+    // reset browse state when switching tables
+    setBrowseRows(null);
+    setBrowseTotalRows(null);
+    setBrowsePage(0);
+    setBrowseChartCol(null);
+    setBrowseChartData(null);
+    setBrowseColumns([]);
     try {
       const table = makeTableName(symbol, timeframe);
       const [statsRes, covRes] = await Promise.all([
@@ -119,6 +180,12 @@ export default function AnomalyPage() {
       if (statsRes.error) throw new Error(statsRes.error);
       setStats(statsRes);
       setCoverage(covRes);
+      // Save to cache (fire and forget)
+      void cacheWrite(
+        anomalyCacheKey(symbol, timeframe),
+        { stats: statsRes, coverage: covRes },
+        ANOMALY_CACHE_TTL,
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast(msg, 'error');
@@ -128,6 +195,76 @@ export default function AnomalyPage() {
       setLoadingAnalyze(false);
     }
   };
+
+  // ── Browse helpers ────────────────────────────────────────────────────────
+
+  const loadBrowse = async (page = browsePage, pageSize = browsePageSize, orderDesc = browseOrderDesc) => {
+    setBrowseLoading(true);
+    setBrowseChartCol(null);
+    setBrowseChartData(null);
+    try {
+      const table = makeTableName(symbol, timeframe);
+      const res = await kafkaCall<BrowseResponse>(
+        Topics.CMD_DATA_DATASET_BROWSE,
+        { table, page, page_size: pageSize, order: orderDesc ? 'desc' : 'asc' },
+      );
+      if (res.error) throw new Error(res.error);
+      setBrowseRows(res.rows);
+      setBrowseTotalRows(res.total_rows);
+      setBrowsePage(res.page);
+      if (res.rows.length > 0) {
+        const allKeys = Object.keys(res.rows[0]);
+        setBrowseColumns(allKeys);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast(msg, 'error');
+    } finally {
+      setBrowseLoading(false);
+    }
+  };
+
+  const loadColumnChart = async (colName: string) => {
+    if (browseChartCol === colName) {
+      setBrowseChartCol(null);
+      setBrowseChartData(null);
+      return;
+    }
+    setBrowseChartLoading(true);
+    setBrowseChartCol(colName);
+    setBrowseChartData(null);
+    try {
+      const table = makeTableName(symbol, timeframe);
+      // Fetch up to 500 rows ordered asc for time-series chart
+      const res = await kafkaCall<BrowseResponse>(
+        Topics.CMD_DATA_DATASET_BROWSE,
+        { table, page: 0, page_size: 500, order: 'asc' },
+      );
+      if (res.error) throw new Error(res.error);
+      const data = (res.rows as Record<string, unknown>[])
+        .map(row => {
+          const ts = row['timestamp_utc'];
+          const val = row[colName];
+          if (ts == null || val == null) return null;
+          const tsNum = typeof ts === 'number' ? ts : new Date(ts as string).getTime();
+          const valNum = typeof val === 'number' ? val : parseFloat(String(val));
+          if (isNaN(tsNum) || isNaN(valNum)) return null;
+          return { ts: tsNum, val: valNum };
+        })
+        .filter((x): x is { ts: number; val: number } => x !== null);
+      setBrowseChartData(data);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast(msg, 'error');
+      setBrowseChartCol(null);
+    } finally {
+      setBrowseChartLoading(false);
+    }
+  };
+
+  const browseTotalPages = browseTotalRows !== null && browsePageSize > 0
+    ? Math.ceil(browseTotalRows / browsePageSize)
+    : null;
 
   const handleToggleColumn = async (col: ColumnStat) => {
     if (!isNumeric(col.dtype)) return;
@@ -165,7 +302,7 @@ export default function AnomalyPage() {
   const dateTo   = formatDateFromMs(coverage?.max_ts_ms ?? null);
 
   return (
-    <div className="flex flex-col gap-6 w-full">
+    <div className="flex flex-col gap-4 sm:gap-6 w-full">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <ShieldAlert className="w-6 h-6 text-primary" />
@@ -176,22 +313,22 @@ export default function AnomalyPage() {
       {/* ── Top control bar ── */}
       <Card>
         <CardContent className="pt-5 pb-5">
-          <div className="flex flex-wrap items-end gap-4">
-            <div className="flex flex-col gap-1.5 min-w-[180px]">
+          <div className="flex flex-wrap items-end gap-3 sm:gap-4">
+            <div className="flex flex-col gap-1.5 w-full xs:w-auto min-w-0 flex-1 xs:flex-initial xs:min-w-[180px]">
               <label className="text-xs text-muted-foreground">Symbol</label>
               <Select value={symbol} onValueChange={setSymbol}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>{SYMBOLS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
               </Select>
             </div>
-            <div className="flex flex-col gap-1.5 min-w-[140px]">
+            <div className="flex flex-col gap-1.5 w-full xs:w-auto min-w-0 flex-1 xs:flex-initial xs:min-w-[140px]">
               <label className="text-xs text-muted-foreground">Timeframe</label>
               <Select value={timeframe} onValueChange={setTimeframe}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>{TIMEFRAMES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
               </Select>
             </div>
-            <Button onClick={handleAnalyze} disabled={loadingAnalyze} className="gap-2">
+            <Button onClick={handleAnalyze} disabled={loadingAnalyze} className="gap-2 w-full xs:w-auto">
               {loadingAnalyze ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
               Analyze
             </Button>
@@ -223,7 +360,7 @@ export default function AnomalyPage() {
           {stats && !loadingAnalyze && (
             <>
               {/* Summary bar */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 xs:grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
                 <div>
                   <p className="text-xs text-muted-foreground">Total Rows</p>
                   <p className="text-lg font-bold tabular-nums">{stats.total_rows.toLocaleString()}</p>
@@ -253,7 +390,7 @@ export default function AnomalyPage() {
               <Separator />
 
               {/* df.info()-style table */}
-              <div className="rounded-md border border-border overflow-hidden">
+              <div className="rounded-md border border-border overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -331,6 +468,184 @@ export default function AnomalyPage() {
                 </Table>
               </div>
             </>
+          )}
+        </div>
+      </Collapsible>
+
+      {/* ── Section: Browse ── */}
+      <Collapsible title="Browse">
+        <div className="p-4 space-y-4">
+          {/* Controls row */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs text-muted-foreground">Rows per page</label>
+              <Select
+                value={String(browsePageSize)}
+                onValueChange={v => { const n = parseInt(v, 10); setBrowsePageSize(n); }}
+              >
+                <SelectTrigger className="w-[110px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {[10, 25, 50, 100, 250, 500].map(n => (
+                    <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs text-muted-foreground">Order</label>
+              <Select
+                value={browseOrderDesc ? 'desc' : 'asc'}
+                onValueChange={v => setBrowseOrderDesc(v === 'desc')}
+              >
+                <SelectTrigger className="w-[110px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="desc">Newest first</SelectItem>
+                  <SelectItem value="asc">Oldest first</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              onClick={() => loadBrowse(0, browsePageSize, browseOrderDesc)}
+              disabled={browseLoading}
+              className="gap-2"
+            >
+              {browseLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+              Load
+            </Button>
+            {browseTotalRows !== null && (
+              <p className="text-xs text-muted-foreground ml-auto">
+                {browseTotalRows.toLocaleString()} rows total
+              </p>
+            )}
+          </div>
+
+          {/* Table */}
+          {browseRows && browseColumns.length > 0 && (
+            <>
+              <div className="rounded-md border border-border overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      {browseColumns.map(col => {
+                        const isActive = browseChartCol === col;
+                        // Detect if this is a numeric-ish column (not timestamp_utc)
+                        const sample = browseRows[0]?.[col];
+                        const isNum  = col !== 'timestamp_utc' && (typeof sample === 'number' || (typeof sample === 'string' && !isNaN(parseFloat(sample))));
+                        return (
+                          <TableHead
+                            key={col}
+                            className={cn(
+                              'text-xs whitespace-nowrap',
+                              isNum && 'cursor-pointer select-none',
+                              isActive && 'text-primary',
+                            )}
+                            onClick={() => isNum ? loadColumnChart(col) : undefined}
+                          >
+                            {col}
+                            {isNum && (
+                              <span className="ml-1 text-[10px] opacity-50">▲</span>
+                            )}
+                          </TableHead>
+                        );
+                      })}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {browseRows.map((row, i) => (
+                      <TableRow key={i}>
+                        {browseColumns.map(col => {
+                          const v = row[col];
+                          return (
+                            <TableCell key={col} className="text-xs font-mono whitespace-nowrap py-1.5">
+                              {v == null ? <span className="text-muted-foreground/40">null</span> : String(v)}
+                            </TableCell>
+                          );
+                        })}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Pagination controls */}
+              {browseTotalPages !== null && browseTotalPages > 1 && (
+                <div className="flex items-center gap-2 justify-center flex-wrap">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={browsePage === 0 || browseLoading}
+                    onClick={() => loadBrowse(0, browsePageSize, browseOrderDesc)}
+                  >
+                    «
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={browsePage === 0 || browseLoading}
+                    onClick={() => loadBrowse(browsePage - 1, browsePageSize, browseOrderDesc)}
+                  >
+                    ‹
+                  </Button>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    Page {browsePage + 1} / {browseTotalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={browsePage >= browseTotalPages - 1 || browseLoading}
+                    onClick={() => loadBrowse(browsePage + 1, browsePageSize, browseOrderDesc)}
+                  >
+                    ›
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={browsePage >= browseTotalPages - 1 || browseLoading}
+                    onClick={() => loadBrowse(browseTotalPages - 1, browsePageSize, browseOrderDesc)}
+                  >
+                    »
+                  </Button>
+                </div>
+              )}
+
+              {/* Column chart */}
+              {browseChartCol && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold">
+                      Time series — {browseChartCol}
+                      <span className="ml-2 text-[10px] text-muted-foreground">(first 500 rows, asc)</span>
+                    </p>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs"
+                      onClick={() => { setBrowseChartCol(null); setBrowseChartData(null); }}
+                    >
+                      ✕ Close
+                    </Button>
+                  </div>
+                  {browseChartLoading || !browseChartData ? (
+                    <Skeleton className="h-[220px] w-full" />
+                  ) : browseChartData.length > 0 ? (
+                    <BrowseAreaChart data={browseChartData} />
+                  ) : (
+                    <p className="text-xs text-muted-foreground">No plottable data.</p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {!browseRows && !browseLoading && (
+            <p className="text-sm text-muted-foreground">
+              Click <span className="font-semibold">Load</span> to fetch rows for the selected table.
+            </p>
+          )}
+          {browseLoading && (
+            <div className="space-y-2">
+              <Skeleton className="h-[300px] w-full" />
+            </div>
           )}
         </div>
       </Collapsible>

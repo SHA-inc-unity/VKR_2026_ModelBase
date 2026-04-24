@@ -54,14 +54,11 @@ public static class DatasetConstants
             ("1h", 3_600_000), ("4h", 14_400_000), ("1d", 86_400_000),
         };
 
-    public static readonly int[] LagSteps = { 1, 2, 3, 6, 12, 24 };
     public static readonly int[] RollingWindows = { 6, 24 };
     public static readonly int[] ReturnHorizons = { 1, 6, 24 };
-    public static readonly int[] FundingLagSteps = { 1, 2, 3 };
-    public static readonly int[] OiLagSteps = { 1, 2, 3 };
     public static readonly int[] RsiLagSteps = { 1, 2 };
 
-    /// <summary>Expected dataset table schema (column_name → SQL type).</summary>
+    /// <summary>Raw dataset schema (column_name → SQL type) — 13 columns written by ingest.</summary>
     public static readonly IReadOnlyList<(string Column, string SqlType)> RawTableSchema =
         new List<(string, string)>
         {
@@ -70,8 +67,55 @@ public static class DatasetConstants
             ("exchange", "character varying"),
             ("timeframe", "character varying"),
             ("index_price", "numeric"),
+            ("open_price",  "numeric"),
+            ("high_price",  "numeric"),
+            ("low_price",   "numeric"),
+            ("volume",      "numeric"),
+            ("turnover",    "numeric"),
             ("funding_rate", "numeric"),
             ("open_interest", "numeric"),
             ("rsi", "numeric"),
         };
+
+    /// <summary>Approved feature columns (27 cols) computed via SQL window functions
+    /// after ingest. All are nullable <c>double precision</c>.</summary>
+    public static readonly IReadOnlyList<(string Column, string SqlType)> FeatureTableSchema =
+        BuildFeatureTableSchema();
+
+    private static IReadOnlyList<(string Column, string SqlType)> BuildFeatureTableSchema()
+    {
+        var list = new List<(string, string)>();
+        foreach (var h in ReturnHorizons) list.Add(($"return_{h}", "double precision"));
+        foreach (var h in ReturnHorizons) list.Add(($"log_return_{h}", "double precision"));
+        foreach (var w in RollingWindows)
+        {
+            list.Add(($"price_roll{w}_mean", "double precision"));
+            list.Add(($"price_roll{w}_std",  "double precision"));
+            list.Add(($"price_roll{w}_min",  "double precision"));
+            list.Add(($"price_roll{w}_max",  "double precision"));
+        }
+        foreach (var w in RollingWindows) list.Add(($"price_to_roll{w}_mean", "double precision"));
+        foreach (var w in RollingWindows) list.Add(($"price_vol_{w}",         "double precision"));
+        foreach (var w in RollingWindows) list.Add(($"oi_roll{w}_mean",       "double precision"));
+        list.Add(("oi_return_1", "double precision"));
+        foreach (var k in RsiLagSteps) list.Add(($"rsi_lag_{k}", "double precision"));
+        list.Add(("hour_sin", "double precision"));
+        list.Add(("hour_cos", "double precision"));
+        list.Add(("dow_sin",  "double precision"));
+        list.Add(("dow_cos",  "double precision"));
+        // OHLCV-derived features
+        foreach (var w in RollingWindows) list.Add(($"atr_{w}",              "double precision"));
+        list.Add(("candle_body",      "double precision"));
+        list.Add(("upper_wick",       "double precision"));
+        list.Add(("lower_wick",       "double precision"));
+        foreach (var w in RollingWindows) list.Add(($"volume_roll{w}_mean", "double precision"));
+        foreach (var w in RollingWindows) list.Add(($"volume_to_roll{w}_mean", "double precision"));
+        list.Add(("volume_return_1",  "double precision"));
+        list.Add(("rsi_slope",        "double precision"));
+        return list;
+    }
+
+    /// <summary>Full dataset schema = raw + features (35 columns total).</summary>
+    public static readonly IReadOnlyList<(string Column, string SqlType)> FullTableSchema =
+        RawTableSchema.Concat(FeatureTableSchema).ToList();
 }

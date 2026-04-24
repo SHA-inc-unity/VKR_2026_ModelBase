@@ -6,6 +6,7 @@ import psycopg2
 from psycopg2 import sql
 
 from backend.dataset.core import log
+from backend.dataset.features import build_features
 
 from .config import META_COLUMNS, TARGET_COLUMN, TARGET_COLUMN_PREFIX
 
@@ -93,6 +94,11 @@ def load_training_data(
         f"[loader] Загружено {len(df)} строк из {table_name!r}, столбцов: {len(df.columns)}, "
         f"target={target!r}"
     )
+
+    # Fallback: если в таблице нет target — считаем признаки и цель на лету.
+    if target not in df.columns:
+        log("[loader] Фичи не найдены в данных — вычисляем на лету через build_features()")
+        df = build_features(df, add_target=True)
 
     if target not in df.columns:
         raise ValueError(
@@ -215,6 +221,13 @@ def load_training_data_from_rows(
         f"[loader] Загружено {len(df)} строк из Kafka-ответа, "
         f"столбцов: {len(df.columns)}, target={target!r}"
     )
+
+    # Fallback: если в полученных данных ещё нет feature-колонок (raw-only
+    # таблицы старого формата) или нет target — считаем признаки и цель
+    # на лету через backend.dataset.features.build_features.
+    if target not in df.columns:
+        log("[loader] Фичи не найдены в данных — вычисляем на лету через build_features()")
+        df = build_features(df, add_target=True)
 
     if target not in df.columns:
         raise ValueError(

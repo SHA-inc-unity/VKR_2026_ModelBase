@@ -26,12 +26,31 @@ const NAV = [
   { href: '/anomaly',  label: 'Anomaly',   icon: ShieldAlert },
 ] as const;
 
+type Mode = 'expanded-collapsible' | 'icon-only' | 'bottom-nav';
+
+function detectMode(): Mode {
+  if (typeof window === 'undefined') return 'expanded-collapsible';
+  const w = window.innerWidth;
+  if (w < 768) return 'bottom-nav';
+  if (w < 1024) return 'icon-only';
+  return 'expanded-collapsible';
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const [kafkaOk,   setKafkaOk]   = useState<boolean | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  const [mode, setMode] = useState<Mode>('expanded-collapsible');
 
-  // Restore sidebar state from localStorage (client-only)
+  // Reactive mode detection based on viewport width
+  useEffect(() => {
+    const update = () => setMode(detectMode());
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  // Restore collapsed state from localStorage — only relevant in mode A
   useEffect(() => {
     const stored = localStorage.getItem('modelline:sidebar:collapsed');
     if (stored !== null) setCollapsed(stored === 'true');
@@ -59,20 +78,53 @@ export function Sidebar() {
     return () => clearInterval(id);
   }, []);
 
+  // ── Mode C: bottom-nav (< md) ──────────────────────────────────────
+  if (mode === 'bottom-nav') {
+    return (
+      <aside className="order-last flex flex-row w-full h-14 bg-card border-t border-border flex-shrink-0">
+        <nav className="flex flex-row items-stretch justify-around w-full">
+          {NAV.map(({ href, label, icon: Icon }) => {
+            const active = pathname === href;
+            return (
+              <Link
+                key={href}
+                href={href}
+                title={label}
+                aria-label={label}
+                className={cn(
+                  'flex flex-1 flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors',
+                  active
+                    ? 'text-foreground bg-primary/10'
+                    : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                )}
+              >
+                <Icon className={cn('w-5 h-5', active ? 'text-primary' : '')} />
+              </Link>
+            );
+          })}
+        </nav>
+      </aside>
+    );
+  }
+
+  // ── Mode A (expanded/collapsible) or Mode B (icon-only) ────────────
+  const isIconOnly = mode === 'icon-only';
+  const effectiveCollapsed = isIconOnly ? true : collapsed;
+
   return (
     <aside className={cn(
       'flex flex-col flex-shrink-0 bg-card border-r border-border transition-all duration-200',
-      collapsed ? 'w-14' : 'w-56',
+      effectiveCollapsed ? 'w-14' : 'w-56',
     )}>
       {/* Brand */}
       <div className="flex items-center gap-3 px-3 h-14 border-b border-border">
         <div className="flex items-center justify-center w-7 h-7 rounded-md bg-primary flex-shrink-0">
           <Zap className="w-4 h-4 text-primary-foreground" />
         </div>
-        {!collapsed && (
+        {!effectiveCollapsed && (
           <span className="font-bold text-base tracking-tight truncate">ModelLine</span>
         )}
-        {!collapsed && (
+        {!effectiveCollapsed && (
           /* Kafka status pulse — only when expanded */
           <span
             className={cn(
@@ -86,17 +138,19 @@ export function Sidebar() {
             }
           />
         )}
-        {/* Collapse toggle */}
-        <button
-          onClick={toggleCollapsed}
-          className={cn(
-            'flex items-center justify-center w-6 h-6 rounded hover:bg-accent transition-colors flex-shrink-0 text-muted-foreground',
-            collapsed ? 'mx-auto' : 'ml-1',
-          )}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {collapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
-        </button>
+        {/* Collapse toggle — hidden in icon-only mode */}
+        {!isIconOnly && (
+          <button
+            onClick={toggleCollapsed}
+            className={cn(
+              'flex items-center justify-center w-6 h-6 rounded hover:bg-accent transition-colors flex-shrink-0 text-muted-foreground',
+              effectiveCollapsed ? 'mx-auto' : 'ml-1',
+            )}
+            title={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {effectiveCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
+          </button>
+        )}
       </div>
 
       {/* Navigation */}
@@ -107,30 +161,30 @@ export function Sidebar() {
             <Link
               key={href}
               href={href}
-              title={collapsed ? label : undefined}
+              title={effectiveCollapsed ? label : undefined}
               className={cn(
                 'flex items-center rounded-md text-sm font-medium transition-colors relative',
-                collapsed ? 'justify-center px-2 py-2' : 'gap-3 px-3 py-2 border-l-2 pl-[10px]',
+                effectiveCollapsed ? 'justify-center px-2 py-2' : 'gap-3 px-3 py-2 border-l-2 pl-[10px]',
                 active
-                  ? collapsed
+                  ? effectiveCollapsed
                     ? 'bg-primary/10 text-foreground'
                     : 'bg-primary/10 text-foreground border-primary'
-                  : collapsed
+                  : effectiveCollapsed
                     ? 'text-muted-foreground hover:bg-accent hover:text-foreground'
                     : 'text-muted-foreground hover:bg-accent hover:text-foreground border-transparent',
               )}
             >
               <Icon className={cn('w-4 h-4 flex-shrink-0', active ? 'text-primary' : '')} />
-              {!collapsed && label}
+              {!effectiveCollapsed && label}
             </Link>
           );
         })}
       </nav>
 
       {/* Footer */}
-      <div className={cn('p-3', collapsed ? 'flex justify-center' : '')}>
-        {!collapsed && <Separator className="mb-3" />}
-        {collapsed ? (
+      <div className={cn('p-3', effectiveCollapsed ? 'flex justify-center' : '')}>
+        {!effectiveCollapsed && <Separator className="mb-3" />}
+        {effectiveCollapsed ? (
           <div
             className={cn(
               'w-2 h-2 rounded-full',
@@ -161,5 +215,3 @@ export function Sidebar() {
     </aside>
   );
 }
-
-

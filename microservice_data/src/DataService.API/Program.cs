@@ -40,10 +40,16 @@ try
         cfg2["DataService:Kafka:BootstrapServers"] = kafka;
     if (Environment.GetEnvironmentVariable("MINIO_ENDPOINT") is { } minioEp)
         cfg2["DataService:Minio:Endpoint"] = minioEp;
+    if (Environment.GetEnvironmentVariable("MINIO_PUBLIC_URL") is { } minioPub)
+        cfg2["DataService:Minio:PublicUrl"] = minioPub;
     if (Environment.GetEnvironmentVariable("MINIO_ACCESS_KEY") is { } minioAk)
         cfg2["DataService:Minio:AccessKey"] = minioAk;
+    if (Environment.GetEnvironmentVariable("MINIO_ROOT_USER") is { } minioRu)
+        cfg2["DataService:Minio:AccessKey"] = minioRu;
     if (Environment.GetEnvironmentVariable("MINIO_SECRET_KEY") is { } minioSk)
         cfg2["DataService:Minio:SecretKey"] = minioSk;
+    if (Environment.GetEnvironmentVariable("MINIO_ROOT_PASSWORD") is { } minioRp)
+        cfg2["DataService:Minio:SecretKey"] = minioRp;
     if (Environment.GetEnvironmentVariable("MINIO_BUCKET") is { } minioBk)
         cfg2["DataService:Minio:Bucket"] = minioBk;
 

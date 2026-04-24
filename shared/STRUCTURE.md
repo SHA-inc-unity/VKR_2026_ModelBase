@@ -35,6 +35,7 @@
 | `CMD_DATA_DATASET_ROWS` | `cmd.data.dataset.rows` | req/reply |
 | `CMD_DATA_DATASET_EXPORT` | `cmd.data.dataset.export` | req/reply |
 | `CMD_DATA_DATASET_INGEST` | `cmd.data.dataset.ingest` | req/reply |
+| `CMD_DATA_DATASET_COMPUTE_FEATURES` | `cmd.data.dataset.compute_features` | req/reply |
 | `CMD_DATA_DATASET_NORMALIZE_TF` | `cmd.data.dataset.normalize_timeframe` | req/reply |
 | `CMD_DATA_DATASET_MAKE_TABLE` | `cmd.data.dataset.make_table_name` | req/reply |
 | `CMD_DATA_DATASET_INSTRUMENT` | `cmd.data.dataset.instrument_details` | req/reply |

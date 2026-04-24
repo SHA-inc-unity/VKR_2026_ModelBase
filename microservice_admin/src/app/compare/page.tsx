@@ -108,7 +108,7 @@ export default function TrainPage() {
     s === 'running'            ? 'info' : 'warning';
 
   return (
-    <div className="flex flex-col gap-6 w-full">
+    <div className="flex flex-col gap-4 sm:gap-6 w-full">
       <h1 className="text-2xl font-bold tracking-tight">Model Training</h1>
 
       <Tabs defaultValue="new">
@@ -203,6 +203,7 @@ export default function TrainPage() {
                   <p className="text-xs text-muted-foreground">Start a training session to see results here</p>
                 </div>
               ) : (
+                <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -229,6 +230,7 @@ export default function TrainPage() {
                     ))}
                   </TableBody>
                 </Table>
+                </div>
               )}
             </CardContent>
           </Card>

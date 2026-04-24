@@ -35,6 +35,11 @@ public sealed class KafkaSettings
 public sealed class MinioSettings
 {
     public string Endpoint { get; set; } = "http://minio:9000";
+    // Public hostname that browsers use to reach MinIO (presigned URL host rewrite).
+    // Internal Endpoint lives on the Docker network ("http://minio:9000"); browsers
+    // can't resolve that, so presigned URLs are rewritten to this base before being
+    // returned to the client.
+    public string PublicUrl { get; set; } = "http://localhost:9000";
     public string AccessKey { get; set; } = "modelline";
     public string SecretKey { get; set; } = "modelline_secret";
     public string Bucket { get; set; } = "modelline-blobs";

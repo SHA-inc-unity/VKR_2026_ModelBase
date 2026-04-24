@@ -38,18 +38,33 @@
 
     --radius:             0.625rem;
 
-    /* ── Fluid type scale: min @ 1280px → max @ 2560px ──────────────────
+    /* ── Fluid type scale: min @ 360px → max @ 2560px ───────────────────
        Formula: clamp(min, slope·vw + intercept, max)
-       slope    = (max_px - min_px) / 1280 * 100
-       intercept= min_px - slope * 12.8  (px → rem ÷ 16)
+       viewport range 360–2560 px (Δ = 2200 px)
+       slope_pct  = (max_px - min_px) / 2200 * 100
+       intercept  = (min_px - slope_pct/100 * 360) / 16  (→ rem)
     ─────────────────────────────────────────────────────────────────── */
-    --font-size-xs:   clamp(0.625rem,  0.23vw + 0.44rem,  0.8125rem);
-    --font-size-sm:   clamp(0.75rem,   0.23vw + 0.565rem, 0.9375rem);
-    --font-size-base: clamp(0.875rem,  0.31vw + 0.625rem, 1.125rem);
-    --font-size-lg:   clamp(1rem,      0.31vw + 0.75rem,  1.25rem);
-    --font-size-xl:   clamp(1.125rem,  0.47vw + 0.75rem,  1.5rem);
-    --font-size-2xl:  clamp(1.5rem,    0.94vw + 0.75rem,  2.25rem);
-    --font-size-3xl:  clamp(1.875rem,  1.41vw + 0.75rem,  3rem);
+    --font-size-xs:   clamp(0.625rem,  0.14vw + 0.594rem, 0.8125rem);
+    --font-size-sm:   clamp(0.75rem,   0.14vw + 0.719rem, 0.9375rem);
+    --font-size-base: clamp(0.875rem,  0.18vw + 0.834rem, 1.125rem);
+    --font-size-lg:   clamp(1rem,      0.18vw + 0.959rem, 1.25rem);
+    --font-size-xl:   clamp(1.125rem,  0.27vw + 1.064rem, 1.5rem);
+    --font-size-2xl:  clamp(1.5rem,    0.55vw + 1.377rem, 2.25rem);
+    --font-size-3xl:  clamp(1.875rem,  0.82vw + 1.691rem, 3rem);
+
+    /* ── Sidebar width (responsive) ──────────────────────────────────
+       Default (<md): 0 — sidebar becomes bottom nav (h-14), out of flow column.
+       >=md <lg: 3.5rem (w-14, icon-only).
+       >=lg:   3.5rem / 14rem depending on collapsed state (set by Sidebar).
+    ─────────────────────────────────────────────────────────────── */
+    --sidebar-width: 0px;
+  }
+
+  @media (min-width: 768px) {
+    :root { --sidebar-width: 3.5rem; } /* icon-only mode */
+  }
+  @media (min-width: 1024px) {
+    :root { --sidebar-width: 14rem; }  /* expanded by default; Sidebar may override to 3.5rem */
   }
 
   /* Force dark — this is a dark-only admin panel */

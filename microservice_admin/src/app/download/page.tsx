@@ -1,7 +1,8 @@
 'use client';
 import dynamic from 'next/dynamic';
-import { useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { CheckCircle2, Database, DownloadCloud, Loader2, RefreshCw, Trash2, UploadCloud, XCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { cacheRead, cacheWrite } from '@/lib/cacheClient';
+import { CheckCircle2, Database, Download, DownloadCloud, Loader2, RefreshCw, Trash2, XCircle } from 'lucide-react';
 import { kafkaCall, newCorrelationId } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
@@ -36,6 +37,15 @@ const CoverageBar = dynamic(
 );
 
 const PARAMS_KEY = 'modelline:params:dataset';
+const CACHE_TABLES_KEY         = 'modelline:dataset-tables:v1';
+const CACHE_TABLES_TTL         = 3600; // 60 minutes
+const CACHE_COVERAGE_TTL       = 1800; // 30 minutes
+function coverageCacheKey(symbol: string, timeframe: string) {
+  return `modelline:dataset-coverage:v1:${symbol}:${timeframe}`;
+}
+function allCoverageCacheKey(symbol: string) {
+  return `modelline:dataset-allcoverage:v1:${symbol}`;
+}
 
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 function daysAgoStr(n: number) {
@@ -72,12 +82,6 @@ interface AllCoverageItem {
 }
 
 type TfStatus = 'pending' | 'running' | 'done' | 'error';
-
-interface CsvProgress {
-  batch: number;
-  batches: number;
-  imported: number;
-}
 
 const INITIAL_STAGES: IngestStage[] = [
   { id: 'prepare',       label: 'Подготовка таблицы',    status: 'pending', progress: 0 },
@@ -198,6 +202,26 @@ export default function DatasetPage() {
     catch { /* ignore */ }
   }, [symbol, timeframe, dateFrom, dateTo]);
 
+  // On mount: restore tables from cache immediately
+  useEffect(() => {
+    void cacheRead<DataTableInfo[]>(CACHE_TABLES_KEY).then(cached => {
+      if (cached) setTables(cached);
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // On symbol/timeframe change: restore coverage from cache
+  useEffect(() => {
+    async function tryRestoreCache() {
+      const [cachedCov, cachedAll] = await Promise.all([
+        cacheRead<CoverageResult>(coverageCacheKey(symbol, timeframe)),
+        cacheRead<AllCoverageItem[]>(allCoverageCacheKey(symbol)),
+      ]);
+      setCoverage(cachedCov ?? null);
+      setAllCoverages(cachedAll ?? null);
+    }
+    void tryRestoreCache();
+  }, [symbol, timeframe]);
+
   const [tables,        setTables]        = useState<DataTableInfo[] | null>(null);
   const [coverage,      setCoverage]      = useState<CoverageResult | null>(null);
   const [loadingList,   setLoadingList]   = useState(false);
@@ -206,9 +230,6 @@ export default function DatasetPage() {
   const [loadingDelete, setLoadingDelete] = useState(false);
   const [allCoverages, setAllCoverages] = useState<AllCoverageItem[] | null>(null);
   const [allIngestStatuses, setAllIngestStatuses] = useState<Record<string, TfStatus> | null>(null);
-  const [loadingCsv, setLoadingCsv] = useState(false);
-  const [csvProgress, setCsvProgress] = useState<CsvProgress | null>(null);
-  const csvInputRef = useRef<HTMLInputElement>(null);
 
   // Ingest progress (staged, driven by EVT_DATA_INGEST_PROGRESS events).
   const [ingestStages, setIngestStages] = useState<IngestStage[] | null>(null);
@@ -267,6 +288,7 @@ export default function DatasetPage() {
         }),
       );
       setTables(infos);
+      void cacheWrite(CACHE_TABLES_KEY, infos, CACHE_TABLES_TTL);
       addEntry({ action: 'Check', params: { symbol, timeframe }, result: `${infos.length} tables`, durationMs: Date.now() - t0 });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -304,6 +326,7 @@ export default function DatasetPage() {
           }),
         );
         setAllCoverages(results);
+        void cacheWrite(allCoverageCacheKey(symbol), results, CACHE_COVERAGE_TTL);
         addEntry({ action: 'Check', params: { symbol, timeframe: 'ALL', dateFrom, dateTo }, result: `${results.length} timeframes`, durationMs: Date.now() - t0 });
       } else {
         setAllCoverages(null);
@@ -332,6 +355,7 @@ export default function DatasetPage() {
           gaps,
         };
         setCoverage(result);
+        void cacheWrite(coverageCacheKey(symbol, timeframe), result, CACHE_COVERAGE_TTL);
         addEntry({ action: 'Check', params: { symbol, timeframe, dateFrom, dateTo }, result: `${coveragePct.toFixed(1)}% coverage`, durationMs: Date.now() - t0 });
       }
     } catch (e) {
@@ -372,43 +396,64 @@ export default function DatasetPage() {
         let successes = 0;
         const startMs = new Date(dateFrom).getTime();
         const endMs   = new Date(dateTo + 'T23:59:59').getTime();
-        for (const tf of tfs) {
-          setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'running' }));
-          try {
-            const res = await kafkaCall<{ rows_ingested: number; message?: string }>(
-              Topics.CMD_DATA_DATASET_INGEST,
-              { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs },
-              { timeoutMs: 60_000 },
-            );
-            totalRows += res.rows_ingested ?? 0;
-            successes++;
-            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'done' }));
 
-            // Refresh just this row of the Coverage table.
-            try {
-              const table = makeTableName(symbol, tf);
-              const cv = await kafkaCall<TableCoverage>(
-                Topics.CMD_DATA_DATASET_COVERAGE,
-                { table },
-              );
-              const fresh = {
-                rows:         cv?.rows ?? 0,
-                coverage_pct: getCoveragePct(table, cv) ?? 0,
-                date_from:    formatDateFromMs(cv?.min_ts_ms),
-                date_to:      formatDateFromMs(cv?.max_ts_ms),
-              };
-              setAllCoverages(prev =>
-                prev?.map(r => (r.tf === tf ? { ...r, ...fresh } : r)) ?? null,
-              );
-            } catch {
-              // Non-fatal — leave skeleton row as-is.
+        const CONCURRENCY = 2;
+        for (let i = 0; i < tfs.length; i += CONCURRENCY) {
+          const batch = tfs.slice(i, i + CONCURRENCY);
+
+          // Mark every TF in this batch as running before launching.
+          setAllIngestStatuses(prev => {
+            const next = { ...(prev ?? {}) };
+            for (const tf of batch) next[tf] = 'running';
+            return next;
+          });
+
+          const results = await Promise.allSettled(
+            batch.map(tf =>
+              kafkaCall<{ rows_ingested: number; message?: string }>(
+                Topics.CMD_DATA_DATASET_INGEST,
+                { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs },
+                { timeoutMs: 60_000 },
+              ).then(async res => {
+                totalRows += res.rows_ingested ?? 0;
+                successes++;
+                setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'done' }));
+
+                // Refresh just this row of the Coverage table.
+                try {
+                  const table = makeTableName(symbol, tf);
+                  const cv = await kafkaCall<TableCoverage>(
+                    Topics.CMD_DATA_DATASET_COVERAGE,
+                    { table },
+                  );
+                  const fresh = {
+                    rows:         cv?.rows ?? 0,
+                    coverage_pct: getCoveragePct(table, cv) ?? 0,
+                    date_from:    formatDateFromMs(cv?.min_ts_ms),
+                    date_to:      formatDateFromMs(cv?.max_ts_ms),
+                  };
+                  setAllCoverages(prev =>
+                    prev?.map(r => (r.tf === tf ? { ...r, ...fresh } : r)) ?? null,
+                  );
+                } catch {
+                  // Non-fatal — leave skeleton row as-is.
+                }
+              }),
+            ),
+          );
+
+          // Handle per-TF failures independently so one error doesn't abort the batch.
+          for (let j = 0; j < batch.length; j++) {
+            const result = results[j];
+            if (result.status === 'rejected') {
+              const tf  = batch[j];
+              const msg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+              toast(`${tf}: ${msg}`, 'info');
+              setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
             }
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            toast(`${tf}: ${msg}`, 'info');
-            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
           }
         }
+
         const msg = `Ingested ${totalRows.toLocaleString()} rows across ${successes} timeframes`;
         toast(msg, 'success');
         addEntry({ action: 'Download', params: { symbol, timeframe: 'ALL', dateFrom, dateTo }, result: msg, durationMs: Date.now() - t0 });
@@ -500,99 +545,58 @@ export default function DatasetPage() {
     }
   };
 
-  const handleUploadCsvClick = () => {
-    if (timeframe === 'ALL') {
-      toast('Выберите конкретный таймфрейм перед загрузкой CSV', 'info');
+  // Single-click export. Runs synchronously inside the button's user-gesture
+  // so the browser treats the download as user-initiated (no suppression).
+  //
+  //   timeframe === 'ALL' → one URL, one <a>.click, server returns a ZIP
+  //     (DataService bundles every per-timeframe CSV via ZipArchive → MinIO
+  //     claim-check → Admin re-streams as application/zip).
+  //   otherwise → one URL, one <a>.click, server returns 302 to a MinIO
+  //     presigned URL (DataService streams COPY TO STDOUT directly into
+  //     MinIO; no byte buffering in Admin).
+  const handleExportCsv = () => {
+    if (!dateFrom || !dateTo) {
+      toast('Укажите даты From/To', 'info');
       return;
     }
-    csvInputRef.current?.click();
-  };
 
-  const handleCsvFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    // Reset so the user can re-select the same file if needed.
-    e.target.value = '';
-    if (!file) return;
+    const startMs = new Date(dateFrom).getTime();
+    const endMs   = new Date(dateTo).getTime() + 86_400_000 - 1;
+    const base    = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
-    const table = makeTableName(symbol, timeframe);
-    const form  = new FormData();
-    form.append('file',  file);
-    form.append('table', table);
-
-    setLoadingCsv(true);
-    setCsvProgress({ batch: 0, batches: 0, imported: 0 });
-    const t0 = Date.now();
-    try {
-      const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-      const res = await fetch(`${base}/api/upload/csv`, { method: 'POST', body: form });
-      if (!res.ok || !res.body) {
-        const j = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error(j.error ?? `HTTP ${res.status}`);
-      }
-
-      // Server streams NDJSON progress events — one JSON object per line.
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let finalImported = 0;
-      let sawError: string | null = null;
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const msg = JSON.parse(line) as
-            | { type: 'start'; total: number; batch_size: number }
-            | { type: 'batch'; batch: number; batches: number; imported: number }
-            | { type: 'done';  imported: number; batches: number }
-            | { type: 'error'; error: string };
-          if (msg.type === 'start') {
-            setCsvProgress({
-              batch: 0,
-              batches: Math.max(1, Math.ceil(msg.total / Math.max(1, msg.batch_size))),
-              imported: 0,
-            });
-          } else if (msg.type === 'batch') {
-            setCsvProgress({ batch: msg.batch, batches: msg.batches, imported: msg.imported });
-          } else if (msg.type === 'done') {
-            finalImported = msg.imported;
-          } else if (msg.type === 'error') {
-            sawError = msg.error;
-          }
-        }
-      }
-      if (sawError) throw new Error(sawError);
-
-      const msg = `Imported ${finalImported.toLocaleString()} rows into ${table}`;
-      toast(msg, 'success');
-      addEntry({ action: 'Download', params: { symbol, timeframe }, result: msg, durationMs: Date.now() - t0 });
-      handleListTables();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      toast(msg, 'error');
-      addEntry({ action: 'Download', params: { symbol, timeframe }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
-    } finally {
-      setLoadingCsv(false);
-      setCsvProgress(null);
+    let url: string;
+    let filename: string;
+    if (timeframe === 'ALL') {
+      url = `${base}/api/export/csv?symbol=${encodeURIComponent(symbol)}&timeframe=ALL`
+          + `&start_ms=${startMs}&end_ms=${endMs}`;
+      filename = `${symbol}_ALL.zip`;
+    } else {
+      const table = makeTableName(symbol, timeframe);
+      url = `${base}/api/export/csv?table=${encodeURIComponent(table)}`
+          + `&start_ms=${startMs}&end_ms=${endMs}`;
+      filename = `${table}.csv`;
     }
+
+    const a = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast(`Экспорт ${filename} начат`, 'success');
   };
 
-  const isBusy = loadingList || loadingIngest || loadingCov || loadingDelete || loadingCsv;
+  const isBusy = loadingList || loadingIngest || loadingCov || loadingDelete;
   const datasetHistory = history.filter(h => h.action === 'Check' || h.action === 'Download').slice(0, 20);
 
   return (
-    <div className="flex flex-col gap-6 w-full">
+    <div className="flex flex-col gap-4 sm:gap-6 w-full">
       <header className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight">Dataset</h1>
       </header>
 
       {/* ── 2-column: Config left | Coverage right ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-[380px,1fr] gap-6 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[380px,1fr] gap-4 sm:gap-6 items-start">
 
         {/* Left — fixed config card */}
         <Card>
@@ -600,7 +604,7 @@ export default function DatasetPage() {
             <CardTitle className="text-sm font-semibold">Dataset Configuration</CardTitle>
           </CardHeader>
           <Separator />
-          <CardContent className="pt-4 space-y-4">
+          <CardContent className="p-3 sm:p-4 pt-4 space-y-4">
             <div className="flex flex-col gap-3">
               <div className="flex flex-col gap-1.5">
                 <label className="text-xs text-muted-foreground">Symbol</label>
@@ -638,22 +642,10 @@ export default function DatasetPage() {
                 {loadingList ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
                 List Tables
               </Button>
-              <Button onClick={handleUploadCsvClick} disabled={isBusy || timeframe === 'ALL'} variant="outline" className="w-full gap-2">
-                {loadingCsv ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
-                Upload CSV
-                {csvProgress && csvProgress.batches > 0 && (
-                  <span className="text-[10px] text-muted-foreground tabular-nums">
-                    {csvProgress.batch}/{csvProgress.batches}
-                  </span>
-                )}
+              <Button onClick={handleExportCsv} disabled={isBusy} variant="outline" className="w-full gap-2">
+                <Download className="w-3.5 h-3.5" />
+                Export CSV
               </Button>
-              <input
-                ref={csvInputRef}
-                type="file"
-                accept=".csv"
-                className="hidden"
-                onChange={handleCsvFileChange}
-              />
               <Button onClick={handleDeleteRows} disabled={isBusy} variant="destructive" className="w-full gap-2">
                 {loadingDelete ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                 Очистить таблицу
@@ -661,17 +653,6 @@ export default function DatasetPage() {
             </div>
             {timeframe === 'ALL' && allIngestStatuses !== null && (
               <AllIngestProgress statuses={allIngestStatuses} />
-            )}
-            {loadingCsv && csvProgress !== null && csvProgress.batches > 0 && (
-              <div className="pt-2 space-y-1">
-                <Progress
-                  value={(csvProgress.batch / csvProgress.batches) * 100}
-                  className="h-1.5 w-full"
-                />
-                <p className="text-[10px] text-muted-foreground tabular-nums">
-                  Батч {csvProgress.batch} / {csvProgress.batches} — {csvProgress.imported.toLocaleString()} строк
-                </p>
-              </div>
             )}
             {timeframe !== 'ALL' && ingestStages !== null && <IngestProgress stages={ingestStages} />}
           </CardContent>
@@ -685,6 +666,7 @@ export default function DatasetPage() {
             </CardHeader>
             <Separator />
             <CardContent className="p-0">
+              <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -718,6 +700,7 @@ export default function DatasetPage() {
                   ))}
                 </TableBody>
               </Table>
+              </div>
             </CardContent>
           </Card>
         ) : timeframe !== 'ALL' && coverage ? (
@@ -726,12 +709,12 @@ export default function DatasetPage() {
               <CardTitle className="text-sm font-semibold">Coverage: {symbol} {timeframe}</CardTitle>
             </CardHeader>
             <Separator />
-            <CardContent className="pt-4 space-y-4">
+            <CardContent className="p-3 sm:p-4 pt-4 space-y-4">
               <CoverageBar
                 data={[{ name: `${symbol} ${timeframe}`, pct: coverage.coverage_pct ?? 0 }] satisfies BarDatum[]}
                 height={100}
               />
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 xs:grid-cols-3 gap-3 sm:gap-4">
                 <div className="space-y-1">
                   <p className="text-xs text-muted-foreground">Rows</p>
                   <p className="text-lg font-bold">{coverage.rows?.toLocaleString()}</p>
@@ -779,6 +762,7 @@ export default function DatasetPage() {
                 <p className="text-sm text-muted-foreground">No tables found</p>
               </div>
             ) : (
+              <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -812,6 +796,7 @@ export default function DatasetPage() {
                   ))}
                 </TableBody>
               </Table>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -832,6 +817,7 @@ export default function DatasetPage() {
               <p className="text-sm text-muted-foreground">No actions yet</p>
             </div>
           ) : (
+            <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -860,6 +846,7 @@ export default function DatasetPage() {
                 ))}
               </TableBody>
             </Table>
+            </div>
           )}
         </CardContent>
       </Card>

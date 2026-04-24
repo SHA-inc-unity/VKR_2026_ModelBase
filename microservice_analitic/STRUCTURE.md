@@ -35,11 +35,11 @@
 | Файл | Ключевые объекты | Описание |
 |------|-----------------|----------|
 | `api.py` | `DatasetApi` | HTTP-клиент к Bybit API: исторические свечи, open interest |
-| `constants.py` | `TIMEFRAMES`, `DEFAULT_SYMBOL`, `OpenInterestIntervals` | Допустимые таймфреймы, символы, лимиты страниц |
+| `constants.py` | `TIMEFRAMES`, `RAW_TABLE_SCHEMA`, `FEATURE_TABLE_SCHEMA` | Таймфреймы, символы, лимиты страниц. `RAW_TABLE_SCHEMA` — 13 сырых колонок (вкл. OHLCV). `FEATURE_TABLE_SCHEMA` — 37 feature-колонок (вкл. atr, candle shape, volume features, rsi_slope). |
 | `core.py` | `DatasetCore` | Загрузка, валидация, сохранение данных в PostgreSQL |
 | `database.py` | `Database` | Kafka-обёртка: делегирует все запросы к данным в `microservice_data` через `data_client` |
 | `features.py` | `FeatureEngineer` | Расчёт признаков (Pandas): MA, EMA, ATR, объёмы, лаги |
-| `features_sql.py` | `FeatureEngineerSQL` | SQL-path расчёт признаков прямо в PostgreSQL (без Pandas) |
+| `features_sql.py` | `FeatureEngineerSQL` | SQL-path расчёт признаков прямо в PostgreSQL (без Pandas). Генерирует 27 feature-колонок: `return_{1,6,24}`, `log_return_{1,6,24}`, `price_roll{6,24}_{mean,std,min,max}`, `price_to_roll{6,24}_mean`, `price_vol_{6,24}`, `oi_roll{6,24}_mean`, `oi_return_1`, `rsi_lag_{1,2}`, `hour_sin/cos`, `dow_sin/cos`. Депрекейтнуты и удалены: `price_lag_*`, `funding_rate_*`, `oi_lag_*`, `oi_to_funding`. |
 | `pipeline.py` | `DatasetPipeline` | Оркестратор (Pandas-путь): загрузка → features → сохранение |
 | `pipeline_sql.py` | `DatasetPipelineSQL` | Оркестратор (SQL-путь): более быстрый, без загрузки в память |
 | `dataset_cache.py` | `DatasetCache`, `dataset_cache` (singleton) | In-memory кеш результатов запросов к БД. OOM-защита (лимит по числу записей + байтам + psutil free RAM). FIFO-эвикция |
@@ -57,7 +57,7 @@
 | `config.py` | `ModelConfig`, `TrainConfig`, `GridSearchConfig`, `MODELS_DIR` | Конфиги (Pydantic BaseSettings). `MODELS_DIR` — путь к папке `models/` |
 | `train.py` | `ModelTrainer` | Обучение CatBoost: train/test split, fit, grid search, сохранение сессии (`.cbm` + `.json`) |
 | `metrics.py` | `ModelMetrics`, `calc_metrics()` | MAE, RMSE, sign-accuracy, persistence-baseline, direction-accuracy |
-| `loader.py` | `ModelLoader` | Загрузка / сохранение `.cbm`-файлов CatBoost с диска |
+| `loader.py` | `ModelLoader` | Загрузка / сохранение `.cbm`-файлов CatBoost с диска. `load_training_data()` и `load_training_data_from_rows()`: если в исходных данных отсутствует колонка-цель (`target_return_1`), автоматически вычисляют признаки и цель «на лету» через `backend.dataset.features.build_features(df, add_target=True)` — fallback для таблиц старого формата или raw-only dump'ов. |
 | `cache.py` | `ModelCache` | In-memory кеш обученных моделей и их метаданных |
 | `report.py` | `ReportBuilder`, `load_registry()`, `delete_registry_version()` | Сборка JSON-отчёта версии, запись в `models/`, реестр версий |
 | `pdf_report.py` | `PdfReportGenerator` | Генерация PDF-отчёта с метриками и графиками (ReportLab) |

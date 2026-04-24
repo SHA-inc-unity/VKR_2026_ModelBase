@@ -1,3 +1,5 @@
+using System.IO.Compression;
+using System.IO.Pipelines;
 using System.Text.Json;
 using Confluent.Kafka;
 using DataService.API.Bybit;
@@ -19,6 +21,7 @@ public sealed class KafkaConsumerService : BackgroundService
     private readonly DatasetRepository          _repo;
     private readonly BybitApiClient             _bybit;
     private readonly MinioClaimCheckService     _minio;
+    private readonly string                     _minioPublicUrl;
     private readonly ILogger<KafkaConsumerService> _log;
 
     // Limit concurrent in-flight message handlers (not static — instance field)
@@ -35,11 +38,12 @@ public sealed class KafkaConsumerService : BackgroundService
         MinioClaimCheckService minio,
         ILogger<KafkaConsumerService> log)
     {
-        _producer = producer;
-        _repo     = repo;
-        _bybit    = bybit;
-        _minio    = minio;
-        _log      = log;
+        _producer       = producer;
+        _repo           = repo;
+        _bybit          = bybit;
+        _minio          = minio;
+        _minioPublicUrl = opts.Value.Minio.PublicUrl;
+        _log            = log;
 
         var cfg = new ConsumerConfig
         {
@@ -216,6 +220,8 @@ public sealed class KafkaConsumerService : BackgroundService
             Topics.CmdDataDatasetImportCsv   => await HandleImportCsvAsync(payload, ct),
             Topics.CmdDataDatasetColumnStats     => await HandleColumnStatsAsync(payload, ct),
             Topics.CmdDataDatasetColumnHistogram => await HandleColumnHistogramAsync(payload, ct),
+            Topics.CmdDataDatasetBrowse          => await HandleBrowseAsync(payload, ct),
+            Topics.CmdDataDatasetComputeFeatures => await HandleComputeFeaturesAsync(payload, ct),
             _                                => new { error = $"Unknown topic: {topic}" },
         };
 
@@ -441,15 +447,145 @@ public sealed class KafkaConsumerService : BackgroundService
     private async Task<object> HandleExportAsync(
         JsonElement p, string replyTo, string correlationId, CancellationToken ct)
     {
-        var table   = TryGetString(p, "table");
         var startMs = TryGetInt64(p, "start_ms");
         var endMs   = TryGetInt64(p, "end_ms");
-        if (string.IsNullOrEmpty(table) || startMs is null || endMs is null)
-            return new { error = "missing fields: table, start_ms, end_ms" };
+        if (startMs is null || endMs is null)
+            return new { error = "missing fields: start_ms, end_ms" };
 
-        var csv   = await _repo.ExportCsvAsync(table, startMs.Value, endMs.Value, ct);
-        var claim = await _minio.PutBytesAsync(csv, contentType: "text/csv", ct: ct);
-        return new { claim_check = claim };
+        // ── ZIP mode: payload.tables is a string array ────────────────────
+        // When Admin asks to export *all* timeframes for a symbol, we don't
+        // want to force the browser to juggle 11 parallel downloads (Chromium
+        // suppresses all but the first few programmatic clicks). Instead we
+        // bundle every per-timeframe CSV into a single ZIP, park it in
+        // MinIO, and hand back a claim-check — Admin fetches and streams
+        // the one archive back to the browser.
+        //
+        // The ZIP itself is built in memory (ZipArchiveMode.Create needs a
+        // writable stream; seekable MemoryStream is the simplest match).
+        // For the individual CSVs we stream directly from PostgreSQL (COPY
+        // TO STDOUT) into each ZIP entry — so the only thing we buffer is
+        // the compressed ZIP output, not the raw CSV text.
+        if (p.ValueKind == JsonValueKind.Object
+            && p.TryGetProperty("tables", out var tablesEl)
+            && tablesEl.ValueKind == JsonValueKind.Array)
+        {
+            var tables = tablesEl.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString() ?? "")
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+            if (tables.Count == 0)
+                return new { error = "tables must be a non-empty array of strings" };
+
+            try
+            {
+                using var ms = new MemoryStream();
+                using (var archive = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    foreach (var tableName in tables)
+                    {
+                        // Fastest — keep CSV text readable; ZIP size is dominated
+                        // by compression ratio here, so Optimal pays off.
+                        var entry = archive.CreateEntry($"{tableName}.csv", CompressionLevel.Optimal);
+                        await using var entryStream = entry.Open();
+                        await _repo.ExportCsvToStreamAsync(
+                            tableName, startMs.Value, endMs.Value, entryStream, ct);
+                    }
+                } // archive.Dispose() writes the central directory
+
+                var zipBytes = ms.ToArray();
+                var zipKey   = $"exports/{Guid.NewGuid():N}.zip";
+                var claim = await _minio.PutBytesAsync(
+                    zipBytes, zipKey, contentType: "application/zip", ct: ct);
+
+                _log.LogInformation(
+                    "[export:zip] tables={Count} bytes={Bytes} key={Key}",
+                    tables.Count, zipBytes.Length, zipKey);
+
+                return new { claim_check = claim };
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "zip export failed for tables={Tables}", string.Join(",", tables));
+                return new { error = ex.Message };
+            }
+        }
+
+        // ── Single-table mode: streaming CSV → presigned URL ──────────────
+        var table = TryGetString(p, "table");
+        if (string.IsNullOrEmpty(table))
+            return new { error = "missing fields: table (or tables), start_ms, end_ms" };
+
+        // Streaming export pipeline:
+        //   PostgreSQL COPY TO STDOUT → TextReader → pipe → TransferUtility → MinIO
+        //
+        // Two tasks run concurrently, connected by a System.IO.Pipelines pipe:
+        //   • producer: ExportCsvToStreamAsync writes CSV bytes into pipe.Writer
+        //   • consumer: PutStreamAsync reads pipe.Reader and multipart-uploads to MinIO
+        //
+        // Neither side buffers the full payload in memory — peak RAM is the
+        // pipe's internal buffer (~default 64 KB) plus one TransferUtility
+        // part (5 MB). The 10 GB-for-1m-over-5-years blow-up is gone.
+        //
+        // After both tasks complete we hand out a presigned URL so the
+        // browser fetches the object straight from MinIO — bytes never flow
+        // back through this service again.
+        var key = $"exports/{Guid.NewGuid():N}.csv";
+        // leaveOpen: true on both AsStream() calls is deliberate — we complete
+        // the underlying Pipe sides explicitly (with or without an exception)
+        // so that error propagation survives Stream.DisposeAsync(), which
+        // would otherwise silently turn a failure into a clean EOF and let
+        // the consumer think the export finished successfully.
+        var pipe = new Pipe();
+
+        Exception? producerError = null;
+        var producerTask = Task.Run(async () =>
+        {
+            Exception? captured = null;
+            try
+            {
+                await using var writer = pipe.Writer.AsStream(leaveOpen: true);
+                await _repo.ExportCsvToStreamAsync(
+                    table, startMs.Value, endMs.Value, writer, ct);
+            }
+            catch (Exception ex) { captured = ex; producerError = ex; }
+            await pipe.Writer.CompleteAsync(captured);
+        }, ct);
+
+        Exception? consumerError = null;
+        var consumerTask = Task.Run(async () =>
+        {
+            Exception? captured = null;
+            try
+            {
+                await using var reader = pipe.Reader.AsStream(leaveOpen: true);
+                await _minio.PutStreamAsync(reader, key, "text/csv; charset=utf-8", ct);
+            }
+            catch (Exception ex) { captured = ex; consumerError = ex; }
+            await pipe.Reader.CompleteAsync(captured);
+        }, ct);
+
+        await Task.WhenAll(producerTask, consumerTask);
+
+        var err = producerError ?? consumerError;
+        if (err is not null)
+        {
+            _log.LogError(err, "export streaming failed for {Table}", table);
+            return new { error = err.Message };
+        }
+
+        var downloadName = $"{table}.csv";
+        var presignedUrl = await _minio.GetPresignedUrlAsync(
+            key, _minioPublicUrl, expiresMinutes: 60,
+            downloadFilename: downloadName,
+            contentType: "text/csv; charset=utf-8",
+            ct: ct);
+
+        _log.LogInformation(
+            "[export] {Table} window=[{S},{E}] key={Key} → presigned (60m)",
+            table, startMs, endMs, key);
+
+        return new { presigned_url = presignedUrl };
     }
 
     private async Task<object> HandleTableSchemaAsync(JsonElement p, CancellationToken ct)
@@ -586,7 +722,7 @@ public sealed class KafkaConsumerService : BackgroundService
                 "running", 0, null, ct);
 
             var lastPublishedPage = 0;
-            var klineTask = _bybit.FetchIndexPriceKlinesAsync(
+            var klineTask = _bybit.FetchKlinesAsync(
                 symbol.ToUpperInvariant(), interval, fetchStart, e, stepMs, 0, ct,
                 onPageDone: (done, total) =>
                 {
@@ -629,7 +765,7 @@ public sealed class KafkaConsumerService : BackgroundService
                 "done", 100, $"{oi.Count} записей", ct);
 
             // Index klines by timestamp for O(1) lookup.
-            var priceByTs = klines.ToDictionary(k => k.TimestampMs, k => k.Close);
+            var klinesByTs = klines.ToDictionary(k => k.TimestampMs, k => k);
 
             // ── Stage: compute_rsi ───────────────────────────────────────
             const string rsiStage = "compute_rsi";
@@ -637,8 +773,10 @@ public sealed class KafkaConsumerService : BackgroundService
             await PublishIngestProgressAsync(correlationId, rsiStage, rsiLabel,
                 "running", 0, null, ct);
 
+            // ComputeWilderRsiAsync expects (TimestampMs, Close) pairs — extract from full klines.
+            var klineCloses = klines.Select(k => (k.TimestampMs, k.Close)).ToList();
             var rsiByTs = await ComputeWilderRsiAsync(
-                klines, rsiPeriod,
+                klineCloses, rsiPeriod,
                 onSegmentDone: (done, total) =>
                     PublishIngestProgressAsync(correlationId, rsiStage, rsiLabel,
                         "running", total > 0 ? (int)Math.Min(99, (long)done * 100 / total) : 0,
@@ -656,7 +794,7 @@ public sealed class KafkaConsumerService : BackgroundService
             var rows = new List<DatasetRepository.MarketRow>(missing.Count);
             foreach (var ts in missing)
             {
-                if (!priceByTs.TryGetValue(ts, out var close)) continue;
+                if (!klinesByTs.TryGetValue(ts, out var kline)) continue;
                 decimal? fr = LookupForwardFill(fundingFfill, ts);
                 decimal? op = LookupForwardFill(oiFfill,      ts);
                 decimal? rs = rsiByTs.TryGetValue(ts, out var r) ? r : (decimal?)null;
@@ -665,7 +803,12 @@ public sealed class KafkaConsumerService : BackgroundService
                     Symbol:       symbol.ToUpperInvariant(),
                     Exchange:     exchange,
                     Timeframe:    key,
-                    IndexPrice:   close,
+                    IndexPrice:   kline.Close,
+                    OpenPrice:    kline.Open,
+                    HighPrice:    kline.High,
+                    LowPrice:     kline.Low,
+                    Volume:       kline.Volume,
+                    Turnover:     kline.Turnover,
                     FundingRate:  fr,
                     OpenInterest: op,
                     Rsi:          rs));
@@ -682,9 +825,34 @@ public sealed class KafkaConsumerService : BackgroundService
             await PublishIngestProgressAsync(correlationId, upsertStage, upsertLabel,
                 "done", 100, $"{written} строк записано", ct);
 
+            // ── Stage: compute_features (SQL window-function pass) ──────
+            // Не fatal — если upsert прошёл, потеря feature-шага не должна
+            // откатывать ingest. Ошибку публикуем как отдельный event и
+            // прокидываем в reply через features_error.
+            const string featStage = "compute_features";
+            const string featLabel = "Вычисление признаков";
+            await PublishIngestProgressAsync(correlationId, featStage, featLabel,
+                "running", 0, null, ct);
+
+            long featuresUpdated = 0;
+            string? featuresError = null;
+            try
+            {
+                featuresUpdated = await _repo.ComputeAndUpdateFeaturesAsync(table, ct);
+                await PublishIngestProgressAsync(correlationId, featStage, featLabel,
+                    "done", 100, $"{featuresUpdated} строк обновлено", ct);
+            }
+            catch (Exception fex)
+            {
+                featuresError = fex.Message;
+                _log.LogError(fex, "compute_features failed for {Table}", table);
+                await PublishIngestProgressAsync(correlationId, featStage, featLabel,
+                    "error", 0, fex.Message, CancellationToken.None);
+            }
+
             _log.LogInformation(
-                "[ingest] {Table} window=[{S},{E}] missing={Missing} fetched_klines={K} funding={F} oi={OI} written={W}",
-                table, s, e, missing.Count, klines.Count, funding.Count, oi.Count, written);
+                "[ingest] {Table} window=[{S},{E}] missing={Missing} fetched_klines={K} funding={F} oi={OI} written={W} features_updated={Feat}",
+                table, s, e, missing.Count, klines.Count, funding.Count, oi.Count, written, featuresUpdated);
 
             return new
             {
@@ -695,6 +863,8 @@ public sealed class KafkaConsumerService : BackgroundService
                 fetched_klines   = klines.Count,
                 fetched_funding  = funding.Count,
                 fetched_oi       = oi.Count,
+                features_updated = featuresUpdated,
+                features_error   = featuresError,
             };
         }
         catch (ArgumentException ex)
@@ -768,6 +938,11 @@ public sealed class KafkaConsumerService : BackgroundService
                 Exchange:     exchange   ?? defaultExchange,
                 Timeframe:    timeframe  ?? defaultTimeframe ?? "",
                 IndexPrice:   ReadCellDecimal(r, "index_price"),
+                OpenPrice:    ReadCellDecimal(r, "open_price"),
+                HighPrice:    ReadCellDecimal(r, "high_price"),
+                LowPrice:     ReadCellDecimal(r, "low_price"),
+                Volume:       ReadCellDecimal(r, "volume"),
+                Turnover:     ReadCellDecimal(r, "turnover"),
                 FundingRate:  ReadCellDecimal(r, "funding_rate"),
                 OpenInterest: ReadCellDecimal(r, "open_interest"),
                 Rsi:          ReadCellDecimal(r, "rsi")));
@@ -981,6 +1156,59 @@ public sealed class KafkaConsumerService : BackgroundService
         catch (Exception ex)
         {
             _log.LogError(ex, "column_histogram failed for {Table}.{Column}", table, column);
+            return new { error = ex.Message };
+        }
+    }
+
+    // ── Browse (paginated raw rows) ───────────────────────────────────────
+
+    private async Task<object> HandleBrowseAsync(JsonElement payload, CancellationToken ct)
+    {
+        var table = TryGetString(payload, "table");
+        if (string.IsNullOrWhiteSpace(table)) return new { error = "missing field: table" };
+
+        var page     = (int)(TryGetInt64(payload, "page")      ?? 0L);
+        var pageSize = (int)(TryGetInt64(payload, "page_size") ?? 50L);
+        var orderStr = TryGetString(payload, "order") ?? "desc";
+        bool orderDesc = !string.Equals(orderStr, "asc", StringComparison.OrdinalIgnoreCase);
+
+        if (page < 0) page = 0;
+
+        try
+        {
+            var (total, rows) = await _repo.BrowseRowsAsync(table, page, pageSize, orderDesc, ct);
+            return new { table, page, page_size = pageSize, total_rows = total, rows };
+        }
+        catch (ArgumentException ex)
+        {
+            return new { error = ex.Message };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "browse failed for {Table}", table);
+            return new { error = ex.Message };
+        }
+    }
+
+    // ── Compute features (SQL window-function pass) ────────────────────────
+
+    private async Task<object> HandleComputeFeaturesAsync(JsonElement payload, CancellationToken ct)
+    {
+        var table = TryGetString(payload, "table");
+        if (string.IsNullOrWhiteSpace(table)) return new { error = "missing field: table" };
+
+        try
+        {
+            var rowsUpdated = await _repo.ComputeAndUpdateFeaturesAsync(table, ct);
+            return new { status = "ok", table, rows_updated = rowsUpdated };
+        }
+        catch (ArgumentException ex)
+        {
+            return new { error = ex.Message };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "compute_features failed for {Table}", table);
             return new { error = ex.Message };
         }
     }

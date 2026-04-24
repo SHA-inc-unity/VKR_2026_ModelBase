@@ -8,9 +8,6 @@ import pandas as pd
 
 from .constants import (
     DEFAULT_WARMUP_CANDLES,
-    FUNDING_LAG_STEPS,
-    LAG_STEPS,
-    OI_LAG_STEPS,
     RAW_FEATURE_COLUMNS,
     RETURN_HORIZONS,
     ROLLING_WINDOWS,
@@ -51,9 +48,6 @@ def _compute_group_features(
     g = g.sort_values("timestamp_utc", ignore_index=True)
     price: pd.Series = g["index_price"]
 
-    for lag in LAG_STEPS:
-        g[f"price_lag_{lag}"] = price.shift(lag)
-
     for horizon in RETURN_HORIZONS:
         g[f"return_{horizon}"] = price.pct_change(horizon)
         prev = price.shift(horizon).replace(0.0, np.nan)
@@ -72,17 +66,8 @@ def _compute_group_features(
         g[f"price_to_roll{window}_mean"] = price / safe_mean
         g[f"price_vol_{window}"] = std / safe_mean
 
-    if "funding_rate" in g.columns:
-        funding_rate = g["funding_rate"].ffill()
-        for lag in FUNDING_LAG_STEPS:
-            g[f"funding_lag_{lag}"] = funding_rate.shift(lag)
-        for window in ROLLING_WINDOWS:
-            g[f"funding_roll{window}_mean"] = funding_rate.rolling(window, min_periods=1).mean()
-
     if "open_interest" in g.columns:
         open_interest = g["open_interest"].ffill()
-        for lag in OI_LAG_STEPS:
-            g[f"oi_lag_{lag}"] = open_interest.shift(lag)
         for window in ROLLING_WINDOWS:
             g[f"oi_roll{window}_mean"] = open_interest.rolling(window, min_periods=1).mean()
         g["oi_return_1"] = open_interest.pct_change(1)
@@ -100,11 +85,6 @@ def _compute_group_features(
     g["hour_cos"] = np.cos(2.0 * np.pi * hour / 24.0)
     g["dow_sin"] = np.sin(2.0 * np.pi * dow / 7.0)
     g["dow_cos"] = np.cos(2.0 * np.pi * dow / 7.0)
-
-    if "open_interest" in g.columns and "funding_rate" in g.columns:
-        open_interest = g["open_interest"].ffill()
-        funding_rate = g["funding_rate"].ffill().replace(0.0, np.nan)
-        g["oi_to_funding"] = open_interest / funding_rate
 
     if add_target:
         step_ms = _infer_step_ms(g)

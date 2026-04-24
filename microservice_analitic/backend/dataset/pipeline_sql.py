@@ -181,7 +181,10 @@ def upsert_with_sql_features(
     )
 
     # ── Phase 2: single SQL merge with feature computation ──────────────────
-    fs = build_feature_select_clause(step_ms=step_ms, add_target=True)
+    # target_return_1 в БД НЕ хранится (вычисляется только при обучении) →
+    # add_target=False, чтобы feature-SELECT выдавал ровно 27 feature-колонок,
+    # соответствующих EXPECTED_TABLE_SCHEMA.
+    fs = build_feature_select_clause(step_ms=step_ms, add_target=False)
     all_cols: tuple[str, ...] = tuple(DATASET_COLUMN_NAMES)
     update_cols: tuple[str, ...] = tuple(c for c in all_cols if c != "timestamp_utc")
 

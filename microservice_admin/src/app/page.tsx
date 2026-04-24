@@ -1,6 +1,7 @@
 'use client';
 import dynamic from 'next/dynamic';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { cacheRead, cacheWrite } from '@/lib/cacheClient';
 import { RefreshCw, Table2, Rows, CalendarClock, GitMerge } from 'lucide-react';
 import { kafkaCall } from '@/lib/kafkaClient';
 import { fetchInfraHealth } from '@/lib/healthClient';
@@ -28,6 +29,15 @@ const HEALTH_TIMEOUT   = 2_000;
 const TABLES_TIMEOUT   = 8_000;
 const COVERAGE_TIMEOUT = 5_000;
 
+const DASHBOARD_CACHE_KEY = 'modelline:dashboard:v1';
+const DASHBOARD_CACHE_TTL = 3600; // 1 hour
+
+interface DashboardCache {
+  tables: string[];
+  coverage: Record<string, TableCoverage>;
+  modelCount: number | null;
+}
+
 // в”Ђв”Ђ Sub-components в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 type AccentColor = 'primary' | 'success' | 'warning' | 'destructive';
 
@@ -52,7 +62,7 @@ function ServiceCard({
   const hasData = health !== null;
 
   return (
-    <Card className="flex items-center gap-5 px-6 py-4">
+    <Card className="flex flex-col xs:flex-row xs:items-center gap-3 xs:gap-5 px-4 xs:px-6 py-4">
       {/* Left - name + stack */}
       <div className="flex-1 min-w-0">
         <div className="font-semibold text-sm truncate">{name}</div>
@@ -64,7 +74,7 @@ function ServiceCard({
       </div>
 
       {/* Center - status dot + label */}
-      <div className="flex items-center gap-2.5 flex-shrink-0 min-w-[110px]">
+      <div className="flex items-center gap-2.5 flex-shrink-0 xs:min-w-[110px]">
         {!hasData && loading ? (
           <>
             <Skeleton className="w-2.5 h-2.5 rounded-full" />
@@ -86,7 +96,7 @@ function ServiceCard({
       </div>
 
       {/* Right - last seen */}
-      <div className="flex-shrink-0 text-right min-w-[140px]">
+      <div className="flex-shrink-0 text-left xs:text-right xs:min-w-[140px]">
         {!hasData && loading ? (
           <Skeleton className="h-4 w-28 ml-auto" />
         ) : ok && lastSuccess ? (
@@ -160,6 +170,8 @@ export default function DashboardPage() {
   const [lastAccountSuccess,   setLastAccountSuccess]   = useState<Date | null>(null);
   const [lastGatewaySuccess,   setLastGatewaySuccess]   = useState<Date | null>(null);
 
+  const pendingSaveRef = useRef(false);
+
   const totalRows = useMemo(
     () => tables.reduce((s, t) => s + (coverage[t]?.rows ?? 0), 0),
     [tables, coverage],
@@ -198,6 +210,7 @@ export default function DashboardPage() {
       .then(r => {
         const t = (r.tables ?? []).map(x => typeof x === 'string' ? x : x.table_name);
         setTables(t);
+        pendingSaveRef.current = true;
         t.forEach(table => {
           kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table }, COVERAGE_TIMEOUT)
             .then(cv => setCoverage(prev => ({ ...prev, [table]: cv })))
@@ -237,9 +250,33 @@ export default function DashboardPage() {
     setLastRefresh(new Date());
   }, []);
 
+  // On mount: restore from cache first, then refresh in background
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    let cancelled = false;
+    async function init() {
+      const cached = await cacheRead<DashboardCache>(DASHBOARD_CACHE_KEY);
+      if (!cancelled && cached) {
+        setTables(cached.tables);
+        setCoverage(cached.coverage);
+        setModelCount(cached.modelCount);
+        setTablesLoading(false);
+        setModelsLoading(false);
+      }
+      if (!cancelled) refresh();
+    }
+    void init();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Save to cache after a full refresh completes (tables + all coverage loaded)
+  useEffect(() => {
+    if (!pendingSaveRef.current) return;
+    if (tables.length === 0 || tablesLoading) return;
+    const loaded = tables.filter(t => coverage[t] !== undefined).length;
+    if (loaded < tables.length) return;
+    pendingSaveRef.current = false;
+    void cacheWrite(DASHBOARD_CACHE_KEY, { tables, coverage, modelCount }, DASHBOARD_CACHE_TTL);
+  }, [tables, coverage, tablesLoading, modelCount]);
 
   useEvents({
     EVT_ANALYTICS_MODEL_READY: () => {
@@ -261,7 +298,7 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6 w-full">
+    <div className="flex flex-col gap-4 sm:gap-6 w-full">
 
       {/* в”Ђв”Ђ Header в”Ђв”Ђ */}
       <header className="flex items-center justify-between">
@@ -286,7 +323,7 @@ export default function DashboardPage() {
       </header>
 
       {/* в”Ђв”Ђ Row 1: Stat cards в”Ђв”Ђ */}
-      <section className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+      <section className="grid grid-cols-1 xs:grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-3">
         <StatCard
           label="Total Tables"
           value={String(tables.length)}
@@ -414,6 +451,7 @@ export default function DashboardPage() {
                 </p>
               </div>
             ) : (
+              <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -468,6 +506,7 @@ export default function DashboardPage() {
                   })}
                 </TableBody>
               </Table>
+              </div>
             )}
           </CardContent>
         </Card>

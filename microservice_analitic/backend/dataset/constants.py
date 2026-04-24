@@ -66,16 +66,18 @@ RAW_TABLE_SCHEMA = [
     ("exchange", "character varying"),
     ("timeframe", "character varying"),
     ("index_price", "numeric"),
+    ("open_price",  "numeric"),
+    ("high_price",  "numeric"),
+    ("low_price",   "numeric"),
+    ("volume",      "numeric"),
+    ("turnover",    "numeric"),
     ("funding_rate", "numeric"),
     ("open_interest", "numeric"),
     ("rsi", "numeric"),
 ]
 
-LAG_STEPS: tuple[int, ...] = (1, 2, 3, 6, 12, 24)
 ROLLING_WINDOWS: tuple[int, ...] = (6, 24)
 RETURN_HORIZONS: tuple[int, ...] = (1, 6, 24)
-FUNDING_LAG_STEPS: tuple[int, ...] = (1, 2, 3)
-OI_LAG_STEPS: tuple[int, ...] = (1, 2, 3)
 RSI_LAG_STEPS: tuple[int, ...] = (1, 2)
 DEFAULT_WARMUP_CANDLES = 24
 
@@ -83,16 +85,21 @@ DEFAULT_WARMUP_CANDLES = 24
 # вне зависимости от таймфрейма.
 TARGET_HORIZON_MS: int = 3 * 3_600_000  # 3 часа в миллисекундах
 
+# Одобренный набор 27 feature-колонок (double precision, nullable).
+# Вычисляются SQL window-функциями на стороне PostgreSQL после ingest
+# (см. DatasetRepository.ComputeAndUpdateFeaturesAsync). target_return_1
+# в схему БД НЕ входит — это целевая переменная, вычисляется только в
+# пайплайне обучения.
 FEATURE_TABLE_SCHEMA = [
-    *((f"price_lag_{lag}", "double precision") for lag in LAG_STEPS),
     *((f"return_{h}", "double precision") for h in RETURN_HORIZONS),
     *((f"log_return_{h}", "double precision") for h in RETURN_HORIZONS),
-    *((f"price_roll{w}_{stat}", "double precision") for w in ROLLING_WINDOWS for stat in ("mean", "std", "min", "max")),
+    *(
+        (f"price_roll{w}_{stat}", "double precision")
+        for w in ROLLING_WINDOWS
+        for stat in ("mean", "std", "min", "max")
+    ),
     *((f"price_to_roll{w}_mean", "double precision") for w in ROLLING_WINDOWS),
     *((f"price_vol_{w}", "double precision") for w in ROLLING_WINDOWS),
-    *((f"funding_lag_{lag}", "double precision") for lag in FUNDING_LAG_STEPS),
-    *((f"funding_roll{w}_mean", "double precision") for w in ROLLING_WINDOWS),
-    *((f"oi_lag_{lag}", "double precision") for lag in OI_LAG_STEPS),
     *((f"oi_roll{w}_mean", "double precision") for w in ROLLING_WINDOWS),
     ("oi_return_1", "double precision"),
     *((f"rsi_lag_{lag}", "double precision") for lag in RSI_LAG_STEPS),
@@ -100,8 +107,15 @@ FEATURE_TABLE_SCHEMA = [
     ("hour_cos", "double precision"),
     ("dow_sin", "double precision"),
     ("dow_cos", "double precision"),
-    ("oi_to_funding", "double precision"),
-    ("target_return_1", "double precision"),
+    # OHLCV-derived features
+    *((f"atr_{w}", "double precision") for w in ROLLING_WINDOWS),
+    ("candle_body",         "double precision"),
+    ("upper_wick",          "double precision"),
+    ("lower_wick",          "double precision"),
+    *((f"volume_roll{w}_mean",    "double precision") for w in ROLLING_WINDOWS),
+    *((f"volume_to_roll{w}_mean", "double precision") for w in ROLLING_WINDOWS),
+    ("volume_return_1",     "double precision"),
+    ("rsi_slope",           "double precision"),
 ]
 
 EXPECTED_TABLE_SCHEMA = RAW_TABLE_SCHEMA + FEATURE_TABLE_SCHEMA
@@ -116,6 +130,11 @@ RAW_FEATURE_COLUMNS: frozenset[str] = frozenset(
         "exchange",
         "timeframe",
         "index_price",
+        "open_price",
+        "high_price",
+        "low_price",
+        "volume",
+        "turnover",
         "funding_rate",
         "open_interest",
         "rsi",

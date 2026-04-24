@@ -36,9 +36,6 @@ from dataclasses import dataclass
 from psycopg2 import sql
 
 from .constants import (
-    FUNDING_LAG_STEPS,
-    LAG_STEPS,
-    OI_LAG_STEPS,
     RETURN_HORIZONS,
     ROLLING_WINDOWS,
     RSI_LAG_STEPS,
@@ -135,15 +132,13 @@ def _lead(col: str, k: int, alias: str) -> sql.Composed:
 
 FFILL_CTE_COLUMNS = sql.SQL(
     """
-    COUNT(funding_rate)  OVER (ORDER BY timestamp_utc) AS _funding_grp,
     COUNT(open_interest) OVER (ORDER BY timestamp_utc) AS _oi_grp
     """
 )
 
 FFILL_SELECT_COLUMNS = sql.SQL(
     """
-    MAX(funding_rate)  OVER (PARTITION BY _funding_grp) AS funding_ffill,
-    MAX(open_interest) OVER (PARTITION BY _oi_grp)      AS oi_ffill
+    MAX(open_interest) OVER (PARTITION BY _oi_grp) AS oi_ffill
     """
 )
 
@@ -175,17 +170,15 @@ def build_feature_select_clause(
     target_horizon_ms: int = TARGET_HORIZON_MS,
     add_target: bool = True,
 ) -> FeatureSelect:
-    """Собирает SELECT-list, вычисляющий все 42 feature-колонки window-функциями.
+    """Собирает SELECT-list, вычисляющий одобренный набор 27 feature-колонок
+    window-функциями (+ target_return_1, если add_target).
 
     Семантически эквивалентно `features._compute_group_features`:
-      - price_lag_{LAG_STEPS}
       - return_{RETURN_HORIZONS}, log_return_{RETURN_HORIZONS}
       - price_roll{w}_{mean,std,min,max}, price_to_roll{w}_mean, price_vol_{w}
-      - funding_lag_{FUNDING_LAG_STEPS}, funding_roll{w}_mean
-      - oi_lag_{OI_LAG_STEPS}, oi_roll{w}_mean, oi_return_1
+      - oi_roll{w}_mean, oi_return_1
       - rsi_lag_{RSI_LAG_STEPS}
       - hour_sin, hour_cos, dow_sin, dow_cos
-      - oi_to_funding
       - target_return_1 (если add_target)
 
     Все оконные функции используют общий именованный WINDOW:
@@ -194,9 +187,8 @@ def build_feature_select_clause(
     который вызывающий код должен добавить в итоговый SELECT. Для rolling-агрегатов
     используется inline-frame "ROWS BETWEEN N-1 PRECEDING AND CURRENT ROW".
 
-    Важное предусловие: источник должен уже содержать `funding_ffill` и `oi_ffill`
-    колонки (результат FFILL_SELECT_COLUMNS на слое ниже). Именно из-за этого
-    feature-CTE ссылается на них вместо funding_rate/open_interest.
+    Важное предусловие: источник должен уже содержать `oi_ffill` колонку
+    (результат FFILL_SELECT_COLUMNS на слое ниже).
     """
     parts: list[sql.Composed] = []
     names: list[str] = []
@@ -205,25 +197,17 @@ def build_feature_select_clause(
         names.append(name)
         parts.append(expr)
 
-    # price_lag_{k}
-    for k in LAG_STEPS:
-        add(f"price_lag_{k}", _lag("index_price", k, f"price_lag_{k}"))
-
     # return_{h}, log_return_{h}
     for h in RETURN_HORIZONS:
         add(f"return_{h}", _pct_change("index_price", h, f"return_{h}"))
         add(f"log_return_{h}", _log_return("index_price", h, f"log_return_{h}"))
 
     # price_roll{w}_{mean,std,min,max}, price_to_roll{w}_mean, price_vol_{w}
-    # Для _to_roll_mean и _vol используем subquery-подход: делим через подзапрос
-    # на уже-вычисленный roll{w}_mean. Но в плоском SELECT это упрощается через
-    # повторное определение окна; PostgreSQL умно переиспользует window-scan.
     for w in ROLLING_WINDOWS:
         add(f"price_roll{w}_mean", _rolling("AVG", "index_price", w, f"price_roll{w}_mean"))
         add(f"price_roll{w}_std",  _rolling("STDDEV_POP", "index_price", w, f"price_roll{w}_std"))
         add(f"price_roll{w}_min",  _rolling("MIN", "index_price", w, f"price_roll{w}_min"))
         add(f"price_roll{w}_max",  _rolling("MAX", "index_price", w, f"price_roll{w}_max"))
-        # price / NULLIF(AVG(price) OVER (...), 0)
         add(
             f"price_to_roll{w}_mean",
             sql.SQL(
@@ -232,7 +216,6 @@ def build_feature_select_clause(
                 "AS {a}"
             ).format(p=sql.Literal(w - 1), a=sql.Identifier(f"price_to_roll{w}_mean")),
         )
-        # stddev_pop / NULLIF(avg, 0)
         add(
             f"price_vol_{w}",
             sql.SQL(
@@ -244,28 +227,16 @@ def build_feature_select_clause(
             ).format(p=sql.Literal(w - 1), a=sql.Identifier(f"price_vol_{w}")),
         )
 
-    # funding_lag_{k} — на ffill-колонке
-    for k in FUNDING_LAG_STEPS:
-        add(f"funding_lag_{k}", _lag("funding_ffill", k, f"funding_lag_{k}"))
-    for w in ROLLING_WINDOWS:
-        add(f"funding_roll{w}_mean", _rolling("AVG", "funding_ffill", w, f"funding_roll{w}_mean"))
-
-    # oi_lag_{k}, oi_roll{w}_mean, oi_return_1 — на ffill-колонке OI
-    for k in OI_LAG_STEPS:
-        add(f"oi_lag_{k}", _lag("oi_ffill", k, f"oi_lag_{k}"))
+    # oi_roll{w}_mean, oi_return_1 — на ffill-колонке OI
     for w in ROLLING_WINDOWS:
         add(f"oi_roll{w}_mean", _rolling("AVG", "oi_ffill", w, f"oi_roll{w}_mean"))
-    # pandas: open_interest.pct_change(1) — на ffilled series
     add("oi_return_1", _pct_change("oi_ffill", 1, "oi_return_1"))
 
-    # rsi_lag_{k} — на исходной rsi (уже вычисленной в Python)
+    # rsi_lag_{k} — на исходной rsi
     for k in RSI_LAG_STEPS:
         add(f"rsi_lag_{k}", _lag("rsi", k, f"rsi_lag_{k}"))
 
     # hour_sin/cos, dow_sin/cos — UTC-тайм-фичи
-    # pandas: dt.hour (0..23), dt.dayofweek (Monday=0 .. Sunday=6).
-    # PostgreSQL: EXTRACT(HOUR FROM ts)=0..23, EXTRACT(DOW)=0..6 но Sunday=0.
-    # Pandas dayofweek ≡ ISODOW - 1. В PG ISODOW=Mon..Sun=1..7 → -1 даёт 0..6.
     pi2 = 2.0 * math.pi
     add("hour_sin", sql.SQL(
         "SIN({k} * EXTRACT(HOUR FROM timestamp_utc AT TIME ZONE 'UTC') / 24.0) AS hour_sin"
@@ -279,12 +250,6 @@ def build_feature_select_clause(
     add("dow_cos", sql.SQL(
         "COS({k} * (EXTRACT(ISODOW FROM timestamp_utc AT TIME ZONE 'UTC') - 1) / 7.0) AS dow_cos"
     ).format(k=sql.Literal(pi2)))
-
-    # oi_to_funding — oi_ffill / NULLIF(funding_ffill, 0)
-    # pandas: funding_rate.ffill().replace(0, NaN) → open_interest.ffill() / that.
-    add("oi_to_funding", sql.SQL(
-        "oi_ffill / NULLIF(funding_ffill, 0) AS oi_to_funding"
-    ))
 
     # target_return_1 — только если add_target
     if add_target:

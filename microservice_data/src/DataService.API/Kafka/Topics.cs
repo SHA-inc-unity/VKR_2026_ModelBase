@@ -20,6 +20,8 @@ public static class Topics
     public const string CmdDataDatasetImportCsv   = "cmd.data.dataset.import_csv";
     public const string CmdDataDatasetColumnStats     = "cmd.data.dataset.column_stats";
     public const string CmdDataDatasetColumnHistogram = "cmd.data.dataset.column_histogram";
+    public const string CmdDataDatasetBrowse          = "cmd.data.dataset.browse";
+    public const string CmdDataDatasetComputeFeatures = "cmd.data.dataset.compute_features";
 
     // ── Events (fire-and-forget, no correlation round-trip) ──────────────
     public const string EvtDataIngestProgress     = "events.data.ingest.progress";
@@ -44,5 +46,7 @@ public static class Topics
         CmdDataDatasetImportCsv,
         CmdDataDatasetColumnStats,
         CmdDataDatasetColumnHistogram,
+        CmdDataDatasetBrowse,
+        CmdDataDatasetComputeFeatures,
     ];
 }

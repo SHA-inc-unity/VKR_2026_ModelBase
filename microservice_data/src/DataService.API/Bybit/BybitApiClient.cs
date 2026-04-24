@@ -103,23 +103,24 @@ public sealed class BybitApiClient
         return null;
     }
 
-    // ── Index price klines ───────────────────────────────────────────────
+    // ── OHLCV klines ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// Fetch index-price klines for <paramref name="symbol"/> in range
+    /// Fetch full OHLCV klines for <paramref name="symbol"/> from
+    /// <c>/v5/market/kline</c> in range
     /// [<paramref name="startMs"/>, <paramref name="endMs"/>] with the given
     /// Bybit <paramref name="interval"/>. Pages are fetched in parallel by
     /// slicing the range into windows of <see cref="DatasetConstants.PageLimitKline"/>
-    /// candles. Returns (timestampMs, close) pairs sorted ascending.
+    /// candles. Returns tuples sorted ascending.
     /// </summary>
-    public async Task<IReadOnlyList<(long TimestampMs, decimal Close)>>
-        FetchIndexPriceKlinesAsync(
+    public async Task<IReadOnlyList<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>>
+        FetchKlinesAsync(
             string symbol, string interval, long startMs, long endMs, long stepMs,
             int maxParallel = 0, CancellationToken ct = default,
             Action<int, int>? onPageDone = null)
     {
         if (stepMs <= 0) throw new ArgumentException("stepMs must be positive", nameof(stepMs));
-        if (endMs < startMs) return Array.Empty<(long, decimal)>();
+        if (endMs < startMs) return Array.Empty<(long, decimal, decimal, decimal, decimal, decimal, decimal)>();
 
         var pageSpan = DatasetConstants.PageLimitKline * stepMs;
         var windows = new List<(long Start, long End)>();
@@ -138,20 +139,26 @@ public sealed class BybitApiClient
             await gate.WaitAsync(ct);
             try
             {
-                var url = $"{DatasetConstants.BybitBaseUrl}/v5/market/index-price-kline"
+                var url = $"{DatasetConstants.BybitBaseUrl}/v5/market/kline"
                         + $"?category=linear&symbol={symbol}&interval={interval}"
                         + $"&start={w.Start}&end={w.End}&limit={DatasetConstants.PageLimitKline}";
                 using var doc = await GetJsonAsync(url, ct);
                 var list = doc.RootElement.GetProperty("result").GetProperty("list");
-                var page = new List<(long, decimal)>(list.GetArrayLength());
+                var page = new List<(long, decimal, decimal, decimal, decimal, decimal, decimal)>(list.GetArrayLength());
                 foreach (var item in list.EnumerateArray())
                 {
-                    // [startMs, open, high, low, close]
-                    if (item.ValueKind != JsonValueKind.Array || item.GetArrayLength() < 5) continue;
-                    var ts = TryMs(item[0]);
-                    var close = TryDec(item[4]);
-                    if (ts is null || close is null) continue;
-                    page.Add((ts.Value, close.Value));
+                    // [startMs, open, high, low, close, volume, turnover]
+                    if (item.ValueKind != JsonValueKind.Array || item.GetArrayLength() < 7) continue;
+                    var ts       = TryMs(item[0]);
+                    var open     = TryDec(item[1]);
+                    var high     = TryDec(item[2]);
+                    var low      = TryDec(item[3]);
+                    var close    = TryDec(item[4]);
+                    var volume   = TryDec(item[5]);
+                    var turnover = TryDec(item[6]);
+                    if (ts is null || open is null || high is null || low is null
+                        || close is null || volume is null || turnover is null) continue;
+                    page.Add((ts.Value, open.Value, high.Value, low.Value, close.Value, volume.Value, turnover.Value));
                 }
                 return page;
             }
@@ -167,14 +174,17 @@ public sealed class BybitApiClient
         });
 
         var pages = await Task.WhenAll(tasks);
-        var merged = new Dictionary<long, decimal>(pages.Sum(p => p.Count));
+        // Deduplicate by timestamp — last writer wins (same as before).
+        var merged = new Dictionary<long, (decimal, decimal, decimal, decimal, decimal, decimal)>(pages.Sum(p => p.Count));
         foreach (var p in pages)
-            foreach (var (t, v) in p) merged[t] = v;
+            foreach (var (t, o, h, l, c, v, tv) in p) merged[t] = (o, h, l, c, v, tv);
 
-        return merged.Where(kv => kv.Key >= startMs && kv.Key <= endMs)
-                     .OrderBy(kv => kv.Key)
-                     .Select(kv => (kv.Key, kv.Value))
-                     .ToList();
+        return merged
+            .Where(kv => kv.Key >= startMs && kv.Key <= endMs)
+            .OrderBy(kv => kv.Key)
+            .Select(kv => (kv.Key, kv.Value.Item1, kv.Value.Item2, kv.Value.Item3,
+                           kv.Value.Item4, kv.Value.Item5, kv.Value.Item6))
+            .ToList();
     }
 
     // ── Funding rate history ─────────────────────────────────────────────

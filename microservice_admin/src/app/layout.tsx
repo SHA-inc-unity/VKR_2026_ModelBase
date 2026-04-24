@@ -16,10 +16,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={inter.className}>
       <body>
         <ToastProvider>
-          <div className="flex h-screen overflow-hidden">
+          <div className="flex h-screen overflow-hidden flex-col md:flex-row">
             <Sidebar />
-            <main className="flex-1 overflow-auto p-6">
-              <div className="max-w-[1920px] mx-auto w-full">{children}</div>
+            <main className="flex-1 overflow-auto p-3 sm:p-4 md:p-5 lg:p-6 pb-14 md:pb-5 lg:pb-6">
+              <div className="max-w-full md:max-w-[1920px] mx-auto w-full">{children}</div>
             </main>
           </div>
         </ToastProvider>
