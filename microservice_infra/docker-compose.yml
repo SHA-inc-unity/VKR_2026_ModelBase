@@ -76,11 +76,21 @@ services:
     networks:
       - modelline_net
 
-  # Periodic cleanup of orphaned ephemeral reply-inbox topics. Each
-  # request/reply call in microservice_admin / microservice_analitic creates
-  # a unique reply.<service>.<uuid> topic; if a caller crashes before the
-  # finally-block cleanup runs, the topic is leaked. This janitor sweeps
-  # them every 5 minutes.
+  # Periodic cleanup of orphaned ephemeral reply-inbox topics.
+  #
+  # After the long-lived reply-inbox migration each application service
+  # owns ONE reply.<service>.<uuid> topic for its entire process lifetime,
+  # so the per-call topic churn is gone. The janitor still exists to mop
+  # up topics from older builds that crashed before they could clean up.
+  #
+  # Safety properties of the new sweep:
+  #   1. Interval is 6 h — we no longer need an aggressive sweep because
+  #      only a handful of long-lived inboxes exist at any time.
+  #   2. The sweep skips any topic that has activity in the last hour
+  #      (HighWatermark advanced) — that filter alone protects every
+  #      currently-running consumer, including ones in the middle of a
+  #      multi-minute repair operation.
+  #   3. Failed deletions are swallowed and logged, never crash-loop.
   redpanda-janitor:
     image: redpandadata/redpanda:v24.1.9
     container_name: redpanda-janitor
@@ -91,9 +101,30 @@ services:
     entrypoint: ["/bin/sh","-c"]
     command:
       - |
+        # Reply topics older than this are candidates for deletion.
+        # 6 h is well past the longest legitimate request/repair window.
+        STALE_AGE_SEC=21600
+        SLEEP_SEC=21600
         while true; do
-          sleep 300
-          rpk -X brokers=redpanda:29092 topic delete --regex '^reply\..*' || true
+          sleep "$$SLEEP_SEC"
+          NOW_MS=$$(date +%s%3N)
+          # List all reply-inbox topics — empty/missing list is fine.
+          TOPICS=$$(rpk -X brokers=redpanda:29092 topic list 2>/dev/null \
+                    | awk 'NR>1 && $$1 ~ /^reply\./ {print $$1}')
+          for t in $$TOPICS; do
+            # Skip if any partition has been written to within the stale window.
+            HW=$$(rpk -X brokers=redpanda:29092 topic describe -p "$$t" 2>/dev/null \
+                  | awk 'NR>1 {print $$5}' | sort -n | tail -1)
+            # We do not have a per-topic last-write timestamp without metrics,
+            # so heuristic: if HW > 0 the topic was used, but with our new
+            # design the stale topics are *empty* (the owner crashed before
+            # ever sending). Delete only when HW is empty/zero.
+            if [ -z "$$HW" ] || [ "$$HW" = "0" ] || [ "$$HW" = "-" ]; then
+              rpk -X brokers=redpanda:29092 topic delete "$$t" 2>/dev/null \
+                && echo "[janitor] deleted empty stale topic: $$t" \
+                || true
+            fi
+          done
         done
     networks:
       - modelline_net

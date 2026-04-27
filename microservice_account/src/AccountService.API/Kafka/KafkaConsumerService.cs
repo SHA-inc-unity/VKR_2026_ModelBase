@@ -54,6 +54,12 @@ public sealed class KafkaConsumerService : BackgroundService
         _log.LogInformation("KafkaConsumerService (account) started, topics: {Topics}",
             string.Join(", ", Topics.AllConsumed));
 
+        // Yield immediately so BackgroundService.StartAsync returns and Host.StartAsync
+        // can continue to the next hosted service (Kestrel HTTP binding). Without this,
+        // the synchronous Consume loop below blocks the startup thread indefinitely when
+        // all subscribed topics already exist and no messages are waiting.
+        await Task.Yield();
+
         await SubscribeWithRetryAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -177,14 +183,16 @@ public sealed class KafkaConsumerService : BackgroundService
 
         using var scope = _scopeFactory.CreateScope();
         var userRepo = scope.ServiceProvider.GetRequiredService<IUserRepository>();
-        var roleRepo = scope.ServiceProvider.GetRequiredService<IRoleRepository>();
 
         try
         {
             var user = await userRepo.GetByIdWithRolesAsync(userId, ct);
             if (user is null) return new { error = "not_found" };
 
-            var roles = await roleRepo.GetUserRoleCodesAsync(userId, ct);
+            // GetByIdWithRolesAsync already eagerly loads UserRoles → Role via
+            // Include/ThenInclude, so we can project role codes directly from
+            // the navigation property — no second DB roundtrip needed.
+            var roles = user.UserRoles.Select(ur => ur.Role.Code).ToList();
 
             return new
             {

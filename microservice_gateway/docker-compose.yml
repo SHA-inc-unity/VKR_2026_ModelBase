@@ -15,7 +15,7 @@ services:
       Jwt__Audience: ${JWT_AUDIENCE:-exchange-app-mobile}
       Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5020/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5020/health"]
       interval: 30s
       timeout: 10s
       retries: 3

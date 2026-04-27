@@ -66,10 +66,14 @@ public static class DatasetConstants
             ("symbol", "character varying"),
             ("exchange", "character varying"),
             ("timeframe", "character varying"),
-            ("index_price", "numeric"),
+            // OHLC tuple — all four prices come from a single Bybit kline
+            // (`/v5/market/kline`) and are written together by ingest.
+            // `close_price` was historically named `index_price`; it always
+            // stored the candle close, never a separate index series.
             ("open_price",  "numeric"),
             ("high_price",  "numeric"),
             ("low_price",   "numeric"),
+            ("close_price", "numeric"),
             ("volume",      "numeric"),
             ("turnover",    "numeric"),
             ("funding_rate", "numeric"),

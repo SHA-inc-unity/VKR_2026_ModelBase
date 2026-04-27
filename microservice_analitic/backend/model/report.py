@@ -671,9 +671,12 @@ def compute_shap_values(
     if n > max_samples:
         rng = np.random.default_rng(seed)
         idx = np.sort(rng.choice(n, size=max_samples, replace=False))
-        X_sample = X.iloc[idx].copy()
+        # Fancy-indexing already returns a fresh frame; an extra .copy() here
+        # would just duplicate the SHAP sample for no reason.
+        X_sample = X.iloc[idx]
     else:
-        X_sample = X.copy()
+        # Read-only path below (.values / .columns) — view is safe.
+        X_sample = X
 
     pool = cb.Pool(data=X_sample.values, feature_names=list(X_sample.columns))
     raw = model.get_feature_importance(pool, type="ShapValues")  # type: ignore[attr-defined]

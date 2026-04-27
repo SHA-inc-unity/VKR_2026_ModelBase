@@ -12,10 +12,11 @@ public sealed class RoleRepository : IRoleRepository
     public RoleRepository(AccountDbContext db) => _db = db;
 
     public Task<Role?> GetByCodeAsync(string code, CancellationToken ct = default) =>
-        _db.Roles.FirstOrDefaultAsync(r => r.Code == code, ct);
+        _db.Roles.AsNoTracking().FirstOrDefaultAsync(r => r.Code == code, ct);
 
     public async Task<IReadOnlyList<string>> GetUserRoleCodesAsync(Guid userId, CancellationToken ct = default) =>
         await _db.UserRoles
+            .AsNoTracking()
             .Where(ur => ur.UserId == userId)
             .Select(ur => ur.Role.Code)
             .ToListAsync(ct);

@@ -19,7 +19,7 @@ def _minimal_df(n: int = 50, timeframe: str = "60m") -> pd.DataFrame:
     prices = 40_000.0 + np.arange(n, dtype=float) * 10.0
     return pd.DataFrame({
         "timestamp_utc": ts,
-        "index_price": prices,
+        "close_price": prices,
         "symbol": "BTCUSDT",
         "timeframe": timeframe,
         "funding_rate": [0.0001] * n,
@@ -65,7 +65,7 @@ def test_build_features_returns_dataframe():
 
 def test_build_features_missing_required_column_raises():
     df = _minimal_df(n=80)
-    df = df.drop(columns=["index_price"])
+    df = df.drop(columns=["close_price"])
     with pytest.raises(ValueError, match="обязательные"):
         build_features(df)
 
@@ -81,7 +81,7 @@ def test_build_features_without_groupby():
     df = _minimal_df(n=80)
     df = df.drop(columns=["symbol", "timeframe"])
     result = build_features(df, warmup_candles=0)
-    assert "index_price" in result.columns
+    assert "close_price" in result.columns
 
 
 def test_build_features_no_target():
@@ -115,11 +115,11 @@ def test_build_features_does_not_mutate_input():
     df = _minimal_df(n=80)
     orig_cols = list(df.columns)
     orig_len = len(df)
-    orig_prices = df["index_price"].to_numpy().copy()
+    orig_prices = df["close_price"].to_numpy().copy()
     _ = build_features(df, add_target=True, warmup_candles=0)
     assert list(df.columns) == orig_cols, "build_features добавил колонки во входной df"
     assert len(df) == orig_len, "build_features изменил длину входного df"
-    np.testing.assert_array_equal(df["index_price"].to_numpy(), orig_prices)
+    np.testing.assert_array_equal(df["close_price"].to_numpy(), orig_prices)
 
 
 def test_build_features_single_group_fastpath_parity():
@@ -141,8 +141,8 @@ def test_build_features_single_group_fastpath_parity():
     assert len(res_multi_a) == 40
     expected = res_single.head(40).reset_index(drop=True)
     pd.testing.assert_series_equal(
-        res_multi_a["index_price"].reset_index(drop=True),
-        expected["index_price"].reset_index(drop=True),
+        res_multi_a["close_price"].reset_index(drop=True),
+        expected["close_price"].reset_index(drop=True),
         check_names=False,
     )
 
@@ -155,8 +155,8 @@ def test_get_feature_columns_excludes_raw_cols():
     df = _minimal_df(n=80)
     result = build_features(df, warmup_candles=0)
     feature_cols = get_feature_columns(result)
-    # Raw columns like index_price, timestamp_utc should not appear
-    assert "index_price" not in feature_cols
+    # Raw columns like close_price, timestamp_utc should not appear
+    assert "close_price" not in feature_cols
     assert "timestamp_utc" not in feature_cols
     assert len(feature_cols) > 0
 

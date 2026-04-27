@@ -10,7 +10,7 @@ import pytest
 from backend.dataset.api import (
     api_get_json,
     fetch_funding_rates,
-    fetch_index_prices,
+    fetch_close_prices,
     fetch_instrument_details,
     fetch_open_interest,
 )
@@ -147,34 +147,34 @@ def test_fetch_instrument_details_zero_funding_uses_default():
 
 
 # ---------------------------------------------------------------------------
-# fetch_index_prices
+# fetch_close_prices
 # ---------------------------------------------------------------------------
 
-def test_fetch_index_prices_success():
+def test_fetch_close_prices_success():
     items = [[str(1_704_067_200_000 + i * 3_600_000), 0, 0, 0, str(40000 + i)] for i in range(3)]
     payload = {"retCode": 0, "result": {"list": items}}
     start = 1_704_067_200_000
     end = start + 2 * 3_600_000
 
     with patch("backend.dataset.api.api_get_json", return_value=payload):
-        rows = fetch_index_prices("linear", "BTCUSDT", "60", start, end)
+        rows = fetch_close_prices("linear", "BTCUSDT", "60", start, end)
     assert len(rows) == 3
     assert rows[0][1] == 40000.0
 
 
-def test_fetch_index_prices_empty_returns_empty():
+def test_fetch_close_prices_empty_returns_empty():
     payload = {"retCode": 0, "result": {"list": []}}
     with patch("backend.dataset.api.api_get_json", return_value=payload):
-        rows = fetch_index_prices("linear", "BTCUSDT", "60", 0, 1_000_000)
+        rows = fetch_close_prices("linear", "BTCUSDT", "60", 0, 1_000_000)
     assert rows == []
 
 
-def test_fetch_index_prices_with_progress_callback():
+def test_fetch_close_prices_with_progress_callback():
     items = [[str(1_704_067_200_000), 0, 0, 0, "40000"]]
     payload = {"retCode": 0, "result": {"list": items}}
     progress_calls = []
     with patch("backend.dataset.api.api_get_json", return_value=payload):
-        fetch_index_prices(
+        fetch_close_prices(
             "linear", "BTCUSDT", "60",
             1_704_067_200_000, 1_704_067_200_000,
             progress_callback=lambda n: progress_calls.append(n),

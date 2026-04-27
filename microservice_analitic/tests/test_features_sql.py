@@ -155,5 +155,5 @@ def test_pipeline_sql_uses_raw_only_staging():
     # _RAW_STAGE_COLUMNS — tuple из 8 имён
     assert pipeline_sql._RAW_STAGE_COLUMNS == (
         "timestamp_utc", "symbol", "exchange", "timeframe",
-        "index_price", "funding_rate", "open_interest", "rsi",
+        "close_price", "funding_rate", "open_interest", "rsi",
     )

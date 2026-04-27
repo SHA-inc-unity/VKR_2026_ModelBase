@@ -21,6 +21,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
 
 # Non-root user for security
+RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
 RUN addgroup --system appgroup \
  && adduser --system --ingroup appgroup appuser
 USER appuser

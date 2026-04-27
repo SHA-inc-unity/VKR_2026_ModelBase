@@ -119,7 +119,10 @@ public sealed class AccountAppService : IAccountService
         var user = await _userRepo.GetByIdWithRolesAsync(stored.UserId, ct)
             ?? throw new UserNotFoundException(stored.UserId);
 
-        var roles = await _roleRepo.GetUserRoleCodesAsync(user.Id, ct);
+        // user.UserRoles is already populated by the Include() in
+        // GetByIdWithRolesAsync — re-querying via _roleRepo.GetUserRoleCodesAsync
+        // adds an unnecessary roundtrip on the refresh path.
+        var roles = ExtractRoleCodes(user);
         var (accessToken, rawRefresh, tokenRecord) = await IssueTokensAsync(user, roles, stored.DeviceId, ipAddress, userAgent, ct);
 
         _logger.LogInformation("Tokens refreshed for user {UserId}", user.Id);
@@ -148,8 +151,8 @@ public sealed class AccountAppService : IAccountService
     {
         var user = await _userRepo.GetByIdWithRolesAsync(userId, ct)
             ?? throw new UserNotFoundException(userId);
-        var roles = await _roleRepo.GetUserRoleCodesAsync(userId, ct);
-        return ToProfileResponse(user, roles);
+        // Roles already eagerly loaded via Include() — no second roundtrip.
+        return ToProfileResponse(user, ExtractRoleCodes(user));
     }
 
     public async Task<UserProfileResponse> UpdateProfileAsync(
@@ -157,6 +160,8 @@ public sealed class AccountAppService : IAccountService
         UpdateProfileRequest request,
         CancellationToken ct = default)
     {
+        // GetByIdAsync stays tracked (user mutates here). Roles are not on
+        // the tracked entity, so we still need one query for them.
         var user = await _userRepo.GetByIdAsync(userId, ct)
             ?? throw new UserNotFoundException(userId);
 
@@ -204,7 +209,8 @@ public sealed class AccountAppService : IAccountService
     {
         var user = await _userRepo.GetByIdWithRolesAsync(userId, ct)
             ?? throw new UserNotFoundException(userId);
-        var roles = await _roleRepo.GetUserRoleCodesAsync(userId, ct);
+        // Roles already loaded via Include().
+        var roles = ExtractRoleCodes(user);
         return new InternalUserResponse(user.Id, user.Email, user.Username, user.Status.ToString(), roles);
     }
 
@@ -273,5 +279,23 @@ public sealed class AccountAppService : IAccountService
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         return Convert.ToBase64String(bytes);
+    }
+
+    /// <summary>
+    /// Project the eagerly-loaded UserRoles navigation onto a flat list of
+    /// role codes. Used when <see cref="IUserRepository.GetByIdWithRolesAsync"/>
+    /// has already populated the graph — saves one extra query per call.
+    /// </summary>
+    private static IReadOnlyList<string> ExtractRoleCodes(User user)
+    {
+        var ur = user.UserRoles;
+        if (ur is null) return Array.Empty<string>();
+        var result = new List<string>(ur.Count);
+        foreach (var link in ur)
+        {
+            var code = link.Role?.Code;
+            if (!string.IsNullOrEmpty(code)) result.Add(code);
+        }
+        return result;
     }
 }

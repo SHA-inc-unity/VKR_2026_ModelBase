@@ -1,12 +1,14 @@
-'use client';
+﻿'use client';
 import dynamic from 'next/dynamic';
 import { useEffect, useRef, useState } from 'react';
 import { cacheRead, cacheWrite } from '@/lib/cacheClient';
-import { CheckCircle2, Database, Download, DownloadCloud, Loader2, RefreshCw, Trash2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Database, Download, DownloadCloud, Loader2, RefreshCw, ShieldCheck, Trash2, Wrench, XCircle } from 'lucide-react';
 import { kafkaCall, newCorrelationId } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
 import { useEvents } from '@/hooks/useEvents';
+import { applyJobProgress, applyJobCompleted, refreshActiveJobs } from '@/hooks/useDatasetJobs';
+import DatasetJobsPanel from '@/components/DatasetJobsPanel';
 import {
   SYMBOLS,
   TIMEFRAMES,
@@ -16,7 +18,13 @@ import {
   getCoveragePct,
   formatDateFromMs,
 } from '@/lib/constants';
-import type { TableCoverage, IngestStage } from '@/lib/types';
+import type {
+  TableCoverage,
+  IngestStage,
+  RepairStage,
+  RepairStageId,
+  QualityReport,
+} from '@/lib/types';
 import { useHistory } from '@/hooks/useHistory';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -83,6 +91,17 @@ interface AllCoverageItem {
 
 type TfStatus = 'pending' | 'running' | 'done' | 'error';
 
+interface TfMeta { startedAt: number; endedAt?: number; rows?: number; }
+
+/**
+ * Adaptive timeout: ~800 ms per 1 000 candles + 45 s base, capped at 10 min.
+ * For 1m × 90 days ≈ 149 s; for 1d × 90 days ≈ 45 s.
+ */
+function calcIngestTimeout(stepMs: number, startMs: number, endMs: number): number {
+  const candles = Math.ceil((endMs - startMs) / stepMs);
+  return Math.min(Math.round(candles / 1_000 * 800) + 45_000, 600_000);
+}
+
 const INITIAL_STAGES: IngestStage[] = [
   { id: 'prepare',       label: 'Подготовка таблицы',    status: 'pending', progress: 0 },
   { id: 'fetch_klines',  label: 'Загрузка свечей',       status: 'pending', progress: 0 },
@@ -91,6 +110,31 @@ const INITIAL_STAGES: IngestStage[] = [
   { id: 'compute_rsi',   label: 'Вычисление RSI',        status: 'pending', progress: 0 },
   { id: 'upsert',        label: 'Запись в базу',         status: 'pending', progress: 0 },
 ];
+
+// Stage templates for the two repair flows. The audit/repair pipeline emits
+// only a subset of these IDs depending on which "Исправить" button was used.
+const INITIAL_REPAIR_STAGES_OHLCV: RepairStage[] = [
+  { id: 'prepare', label: 'Подготовка',     status: 'pending', progress: 0 },
+  { id: 'fetch',   label: 'Загрузка свечей', status: 'pending', progress: 0 },
+  { id: 'upsert',  label: 'Запись в базу',   status: 'pending', progress: 0 },
+];
+
+const INITIAL_REPAIR_STAGES_RECOMPUTE: RepairStage[] = [
+  { id: 'prepare',   label: 'Подготовка',  status: 'pending', progress: 0 },
+  { id: 'recompute', label: 'Пересчёт фич', status: 'pending', progress: 0 },
+];
+
+// Parse the canonical "{symbol_lower}_{timeframe}" table name back into
+// (SYMBOL, timeframe). Handles cases where the symbol itself contains
+// underscores by treating the trailing token as the timeframe.
+function parseTableName(table: string): { symbol: string; timeframe: string } | null {
+  const i = table.lastIndexOf('_');
+  if (i <= 0 || i === table.length - 1) return null;
+  return {
+    symbol:    table.slice(0, i).toUpperCase(),
+    timeframe: table.slice(i + 1),
+  };
+}
 
 function IngestProgress({ stages }: { stages: IngestStage[] }) {
   return (
@@ -139,52 +183,137 @@ function IngestProgress({ stages }: { stages: IngestStage[] }) {
   );
 }
 
-function AllIngestProgress({ statuses }: { statuses: Record<string, TfStatus> }) {
-  const tfs   = Object.keys(statuses);
-  const total = tfs.length;
-  const done  = tfs.filter(tf => statuses[tf] === 'done' || statuses[tf] === 'error').length;
-  const pct   = total > 0 ? (done / total) * 100 : 0;
+function AllIngestProgress({
+  statuses,
+  meta,
+}: {
+  statuses: Record<string, TfStatus>;
+  meta:     Record<string, TfMeta>;
+}) {
+  // Force re-render every second while any TF is still running so
+  // elapsed-time counters update in real-time.
+  const [, setTick] = useState(0);
+  const hasRunning = Object.values(statuses).some(s => s === 'running');
+  useEffect(() => {
+    if (!hasRunning) return;
+    const id = setInterval(() => setTick(t => t + 1), 1_000);
+    return () => clearInterval(id);
+  }, [hasRunning]);
+
+  const tfs        = Object.keys(statuses);
+  const total      = tfs.length;
+  const doneCount  = tfs.filter(tf => statuses[tf] === 'done').length;
+  const errCount   = tfs.filter(tf => statuses[tf] === 'error').length;
+  const runCount   = tfs.filter(tf => statuses[tf] === 'running').length;
+  const finished   = doneCount + errCount;
+
+  const donePct  = total > 0 ? (doneCount  / total) * 100 : 0;
+  const errPct   = total > 0 ? (errCount   / total) * 100 : 0;
+  const runPct   = total > 0 ? (runCount   / total) * 100 : 0;
+
+  function fmtDur(ms: number): string {
+    if (ms < 1_000) return '<1с';
+    if (ms < 60_000) return `${Math.round(ms / 1_000)}с`;
+    const m = Math.floor(ms / 60_000);
+    const s = Math.round((ms % 60_000) / 1_000);
+    return `${m}м${s}с`;
+  }
 
   return (
     <div className="pt-2 space-y-2">
+      {/* Segmented progress bar */}
       <div className="space-y-1">
-        <Progress value={pct} className="h-1.5 w-full" />
-        <p className="text-[10px] text-muted-foreground tabular-nums text-right">
-          {done} / {total} таймфреймов
-        </p>
+        <div className="relative h-2 w-full overflow-hidden rounded-full bg-muted">
+          {/* error segment (left) */}
+          <div
+            className="absolute left-0 top-0 h-full bg-destructive/80 transition-all duration-500"
+            style={{ width: `${errPct}%` }}
+          />
+          {/* done segment */}
+          <div
+            className="absolute top-0 h-full bg-primary transition-all duration-500"
+            style={{ left: `${errPct}%`, width: `${donePct}%` }}
+          />
+          {/* running shimmer */}
+          {hasRunning && (
+            <div
+              className="absolute top-0 h-full animate-pulse bg-primary/40 transition-all duration-500"
+              style={{ left: `${errPct + donePct}%`, width: `${runPct}%` }}
+            />
+          )}
+        </div>
+        <div className="flex justify-between text-[10px] text-muted-foreground tabular-nums">
+          <span>
+            {runCount > 0 && `${runCount} загружается…`}
+          </span>
+          <span>
+            {finished} / {total} таймфреймов
+            {errCount > 0 && (
+              <span className="ml-1 text-destructive">({errCount} ошибок)</span>
+            )}
+          </span>
+        </div>
       </div>
+
+      {/* Per-TF list */}
       <div className="flex flex-col gap-1">
         {tfs.map(tf => {
           const st = statuses[tf];
+          const m  = meta[tf];
+          const elapsed = m
+            ? (m.endedAt ?? Date.now()) - m.startedAt
+            : undefined;
           return (
-            <div key={tf} className="flex items-center gap-3">
+            <div key={tf} className="flex items-center gap-2">
               <div className="flex-shrink-0 w-3.5 h-3.5 flex items-center justify-center">
-                {st === 'pending' && (
-                  <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/30" />
-                )}
-                {st === 'running' && (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
-                )}
-                {st === 'done' && (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-success" />
-                )}
-                {st === 'error' && (
-                  <XCircle className="w-3.5 h-3.5 text-destructive" />
-                )}
+                {st === 'pending' && <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/30" />}
+                {st === 'running' && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />}
+                {st === 'done' && (m?.rows ?? 1) > 0 && <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />}
+                {st === 'done' && m?.rows === 0        && <AlertTriangle className="w-3.5 h-3.5 text-yellow-500" />}
+                {st === 'error'   && <XCircle          className="w-3.5 h-3.5 text-destructive" />}
               </div>
               <span className={cn(
-                'text-xs font-mono',
+                'text-xs font-mono w-9 shrink-0',
                 st === 'pending' && 'text-muted-foreground',
-                st === 'error' && 'text-destructive',
+                st === 'running' && 'text-foreground',
+                st === 'done' && (m?.rows ?? 1) > 0 && 'text-foreground',
+                st === 'done' && m?.rows === 0 && 'text-yellow-500',
+                st === 'error'   && 'text-destructive',
               )}>
                 {tf}
               </span>
+              <div className="flex flex-1 items-center gap-2 min-w-0">
+                {elapsed !== undefined && (
+                  <span className="text-[10px] text-muted-foreground tabular-nums">
+                    {fmtDur(elapsed)}
+                  </span>
+                )}
+                {m?.rows !== undefined && (
+                  <span className={cn(
+                    'text-[10px] tabular-nums',
+                    m.rows === 0 ? 'text-yellow-500' : 'text-muted-foreground',
+                  )}>
+                    {m.rows.toLocaleString()} строк
+                  </span>
+                )}
+              </div>
             </div>
           );
         })}
       </div>
     </div>
   );
+}
+
+function formatErrorHint(msg: string): string {
+  if (/timeout|timed out/i.test(msg)) return 'Таймаут ответа';
+  if (/table not found/i.test(msg))   return 'Таблица не найдена';
+  const colonIdx = msg.indexOf('column_stats failed:');
+  if (colonIdx !== -1) {
+    const tail = msg.slice(colonIdx + 'column_stats failed:'.length).trim();
+    return tail.length > 45 ? tail.slice(0, 45) + '…' : tail;
+  }
+  return msg.length > 45 ? msg.slice(0, 45) + '…' : msg;
 }
 
 export default function DatasetPage() {
@@ -230,10 +359,46 @@ export default function DatasetPage() {
   const [loadingDelete, setLoadingDelete] = useState(false);
   const [allCoverages, setAllCoverages] = useState<AllCoverageItem[] | null>(null);
   const [allIngestStatuses, setAllIngestStatuses] = useState<Record<string, TfStatus> | null>(null);
+  const [allIngestMeta,    setAllIngestMeta]    = useState<Record<string, TfMeta>>({});
+  const [loadingExport,  setLoadingExport]  = useState(false);
 
   // Ingest progress (staged, driven by EVT_DATA_INGEST_PROGRESS events).
   const [ingestStages, setIngestStages] = useState<IngestStage[] | null>(null);
-  const ingestCidRef = useRef<string | null>(null);
+  const ingestCidRef     = useRef<string | null>(null);
+  const operationLockRef = useRef(false);
+
+  // Quality audit + repair (per-table, opens on row click).
+  const [selectedTable,  setSelectedTable]  = useState<string | null>(null);
+  const [qualityReport,  setQualityReport]  = useState<QualityReport | null>(null);
+  const [loadingQuality, setLoadingQuality] = useState(false);
+  const [repairStages,   setRepairStages]   = useState<RepairStage[] | null>(null);
+  const [repairAction,   setRepairAction]   = useState<'load_ohlcv' | 'recompute_features' | null>(null);
+  const [loadingRepair,  setLoadingRepair]  = useState(false);
+  const repairCidRef = useRef<string | null>(null);
+
+  // Fix All — sequential batch repair of all broken groups across all timeframes
+  const fixAllCancelRef  = useRef(false);
+  const [fixAllRunning,  setFixAllRunning]  = useState(false);
+  const [fixAllProgress, setFixAllProgress] = useState<{
+    current:   number;
+    total:     number;
+    activeOps: { label: string }[];
+    completed: { table: string; action: string; ok: boolean; errorMessage?: string }[];
+    done:      boolean;
+    fixed:     number;
+    errors:    number;
+  } | null>(null);
+
+  const [isAllMode,         setIsAllMode]         = useState(false);
+  const [allQualityResults, setAllQualityResults] = useState<Record<string, QualityReport> | null>(null);
+  const [qualityProgress,   setQualityProgress]   = useState<{
+    done:     number;
+    total:    number;
+    slots:    { tf: string; status: 'running' | 'done' | 'error'; message?: string; startedAt?: number }[];
+    errors:   number;
+    finished: boolean;
+    errorLog: { tf: string; message: string }[];
+  } | null>(null);
 
   useEvents({
     EVT_DATA_INGEST_PROGRESS: (ev) => {
@@ -250,26 +415,83 @@ export default function DatasetPage() {
         };
       }));
     },
+    EVT_ANALITIC_DATASET_REPAIR_PROGRESS: (ev) => {
+      if (!repairCidRef.current || ev.correlation_id !== repairCidRef.current) return;
+      setRepairStages(prev => {
+        if (!prev) return prev;
+        return prev.map(s => {
+          if (s.id !== (ev.stage as RepairStageId)) return s;
+          const status: RepairStage['status'] =
+            ev.status === 'done' ? 'done' : ev.status === 'error' ? 'error' : 'running';
+          return {
+            ...s,
+            status,
+            progress: ev.status === 'done' ? 100 : ev.progress,
+            detail: ev.detail ?? s.detail,
+          };
+        });
+      });
+    },
+    EVT_DATA_DATASET_JOB_PROGRESS:  (ev) => applyJobProgress(ev),
+    EVT_DATA_DATASET_JOB_COMPLETED: (ev) => applyJobCompleted(ev),
   });
 
+  // Phase G hydration: on mount, fetch any jobs that are still active so
+  // refreshing the page doesn't lose progress visibility.
+  useEffect(() => {
+    void refreshActiveJobs();
+  }, []);
+
+  // Tick re-render every second so elapsed timers in running slots update.
+  useEffect(() => {
+    if (qualityProgress === null || qualityProgress.finished) return;
+    if (!qualityProgress.slots.some(s => s.status === 'running')) return;
+    const id = setInterval(() => {
+      setQualityProgress(prev => (prev ? { ...prev } : prev));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [qualityProgress?.finished, qualityProgress?.slots]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleListTables = async () => {
+    if (operationLockRef.current) return;
+    operationLockRef.current = true;
     setLoadingList(true);
     const t0 = Date.now();
     try {
-      // Backend may return either a legacy string[] or rich objects — accept both
-      // and fall back to the Dashboard pattern: names first, then per-table coverage
-      // in parallel so the client always derives coverage_pct/dates via the same
-      // shared helpers.
-      const res = await kafkaCall<{ tables: Array<string | { table_name: string }> }>(
+      // Backend enriches every entry with rows / coverage_pct / date_from / date_to
+      // in a single round-trip. Legacy string[] is still tolerated here so a
+      // rolling deploy where DataService is older than Admin doesn't break the
+      // page; that fallback should be removed once both services are in lockstep.
+      const res = await kafkaCall<{
+        tables: Array<string | {
+          table_name: string;
+          rows?: number;
+          coverage_pct?: number;
+          date_from?: string | null;
+          date_to?: string | null;
+        }>;
+      }>(
         Topics.CMD_DATA_DATASET_LIST_TABLES,
         {},
       );
-      const names: string[] = (res.tables ?? []).map(x =>
-        typeof x === 'string' ? x : x.table_name,
-      );
 
-      const infos: DataTableInfo[] = await Promise.all(
-        names.map(async name => {
+      const raw = res.tables ?? [];
+      const enriched = raw.filter((x): x is { table_name: string; rows?: number; coverage_pct?: number; date_from?: string | null; date_to?: string | null } => typeof x !== 'string');
+      const legacyNames = raw.filter((x): x is string => typeof x === 'string');
+
+      const fromEnriched: DataTableInfo[] = enriched.map(t => ({
+        table_name:   t.table_name,
+        rows:         t.rows ?? 0,
+        coverage_pct: t.coverage_pct ?? 0,
+        date_from:    t.date_from ?? undefined,
+        date_to:      t.date_to ?? undefined,
+      }));
+
+      // Transitional fallback: only fan-out coverage for legacy string entries.
+      // When all entries are enriched (the happy path) this loop is empty and
+      // we make exactly ONE Kafka round-trip.
+      const fromLegacy: DataTableInfo[] = await Promise.all(
+        legacyNames.map(async name => {
           try {
             const cv = await kafkaCall<TableCoverage>(
               Topics.CMD_DATA_DATASET_COVERAGE,
@@ -287,6 +509,8 @@ export default function DatasetPage() {
           }
         }),
       );
+
+      const infos = [...fromEnriched, ...fromLegacy];
       setTables(infos);
       void cacheWrite(CACHE_TABLES_KEY, infos, CACHE_TABLES_TTL);
       addEntry({ action: 'Check', params: { symbol, timeframe }, result: `${infos.length} tables`, durationMs: Date.now() - t0 });
@@ -295,11 +519,14 @@ export default function DatasetPage() {
       toast(msg, 'error');
       addEntry({ action: 'Check', params: { symbol, timeframe }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
     } finally {
+      operationLockRef.current = false;
       setLoadingList(false);
     }
   };
 
   const handleCheckCoverage = async () => {
+    if (operationLockRef.current) return;
+    operationLockRef.current = true;
     setLoadingCov(true);
     const t0 = Date.now();
     try {
@@ -363,11 +590,14 @@ export default function DatasetPage() {
       toast(msg, 'error');
       addEntry({ action: 'Check', params: { symbol, timeframe, dateFrom, dateTo }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
     } finally {
+      operationLockRef.current = false;
       setLoadingCov(false);
     }
   };
 
   const handleIngest = async () => {
+    if (operationLockRef.current) return;
+    operationLockRef.current = true;
     setLoadingIngest(true);
     const t0 = Date.now();
     try {
@@ -378,6 +608,7 @@ export default function DatasetPage() {
         const initialStatuses: Record<string, TfStatus> = {};
         for (const tf of tfs) initialStatuses[tf] = 'pending';
         setAllIngestStatuses(initialStatuses);
+        setAllIngestMeta({});
 
         // Seed allCoverages skeleton so the right-hand Coverage table renders
         // immediately; each successful ingest replaces one row in place.
@@ -407,17 +638,29 @@ export default function DatasetPage() {
             for (const tf of batch) next[tf] = 'running';
             return next;
           });
+          // Record startedAt for each TF in this batch.
+          const batchStartMs = Date.now();
+          setAllIngestMeta(prev => {
+            const next = { ...prev };
+            for (const tf of batch) next[tf] = { startedAt: batchStartMs };
+            return next;
+          });
 
           const results = await Promise.allSettled(
             batch.map(tf =>
               kafkaCall<{ rows_ingested: number; message?: string }>(
                 Topics.CMD_DATA_DATASET_INGEST,
                 { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs },
-                { timeoutMs: 60_000 },
+                { timeoutMs: calcIngestTimeout(TF_STEP_MS[tf] ?? 60_000, startMs, endMs) },
               ).then(async res => {
-                totalRows += res.rows_ingested ?? 0;
+                const rows = res.rows_ingested ?? 0;
+                totalRows += rows;
                 successes++;
                 setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'done' }));
+                setAllIngestMeta(prev => ({
+                  ...prev,
+                  [tf]: { ...(prev[tf] ?? { startedAt: batchStartMs }), endedAt: Date.now(), rows },
+                }));
 
                 // Refresh just this row of the Coverage table.
                 try {
@@ -450,6 +693,10 @@ export default function DatasetPage() {
               const msg = result.reason instanceof Error ? result.reason.message : String(result.reason);
               toast(`${tf}: ${msg}`, 'info');
               setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
+              setAllIngestMeta(prev => ({
+                ...prev,
+                [tf]: { ...(prev[tf] ?? { startedAt: batchStartMs }), endedAt: Date.now() },
+              }));
             }
           }
         }
@@ -462,10 +709,12 @@ export default function DatasetPage() {
         const cid = newCorrelationId();
         ingestCidRef.current = cid;
         setIngestStages(INITIAL_STAGES);
+        const _sMs = new Date(dateFrom).getTime();
+        const _eMs = new Date(dateTo + 'T23:59:59').getTime();
         const res = await kafkaCall<{ rows_ingested: number; message?: string }>(
           Topics.CMD_DATA_DATASET_INGEST,
-          { symbol, timeframe, start_ms: new Date(dateFrom).getTime(), end_ms: new Date(dateTo + 'T23:59:59').getTime() },
-          { timeoutMs: 60_000, correlationId: cid },
+          { symbol, timeframe, start_ms: _sMs, end_ms: _eMs },
+          { timeoutMs: calcIngestTimeout(TF_STEP_MS[timeframe] ?? 60_000, _sMs, _eMs), correlationId: cid },
         );
         const msg = res.message ?? `Ingested ${res.rows_ingested ?? 0} rows`;
         toast(msg, 'success');
@@ -477,16 +726,19 @@ export default function DatasetPage() {
       toast(msg, 'error');
       addEntry({ action: 'Download', params: { symbol, timeframe, dateFrom, dateTo }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
     } finally {
+      operationLockRef.current = false;
       setLoadingIngest(false);
     }
   };
 
   const handleDeleteRows = async () => {
+    if (operationLockRef.current) return;
+    operationLockRef.current = true;
     if (timeframe === 'ALL') {
       const confirmed = typeof window !== 'undefined' && window.confirm(
         `Удалить все строки по ВСЕМ таймфреймам для ${symbol}?\nЭто удалит данные из ${TIMEFRAMES.length} таблиц и не может быть отменено.`,
       );
-      if (!confirmed) return;
+      if (!confirmed) { operationLockRef.current = false; return; }
 
       setLoadingDelete(true);
       const t0 = Date.now();
@@ -513,6 +765,7 @@ export default function DatasetPage() {
         addEntry({ action: 'Check', params: { symbol, timeframe: 'ALL' }, result: msg, durationMs: Date.now() - t0 });
         handleListTables();
       } finally {
+        operationLockRef.current = false;
         setLoadingDelete(false);
       }
     } else {
@@ -520,7 +773,7 @@ export default function DatasetPage() {
       const confirmed = typeof window !== 'undefined' && window.confirm(
         `Удалить все строки из таблицы ${table}? Это действие нельзя отменить.`,
       );
-      if (!confirmed) return;
+      if (!confirmed) { operationLockRef.current = false; return; }
 
       setLoadingDelete(true);
       const t0 = Date.now();
@@ -540,22 +793,17 @@ export default function DatasetPage() {
         toast(msg, 'error');
         addEntry({ action: 'Check', params: { symbol, timeframe }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
       } finally {
+        operationLockRef.current = false;
         setLoadingDelete(false);
       }
     }
   };
 
-  // Single-click export. Runs synchronously inside the button's user-gesture
-  // so the browser treats the download as user-initiated (no suppression).
-  //
-  //   timeframe === 'ALL' → one URL, one <a>.click, server returns a ZIP
-  //     (DataService bundles every per-timeframe CSV via ZipArchive → MinIO
-  //     claim-check → Admin re-streams as application/zip).
-  //   otherwise → one URL, one <a>.click, server returns 302 to a MinIO
-  //     presigned URL (DataService streams COPY TO STDOUT directly into
-  //     MinIO; no byte buffering in Admin).
-  const handleExportCsv = () => {
+  const handleExportCsv = async () => {
+    if (operationLockRef.current) return;
+    operationLockRef.current = true;
     if (!dateFrom || !dateTo) {
+      operationLockRef.current = false;
       toast('Укажите даты From/To', 'info');
       return;
     }
@@ -577,23 +825,346 @@ export default function DatasetPage() {
       filename = `${table}.csv`;
     }
 
-    const a = document.createElement('a');
-    a.href     = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    toast(`Экспорт ${filename} начат`, 'success');
+    setLoadingExport(true);
+    try {
+      // Admin holds the connection open while Kafka + DataService + MinIO
+      // complete; only a tiny JSON { presigned_url } returns — no file bytes.
+      const res = await fetch(url);
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error((j as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+
+      const { presigned_url } = await res.json() as { presigned_url?: string };
+      if (!presigned_url) throw new Error('Сервер не вернул presigned_url');
+
+      // Browser downloads directly from MinIO — native progress in download panel.
+      const a    = document.createElement('a');
+      a.href     = presigned_url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      toast('Загрузка началась', 'success');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast(msg, 'error');
+    } finally {
+      operationLockRef.current = false;
+      setLoadingExport(false);
+    }
   };
 
-  const isBusy = loadingList || loadingIngest || loadingCov || loadingDelete;
+  const isBusy = loadingList || loadingIngest || loadingCov || loadingDelete || loadingExport;
   const datasetHistory = history.filter(h => h.action === 'Check' || h.action === 'Download').slice(0, 20);
+
+  // ── Quality audit & repair ────────────────────────────────────────────────
+
+  const runQualityCheck = async (table: string): Promise<QualityReport | null> => {
+    if (!table) return null;
+    setLoadingQuality(true);
+    setQualityReport(null);
+    try {
+      const res = await kafkaCall<QualityReport | { error: string }>(
+        Topics.CMD_ANALITIC_DATASET_QUALITY_CHECK,
+        { table },
+        { timeoutMs: 60_000 },
+      );
+      if ('error' in res) {
+        toast(`Quality check failed: ${res.error}`, 'error');
+        return null;
+      }
+      setQualityReport(res);
+      return res;
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error');
+      return null;
+    } finally {
+      setLoadingQuality(false);
+    }
+  };
+
+  const runRepair = async (table: string, action: 'load_ohlcv' | 'recompute_features') => {
+    if (loadingRepair) return;
+    const parsed = parseTableName(table);
+    if (!parsed) {
+      toast(`Cannot parse table name: ${table}`, 'error');
+      return;
+    }
+    const cid = newCorrelationId();
+    repairCidRef.current = cid;
+    setRepairAction(action);
+    setRepairStages(action === 'load_ohlcv'
+      ? INITIAL_REPAIR_STAGES_OHLCV.map(s => ({ ...s }))
+      : INITIAL_REPAIR_STAGES_RECOMPUTE.map(s => ({ ...s })));
+    setLoadingRepair(true);
+    const t0 = Date.now();
+    try {
+      if (action === 'load_ohlcv') {
+        const startMs = new Date(dateFrom).getTime();
+        const endMs   = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1;
+        const reply = await kafkaCall<{ rows_affected?: number; error?: string }>(
+          Topics.CMD_ANALITIC_DATASET_LOAD_OHLCV,
+          { symbol: parsed.symbol, timeframe: parsed.timeframe, start_ms: startMs, end_ms: endMs },
+          { correlationId: cid, timeoutMs: 600_000 },
+        );
+        if (reply.error) {
+          toast(`Load OHLCV failed: ${reply.error}`, 'error');
+        } else {
+          toast(`OHLCV upserted: ${reply.rows_affected ?? 0} rows`, 'success');
+        }
+        addEntry({
+          action: 'Download',
+          params: { symbol: parsed.symbol, timeframe: parsed.timeframe, dateFrom, dateTo },
+          result: reply.error ? `Error: ${reply.error}` : `${reply.rows_affected ?? 0} rows`,
+          durationMs: Date.now() - t0,
+        });
+      } else {
+        const reply = await kafkaCall<{ rows_updated?: number; error?: string }>(
+          Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES,
+          { symbol: parsed.symbol, timeframe: parsed.timeframe },
+          { correlationId: cid, timeoutMs: 600_000 },
+        );
+        if (reply.error) {
+          toast(`Recompute failed: ${reply.error}`, 'error');
+        } else {
+          toast(`Features recomputed: ${reply.rows_updated ?? 0} rows`, 'success');
+        }
+        addEntry({
+          action: 'Download',
+          params: { symbol: parsed.symbol, timeframe: parsed.timeframe },
+          result: reply.error ? `Error: ${reply.error}` : `${reply.rows_updated ?? 0} rows`,
+          durationMs: Date.now() - t0,
+        });
+      }
+      // Re-audit after repair so the user sees the updated fill ratios.
+      const fresh = await runQualityCheck(table);
+      if (fresh) {
+        setAllQualityResults(prev => (prev && table in prev) ? { ...prev, [table]: fresh } : prev);
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setLoadingRepair(false);
+      repairCidRef.current = null;
+    }
+  };
+
+  /** Same repair logic as runRepair but without per-repair UI state. Used by handleFixAll. */
+  const runRepairSilent = async (table: string, action: 'load_ohlcv' | 'recompute_features'): Promise<void> => {
+    const parsed = parseTableName(table);
+    if (!parsed) throw new Error(`Cannot parse table name: ${table}`);
+    const t0 = Date.now();
+    if (action === 'load_ohlcv') {
+      const startMs = new Date(dateFrom).getTime();
+      const endMs   = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1;
+      const reply = await kafkaCall<{ rows_affected?: number; error?: string }>(
+        Topics.CMD_ANALITIC_DATASET_LOAD_OHLCV,
+        { symbol: parsed.symbol, timeframe: parsed.timeframe, start_ms: startMs, end_ms: endMs },
+        { timeoutMs: 600_000 },
+      );
+      addEntry({ action: 'Download', params: { symbol: parsed.symbol, timeframe: parsed.timeframe, dateFrom, dateTo }, result: reply.error ? `Error: ${reply.error}` : `${reply.rows_affected ?? 0} rows`, durationMs: Date.now() - t0 });
+      if (reply.error) throw new Error(reply.error);
+    } else {
+      const reply = await kafkaCall<{ rows_updated?: number; error?: string }>(
+        Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES,
+        { symbol: parsed.symbol, timeframe: parsed.timeframe },
+        { timeoutMs: 600_000 },
+      );
+      addEntry({ action: 'Download', params: { symbol: parsed.symbol, timeframe: parsed.timeframe }, result: reply.error ? `Error: ${reply.error}` : `${reply.rows_updated ?? 0} rows`, durationMs: Date.now() - t0 });
+      if (reply.error) throw new Error(reply.error);
+    }
+    // Re-audit so the grid reflects the updated fill ratios.
+    try {
+      const res = await kafkaCall<QualityReport | { error: string }>(
+        Topics.CMD_ANALITIC_DATASET_QUALITY_CHECK,
+        { table },
+        { timeoutMs: 60_000 },
+      );
+      if (!('error' in res)) {
+        setAllQualityResults(prev => prev ? { ...prev, [table]: res as QualityReport } : prev);
+      }
+    } catch { /* non-fatal */ }
+  };
+
+  const handleRepairDataset = async () => {
+    if (loadingQuality || loadingRepair) return;
+    setQualityReport(null);
+    setAllQualityResults(null);
+    setRepairStages(null);
+    setQualityProgress(null);
+    if (timeframe !== 'ALL') {
+      setIsAllMode(false);
+      const table = makeTableName(symbol, timeframe);
+      setSelectedTable(table);
+      await runQualityCheck(table);
+    } else {
+      setIsAllMode(true);
+      setSelectedTable(null);
+      const tfs = [...TIMEFRAMES] as string[];
+      const total = tfs.length;
+      const CONCURRENCY = 2;
+      setQualityProgress({ done: 0, total, slots: [], errors: 0, finished: false, errorLog: [] });
+      setLoadingQuality(true);
+      const results: Record<string, QualityReport> = {};
+      let totalErrors = 0;
+      try {
+        for (let i = 0; i < tfs.length; i += CONCURRENCY) {
+          const batch = tfs.slice(i, i + CONCURRENCY);
+
+          // Mark both TFs in this batch as running before launching.
+          const batchStartedAt = Date.now();
+          setQualityProgress(prev => prev
+            ? { ...prev, slots: batch.map(tf => ({ tf, status: 'running' as const, startedAt: batchStartedAt })) }
+            : prev,
+          );
+
+          const batchResults = await Promise.allSettled(
+            batch.map(async tf => {
+              const table = makeTableName(symbol, tf);
+              const res = await kafkaCall<QualityReport | { error: string }>(
+                Topics.CMD_ANALITIC_DATASET_QUALITY_CHECK,
+                { table },
+                { timeoutMs: 60_000 },
+              );
+              if ('error' in res) throw new Error(res.error);
+              return { tf, table, report: res as QualityReport };
+            }),
+          );
+
+          const completedSlots: { tf: string; status: 'done' | 'error'; message?: string }[] = [];
+          const newErrors: { tf: string; message: string }[] = [];
+          let batchErrors = 0;
+          for (let j = 0; j < batchResults.length; j++) {
+            const r = batchResults[j];
+            if (r.status === 'fulfilled') {
+              results[r.value.table] = r.value.report;
+              completedSlots.push({ tf: batch[j], status: 'done' });
+            } else {
+              const message = (r.reason as Error)?.message ?? 'Неизвестная ошибка';
+              batchErrors++;
+              completedSlots.push({ tf: batch[j], status: 'error', message });
+              newErrors.push({ tf: batch[j], message });
+            }
+          }
+          totalErrors += batchErrors;
+
+          // done increments after completion, not before.
+          setQualityProgress(prev => prev
+            ? { ...prev, done: prev.done + batch.length, slots: completedSlots, errors: totalErrors, errorLog: [...(prev.errorLog ?? []), ...newErrors] }
+            : prev,
+          );
+        }
+
+        // Hold at 100% for a beat so the user sees the completed state.
+        await new Promise<void>(resolve => setTimeout(resolve, 900));
+      } finally {
+        setLoadingQuality(false);
+        if (totalErrors > 0) {
+          // Keep the block visible with error details; user closes it manually.
+          setQualityProgress(prev => prev ? { ...prev, finished: true } : prev);
+        } else {
+          setQualityProgress(null);
+        }
+        setAllQualityResults(results);
+      }
+    }
+  };
+
+  const handleFixAll = async () => {
+    if (!allQualityResults || fixAllRunning) return;
+    type FixOp = { table: string; action: 'load_ohlcv' | 'recompute_features'; label: string };
+    const ops: FixOp[] = [];
+    for (const [table, report] of Object.entries(allQualityResults)) {
+      const broken = report.groups.filter(g => g.status !== 'full');
+      if (broken.length === 0) continue;
+      // Fixed order: load_ohlcv first, recompute_features second. One per type per table.
+      if (broken.some(g => g.repair_action === 'load_ohlcv'))
+        ops.push({ table, action: 'load_ohlcv', label: `${table}: Загрузить OHLCV` });
+      if (broken.some(g => g.repair_action === 'recompute_features'))
+        ops.push({ table, action: 'recompute_features', label: `${table}: Пересчитать фичи` });
+    }
+    if (ops.length === 0) return;
+
+    const CONCURRENCY = 4;
+    fixAllCancelRef.current = false;
+    setFixAllRunning(true);
+    setFixAllProgress({ current: 0, total: ops.length, activeOps: [], completed: [], done: false, fixed: 0, errors: 0 });
+
+    // Scheduler state — mutated only in microtask callbacks (no true JS races)
+    const pending = [...ops];
+    const runningTables = new Set<string>();
+    const active: { table: string; action: string; label: string }[] = [];
+    let runningCount = 0;
+    let doneCount    = 0;
+    let fixedCount   = 0;
+    let errorCount   = 0;
+    const completedList: { table: string; action: string; ok: boolean; errorMessage?: string }[] = [];
+
+    await new Promise<void>(resolve => {
+      let resolved = false;
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        setFixAllRunning(false);
+        setFixAllProgress(prev =>
+          prev ? { ...prev, done: true, current: doneCount, activeOps: [], fixed: fixedCount, errors: errorCount } : prev,
+        );
+        resolve();
+      };
+
+      const trySchedule = () => {
+        while (!fixAllCancelRef.current && runningCount < CONCURRENCY && pending.length > 0) {
+          const idx = pending.findIndex(op => !runningTables.has(op.table));
+          if (idx === -1) break; // All remaining ops blocked by per-table lock
+          const op = pending.splice(idx, 1)[0];
+          runningTables.add(op.table);
+          runningCount++;
+          active.push({ table: op.table, action: op.action, label: op.label });
+          setFixAllProgress(prev =>
+            prev ? { ...prev, activeOps: active.map(a => ({ label: a.label })) } : prev,
+          );
+          runRepairSilent(op.table, op.action)
+            .then(()  => { fixedCount++;  completedList.push({ table: op.table, action: op.action, ok: true  }); })
+            .catch((err: unknown) => { errorCount++;  completedList.push({ table: op.table, action: op.action, ok: false, errorMessage: err instanceof Error ? err.message : String(err) }); })
+            .finally(() => {
+              doneCount++;
+              runningCount--;
+              runningTables.delete(op.table);
+              const li = active.findIndex(a => a.table === op.table && a.action === op.action);
+              if (li !== -1) active.splice(li, 1);
+              setFixAllProgress(prev =>
+                prev ? {
+                  ...prev,
+                  current:   doneCount,
+                  activeOps: active.map(a => ({ label: a.label })),
+                  completed: [...completedList],
+                  fixed:     fixedCount,
+                  errors:    errorCount,
+                } : prev,
+              );
+              if (runningCount === 0 && (pending.length === 0 || fixAllCancelRef.current)) {
+                finish();
+                return;
+              }
+              trySchedule();
+            });
+        }
+        if (runningCount === 0) finish();
+      };
+
+      trySchedule();
+    });
+  };
 
   return (
     <div className="flex flex-col gap-4 sm:gap-6 w-full">
       <header className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight">Dataset</h1>
       </header>
+
+      <DatasetJobsPanel />
 
       {/* ── 2-column: Config left | Coverage right ── */}
       <div className="grid grid-cols-1 lg:grid-cols-[380px,1fr] gap-4 sm:gap-6 items-start">
@@ -643,8 +1214,15 @@ export default function DatasetPage() {
                 List Tables
               </Button>
               <Button onClick={handleExportCsv} disabled={isBusy} variant="outline" className="w-full gap-2">
-                <Download className="w-3.5 h-3.5" />
-                Export CSV
+                {loadingExport
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Подготовка данных...</>
+                  : <><Download className="w-3.5 h-3.5" /> Export CSV</>}
+              </Button>
+              <Button onClick={handleRepairDataset} disabled={isBusy || loadingQuality || loadingRepair || fixAllRunning} variant="outline" className="w-full gap-2">
+                {loadingQuality
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <ShieldCheck className="w-3.5 h-3.5" />}
+                Проверить целостность
               </Button>
               <Button onClick={handleDeleteRows} disabled={isBusy} variant="destructive" className="w-full gap-2">
                 {loadingDelete ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
@@ -652,9 +1230,100 @@ export default function DatasetPage() {
               </Button>
             </div>
             {timeframe === 'ALL' && allIngestStatuses !== null && (
-              <AllIngestProgress statuses={allIngestStatuses} />
+              <AllIngestProgress statuses={allIngestStatuses} meta={allIngestMeta} />
             )}
             {timeframe !== 'ALL' && ingestStages !== null && <IngestProgress stages={ingestStages} />}
+            {qualityProgress !== null && (() => {
+              const { done, total, slots, errors, finished, errorLog } = qualityProgress;
+              const pct = Math.round((done / total) * 100);
+              return (
+                <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5 space-y-2 relative">
+                  {/* Close button — only when finished */}
+                  {finished && (
+                    <button
+                      type="button"
+                      onClick={() => setQualityProgress(null)}
+                      className="absolute top-1.5 right-2 text-muted-foreground hover:text-foreground leading-none text-sm"
+                      aria-label="Закрыть"
+                    >
+                      ×
+                    </button>
+                  )}
+                  {/* Header: label + X/N counter */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-medium text-foreground flex items-center gap-1.5">
+                      {finished
+                        ? (errors > 0
+                            ? <XCircle className="w-3 h-3 text-destructive" />
+                            : <CheckCircle2 className="w-3 h-3 text-success" />)
+                        : (loadingQuality
+                            ? <Loader2 className="w-3 h-3 animate-spin text-primary" />
+                            : <CheckCircle2 className="w-3 h-3 text-success" />)}
+                      Аудит качества
+                    </span>
+                    <span className="text-[11px] font-semibold tabular-nums text-primary">
+                      {done} / {total}
+                    </span>
+                  </div>
+                  {/* Progress bar */}
+                  <Progress value={pct} className={cn('h-2', errors > 0 && '[&>div]:bg-destructive')} />
+                  {/* Active slots — hidden when finished */}
+                  {!finished && (
+                    <div className="flex flex-col gap-1">
+                      {[slots[0] ?? null, slots[1] ?? null].map((slot, idx) => (
+                        <div key={idx} className="flex flex-col">
+                          <div className="flex items-center gap-2">
+                            <div className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                              {slot === null ? (
+                                <span className="text-[10px] text-muted-foreground/40 leading-none">—</span>
+                              ) : slot.status === 'running' ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+                              ) : slot.status === 'done' ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-success" />
+                              ) : (
+                                <XCircle className="w-3.5 h-3.5 text-destructive" />
+                              )}
+                            </div>
+                            <span className={cn(
+                              'text-[11px] font-mono w-10',
+                              slot === null             ? 'text-muted-foreground/40' :
+                              slot.status === 'error'   ? 'text-destructive'         :
+                              slot.status === 'running' ? 'text-foreground'          :
+                                                          'text-muted-foreground',
+                            )}>
+                              {slot?.tf ?? '—'}
+                            </span>
+                            {slot?.status === 'running' && slot.startedAt != null && (
+                              <span className="text-[10px] text-muted-foreground tabular-nums">
+                                {Math.floor((Date.now() - slot.startedAt) / 1000)}s
+                              </span>
+                            )}
+                          </div>
+                          {slot?.status === 'error' && (
+                            <p className="text-[10px] text-destructive/80 pl-[22px] leading-tight line-clamp-1">
+                              {formatErrorHint(slot.message ?? '')}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {/* Error log — shown when finished with errors */}
+                  {finished && errorLog.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-medium text-destructive">Детали ошибок:</p>
+                      <div className="max-h-24 overflow-y-auto flex flex-col gap-0.5">
+                        {errorLog.map((e, i) => (
+                          <p key={i} className="font-mono text-[10px] text-destructive/90 leading-tight">
+                            {e.tf}  •  {formatErrorHint(e.message)}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </CardContent>
         </Card>
 
@@ -796,6 +1465,338 @@ export default function DatasetPage() {
                   ))}
                 </TableBody>
               </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Качество датасета (full width, открывается кнопкой «Repair Dataset») ── */}
+      {(selectedTable !== null || allQualityResults !== null || loadingQuality) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="text-sm font-semibold">
+                {isAllMode
+                  ? <>&#1050;&#1072;&#1095;&#1077;&#1089;&#1090;&#1074;&#1086; &#1076;&#1072;&#1090;&#1072;&#1089;&#1077;&#1090;&#1072;: <span className="font-mono">{symbol}</span> — все таймфреймы</>
+                  : selectedTable
+                    ? <>Качество датасета: <span className="font-mono">{selectedTable}</span></>
+                    : 'Качество датасета'
+                }
+              </CardTitle>
+              <div className="flex items-center gap-2 shrink-0">
+                {isAllMode && allQualityResults !== null && (
+                  <>
+                    {fixAllRunning && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1.5 text-destructive border-destructive/50 hover:bg-destructive/10"
+                        onClick={() => { fixAllCancelRef.current = true; }}
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                        Отменить
+                      </Button>
+                    )}
+                    {!fixAllRunning && Object.values(allQualityResults).some(r => r.groups.some(g => g.status !== 'full')) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1.5"
+                        disabled={loadingQuality || loadingRepair}
+                        onClick={() => void handleFixAll()}
+                      >
+                        <Wrench className="w-3.5 h-3.5" />
+                        Исправить всё
+                      </Button>
+                    )}
+                  </>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={fixAllRunning}
+                  onClick={() => {
+                    setSelectedTable(null);
+                    setQualityReport(null);
+                    setAllQualityResults(null);
+                    setRepairStages(null);
+                    setQualityProgress(null);
+                    setFixAllProgress(null);
+                    fixAllCancelRef.current = true;
+                    setIsAllMode(false);
+                  }}
+                >
+                  Закрыть
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <Separator />
+          <CardContent className="p-3 sm:p-4 space-y-3">
+            {/* Loading skeleton */}
+            {loadingQuality && !qualityReport && !allQualityResults && (
+              <div className="space-y-2">
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+              </div>
+            )}
+
+            {/* ── Single TF mode ── */}
+            {!isAllMode && selectedTable && (
+              <>
+                {!qualityReport && !loadingQuality && (
+                  <p className="text-xs text-muted-foreground">
+                    Нажмите «Repair Dataset», чтобы оценить заполненность колонок датасета.
+                  </p>
+                )}
+                {qualityReport && (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      Всего строк: {qualityReport.total_rows.toLocaleString()}
+                    </p>
+                    <div className="space-y-2">
+                      {qualityReport.groups.map(g => {
+                        const colorCls =
+                          g.status === 'full'    ? 'text-success'    :
+                          g.status === 'partial' ? 'text-warning'    :
+                                                    'text-destructive';
+                        const dotCls =
+                          g.status === 'full'    ? 'bg-success'    :
+                          g.status === 'partial' ? 'bg-warning'    :
+                                                    'bg-destructive';
+                        const needsRepair = g.status !== 'full';
+                        const repairLabel =
+                          g.repair_action === 'load_ohlcv'
+                            ? 'Загрузить OHLCV'
+                            : 'Пересчитать фичи';
+                        return (
+                          <div key={g.id} className="flex items-center gap-3 rounded-md border p-3">
+                            <span className={cn('h-2.5 w-2.5 rounded-full shrink-0', dotCls)} />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium truncate">{g.label}</div>
+                              <div className="text-xs text-muted-foreground truncate">
+                                {g.columns.length} колонок · {g.columns.join(', ')}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 w-44">
+                              <Progress value={g.fill_pct} className="h-1.5 flex-1" />
+                              <span className={cn('text-xs w-12 text-right tabular-nums', colorCls)}>
+                                {g.fill_pct.toFixed(1)}%
+                              </span>
+                            </div>
+                            {needsRepair && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={loadingRepair}
+                                onClick={() => runRepair(selectedTable, g.repair_action)}
+                              >
+                                {loadingRepair && repairAction === g.repair_action
+                                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : <RefreshCw className="h-3 w-3" />}
+                                <span className="ml-1.5">{repairLabel}</span>
+                              </Button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+                {repairStages && (
+                  <div className="rounded-md border p-3 space-y-2">
+                    <div className="text-xs font-semibold text-muted-foreground">
+                      {repairAction === 'load_ohlcv' ? 'Загрузка OHLCV' : 'Пересчёт фич'}
+                    </div>
+                    {repairStages.map(s => {
+                      const Icon =
+                        s.status === 'done'    ? CheckCircle2 :
+                        s.status === 'error'   ? XCircle      :
+                        s.status === 'running' ? Loader2      : Database;
+                      const iconCls =
+                        s.status === 'done'    ? 'text-success'     :
+                        s.status === 'error'   ? 'text-destructive' :
+                        s.status === 'running' ? 'animate-spin text-primary' :
+                                                  'text-muted-foreground';
+                      return (
+                        <div key={s.id} className="flex items-center gap-2">
+                          <Icon className={cn('h-3.5 w-3.5 shrink-0', iconCls)} />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="truncate">{s.label}</span>
+                              <span className="text-muted-foreground tabular-nums">
+                                {s.detail ?? `${s.progress}%`}
+                              </span>
+                            </div>
+                            <Progress value={s.progress} className="h-1 mt-1" />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ── ALL TF mode ── */}
+            {isAllMode && allQualityResults && (
+              <div className="space-y-2">
+                {/* Fix All progress panel */}
+                {fixAllProgress && (
+                  <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-medium flex items-center gap-1.5">
+                        {fixAllProgress.done
+                          ? (fixAllProgress.errors > 0
+                              ? <XCircle className="w-3.5 h-3.5 text-destructive" />
+                              : <CheckCircle2 className="w-3.5 h-3.5 text-success" />)
+                          : <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />}
+                        {fixAllProgress.done
+                          ? `Готово: исправлено ${fixAllProgress.fixed}, ошибок ${fixAllProgress.errors}`
+                          : `Исправление ${fixAllProgress.current} / ${fixAllProgress.total}`}
+                      </span>
+                      {fixAllProgress.done && (
+                        <button
+                          type="button"
+                          onClick={() => setFixAllProgress(null)}
+                          className="text-muted-foreground hover:text-foreground text-sm leading-none"
+                          aria-label="Закрыть"
+                        >×</button>
+                      )}
+                    </div>
+                    {!fixAllProgress.done && (
+                      <>
+                        <Progress
+                          value={fixAllProgress.total > 0 ? Math.round((fixAllProgress.current / fixAllProgress.total) * 100) : 0}
+                          className="h-1.5"
+                        />
+                        {fixAllProgress.activeOps.length > 0 && (
+                          <div className="flex flex-col gap-0.5">
+                            {fixAllProgress.activeOps.map((op, i) => (
+                              <div key={i} className="flex items-center gap-1.5">
+                                <Loader2 className="w-2.5 h-2.5 animate-spin text-primary shrink-0" />
+                                <p className="text-[11px] text-muted-foreground truncate">{op.label}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {fixAllProgress.done && fixAllProgress.completed.length > 0 && (
+                      <div className="flex flex-col gap-0.5 max-h-28 overflow-y-auto">
+                        {fixAllProgress.completed.map((c, i) => (
+                          <div key={i} className="flex flex-col gap-0">
+                            <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                              {c.ok
+                                ? <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+                                : <XCircle     className="w-3 h-3 text-destructive shrink-0" />}
+                              <span className={c.ok ? 'text-muted-foreground' : 'text-destructive'}>{c.table}</span>
+                              <span className="text-muted-foreground/60">·</span>
+                              <span className="text-muted-foreground/80">
+                                {c.action === 'load_ohlcv' ? 'OHLCV' : 'Пересчёт'}
+                              </span>
+                            </div>
+                            {!c.ok && c.errorMessage && (
+                              <p
+                                className="text-[10px] text-destructive/80 pl-5 truncate"
+                                title={c.errorMessage}
+                              >{c.errorMessage}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {Object.entries(allQualityResults).map(([table, report]) => {
+                  const isRepairing = selectedTable === table && loadingRepair;
+                  return (
+                    <div key={table} className="rounded-md border p-3 space-y-2">
+                      <div className="flex items-center gap-3">
+                        <span className="font-mono text-xs flex-1 min-w-0 truncate">{table}</span>
+                        <div className="flex items-center gap-1.5">
+                          {report.groups.map(g => {
+                            const dotCls =
+                              g.status === 'full'    ? 'bg-success'    :
+                              g.status === 'partial' ? 'bg-warning'    :
+                                                        'bg-destructive';
+                            return (
+                              <span
+                                key={g.id}
+                                title={g.label}
+                                className={cn('h-2 w-2 rounded-full shrink-0', dotCls)}
+                              />
+                            );
+                          })}
+                        </div>
+                        <span className="text-xs text-muted-foreground tabular-nums w-20 text-right shrink-0">
+                          {report.total_rows.toLocaleString()} rows
+                        </span>
+                      </div>
+                      {report.groups.some(g => g.status !== 'full') && (
+                        <div className="flex flex-wrap gap-2">
+                          {report.groups.filter(g => g.status !== 'full').map(g => {
+                            const repairLabel =
+                              g.repair_action === 'load_ohlcv'
+                                ? 'Загрузить OHLCV'
+                                : 'Пересчитать фичи';
+                            return (
+                              <Button
+                                key={g.id}
+                                size="sm"
+                                variant="outline"
+                                disabled={loadingRepair || fixAllRunning}
+                                onClick={() => {
+                                  setSelectedTable(table);
+                                  void runRepair(table, g.repair_action);
+                                }}
+                              >
+                                {isRepairing && repairAction === g.repair_action
+                                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : <RefreshCw className="h-3 w-3" />}
+                                <span className="ml-1.5">{g.label}: {repairLabel}</span>
+                              </Button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {selectedTable === table && repairStages && (
+                        <div className="rounded-md bg-muted/30 p-2 space-y-1.5">
+                          <div className="text-xs font-semibold text-muted-foreground">
+                            {repairAction === 'load_ohlcv' ? 'Загрузка OHLCV' : 'Пересчёт фич'}
+                          </div>
+                          {repairStages.map(s => {
+                            const Icon =
+                              s.status === 'done'    ? CheckCircle2 :
+                              s.status === 'error'   ? XCircle      :
+                              s.status === 'running' ? Loader2      : Database;
+                            const iconCls =
+                              s.status === 'done'    ? 'text-success'     :
+                              s.status === 'error'   ? 'text-destructive' :
+                              s.status === 'running' ? 'animate-spin text-primary' :
+                                                        'text-muted-foreground';
+                            return (
+                              <div key={s.id} className="flex items-center gap-2">
+                                <Icon className={cn('h-3.5 w-3.5 shrink-0', iconCls)} />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="truncate">{s.label}</span>
+                                    <span className="text-muted-foreground tabular-nums">
+                                      {s.detail ?? `${s.progress}%`}
+                                    </span>
+                                  </div>
+                                  <Progress value={s.progress} className="h-1 mt-1" />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </CardContent>

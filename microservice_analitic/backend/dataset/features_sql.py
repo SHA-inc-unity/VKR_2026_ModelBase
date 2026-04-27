@@ -199,19 +199,19 @@ def build_feature_select_clause(
 
     # return_{h}, log_return_{h}
     for h in RETURN_HORIZONS:
-        add(f"return_{h}", _pct_change("index_price", h, f"return_{h}"))
-        add(f"log_return_{h}", _log_return("index_price", h, f"log_return_{h}"))
+        add(f"return_{h}", _pct_change("close_price", h, f"return_{h}"))
+        add(f"log_return_{h}", _log_return("close_price", h, f"log_return_{h}"))
 
     # price_roll{w}_{mean,std,min,max}, price_to_roll{w}_mean, price_vol_{w}
     for w in ROLLING_WINDOWS:
-        add(f"price_roll{w}_mean", _rolling("AVG", "index_price", w, f"price_roll{w}_mean"))
-        add(f"price_roll{w}_std",  _rolling("STDDEV_POP", "index_price", w, f"price_roll{w}_std"))
-        add(f"price_roll{w}_min",  _rolling("MIN", "index_price", w, f"price_roll{w}_min"))
-        add(f"price_roll{w}_max",  _rolling("MAX", "index_price", w, f"price_roll{w}_max"))
+        add(f"price_roll{w}_mean", _rolling("AVG", "close_price", w, f"price_roll{w}_mean"))
+        add(f"price_roll{w}_std",  _rolling("STDDEV_POP", "close_price", w, f"price_roll{w}_std"))
+        add(f"price_roll{w}_min",  _rolling("MIN", "close_price", w, f"price_roll{w}_min"))
+        add(f"price_roll{w}_max",  _rolling("MAX", "close_price", w, f"price_roll{w}_max"))
         add(
             f"price_to_roll{w}_mean",
             sql.SQL(
-                "index_price / NULLIF(AVG(index_price) OVER "
+                "close_price / NULLIF(AVG(close_price) OVER "
                 "(ORDER BY timestamp_utc ROWS BETWEEN {p} PRECEDING AND CURRENT ROW), 0) "
                 "AS {a}"
             ).format(p=sql.Literal(w - 1), a=sql.Identifier(f"price_to_roll{w}_mean")),
@@ -219,9 +219,9 @@ def build_feature_select_clause(
         add(
             f"price_vol_{w}",
             sql.SQL(
-                "STDDEV_POP(index_price) OVER "
+                "STDDEV_POP(close_price) OVER "
                 "(ORDER BY timestamp_utc ROWS BETWEEN {p} PRECEDING AND CURRENT ROW) "
-                "/ NULLIF(AVG(index_price) OVER "
+                "/ NULLIF(AVG(close_price) OVER "
                 "(ORDER BY timestamp_utc ROWS BETWEEN {p} PRECEDING AND CURRENT ROW), 0) "
                 "AS {a}"
             ).format(p=sql.Literal(w - 1), a=sql.Identifier(f"price_vol_{w}")),
@@ -254,7 +254,7 @@ def build_feature_select_clause(
     # target_return_1 — только если add_target
     if add_target:
         bars = _target_bars(step_ms, target_horizon_ms)
-        add("target_return_1", _lead("index_price", bars, "target_return_1"))
+        add("target_return_1", _lead("close_price", bars, "target_return_1"))
 
     select_clause = sql.SQL(",\n    ").join(parts)
     return FeatureSelect(

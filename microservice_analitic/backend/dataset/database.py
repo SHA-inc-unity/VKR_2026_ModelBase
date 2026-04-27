@@ -51,7 +51,7 @@ _RAW_COL_SET: frozenset[str] = frozenset((
     "symbol",
     "exchange",
     "timeframe",
-    "index_price",
+    "close_price",
     "funding_rate",
     "open_interest",
     "rsi",

@@ -7,7 +7,7 @@
 1. **RSI в Python (малый объём)** — Wilder EWM для узкого окна raw-строк. После
    Round 2 Fix B это редко более ~1000 строк за вызов.
 2. **COPY raw в staging** — только 8 колонок (timestamp_utc, symbol, exchange,
-   timeframe, index_price, funding_rate, open_interest, rsi). Python не
+   timeframe, close_price, funding_rate, open_interest, rsi). Python не
    материализует feature-матрицу.
 3. **Один SQL-statement** — с WITH CTE:
       - UNION ALL raw-staging + warmup-rows из main (через ANTI-JOIN по
@@ -57,7 +57,7 @@ _RAW_STAGE_COLUMNS: tuple[str, ...] = (
     "symbol",
     "exchange",
     "timeframe",
-    "index_price",
+    "close_price",
     "funding_rate",
     "open_interest",
     "rsi",
@@ -134,7 +134,7 @@ def upsert_with_sql_features(
             ("symbol",          "character varying"),
             ("exchange",        "character varying"),
             ("timeframe",       "character varying"),
-            ("index_price",     "numeric"),
+            ("close_price",     "numeric"),
             ("funding_rate",    "numeric"),
             ("open_interest",   "numeric"),
             ("rsi",             "numeric"),
@@ -234,7 +234,7 @@ def upsert_with_sql_features(
         features AS (
             SELECT
                 timestamp_utc, symbol, exchange, timeframe,
-                index_price, funding_rate, open_interest, rsi,
+                close_price, funding_rate, open_interest, rsi,
                 {feature_select}
             FROM with_ffill
         )

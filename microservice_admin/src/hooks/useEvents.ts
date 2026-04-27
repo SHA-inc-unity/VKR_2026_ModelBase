@@ -14,7 +14,14 @@
  */
 import { useEffect, useRef } from 'react';
 import { Topics } from '@/lib/topics';
-import type { TrainProgressEvent, ModelReadyEvent, IngestProgressEvent } from '@/lib/types';
+import type {
+  TrainProgressEvent,
+  ModelReadyEvent,
+  IngestProgressEvent,
+  RepairProgressEvent,
+  DatasetJobProgressEvent,
+  DatasetJobCompletedEvent,
+} from '@/lib/types';
 
 // Reverse lookup: topic value → Topics key (built once at module level)
 const TOPIC_VALUE_TO_KEY = Object.fromEntries(
@@ -26,6 +33,9 @@ interface EventPayloadMap {
   EVT_ANALYTICS_TRAIN_PROGRESS: TrainProgressEvent;
   EVT_ANALYTICS_MODEL_READY: ModelReadyEvent;
   EVT_DATA_INGEST_PROGRESS: IngestProgressEvent;
+  EVT_ANALITIC_DATASET_REPAIR_PROGRESS: RepairProgressEvent;
+  EVT_DATA_DATASET_JOB_PROGRESS: DatasetJobProgressEvent;
+  EVT_DATA_DATASET_JOB_COMPLETED: DatasetJobCompletedEvent;
 }
 
 export type EventHandlers = Partial<{
@@ -69,6 +79,15 @@ export function useEvents(handlers: EventHandlers): void {
           break;
         case 'EVT_DATA_INGEST_PROGRESS':
           h.EVT_DATA_INGEST_PROGRESS?.(msg.payload as IngestProgressEvent);
+          break;
+        case 'EVT_ANALITIC_DATASET_REPAIR_PROGRESS':
+          h.EVT_ANALITIC_DATASET_REPAIR_PROGRESS?.(msg.payload as RepairProgressEvent);
+          break;
+        case 'EVT_DATA_DATASET_JOB_PROGRESS':
+          h.EVT_DATA_DATASET_JOB_PROGRESS?.(msg.payload as DatasetJobProgressEvent);
+          break;
+        case 'EVT_DATA_DATASET_JOB_COMPLETED':
+          h.EVT_DATA_DATASET_JOB_COMPLETED?.(msg.payload as DatasetJobCompletedEvent);
           break;
       }
     };

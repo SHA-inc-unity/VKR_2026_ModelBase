@@ -31,7 +31,7 @@ internal sealed class UserConfiguration : IEntityTypeConfiguration<User>
         builder.Property(u => u.UpdatedAt).IsRequired();
 
         builder.HasOne(u => u.Settings)
-            .WithOne()
+            .WithOne(s => s.User)
             .HasForeignKey<UserSettings>(s => s.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 

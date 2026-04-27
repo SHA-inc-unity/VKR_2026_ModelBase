@@ -20,6 +20,8 @@
 |--------|-------|-------------|----------|
 | `redpanda` | `redpandadata/redpanda:v24.1.9` | `9092` (EXTERNAL), `9644` (admin) | Kafka-API брокер (KRaft, single-node). Внутри сети: `redpanda:29092` |
 | `redpanda-console` | `redpandadata/console` | `8080` | Web UI для топиков и consumer-групп |
+| `redpanda-init` | `redpandadata/redpanda` | — | One-shot: `topic_partitions_per_shard=10000`, `auto_create_topics_enabled=true` |
+| `redpanda-janitor` | `redpandadata/redpanda` | — | 6-часовой sweep осиротевших `reply.*` топиков (только пустые, с HW=0); не трогает активные long-lived reply-inbox'ы |
 | `minio` | `minio/minio` | `9000` (API), `9001` (Console) | S3-совместимое хранилище для claim-check паттерна |
 | `minio-init` | `minio/mc` | — | One-shot контейнер: создаёт bucket `modelline-blobs` после старта MinIO |
 

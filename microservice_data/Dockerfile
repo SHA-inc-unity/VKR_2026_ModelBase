@@ -21,6 +21,8 @@ RUN --mount=type=cache,target=/root/.nuget/packages \
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
+
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 USER appuser
 
@@ -29,7 +31,7 @@ COPY --from=build /app/publish .
 EXPOSE 8100
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:8100/health || exit 1
+    CMD wget -q --spider http://localhost:8100/health || exit 1
 
 ENV ASPNETCORE_URLS=http://+:8100
 ENV ASPNETCORE_ENVIRONMENT=Production

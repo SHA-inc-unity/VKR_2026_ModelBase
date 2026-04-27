@@ -244,7 +244,7 @@ def test_upsert_rows_inserts_and_updates(mock_sql):
     ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
     row = {col: None for col in DATASET_COLUMN_NAMES}
     row["timestamp_utc"] = ts
-    row["index_price"] = 40000.0
+    row["close_price"] = 40000.0
     row["symbol"] = "BTCUSDT"
     row["exchange"] = "bybit"
     row["timeframe"] = "60m"
@@ -276,7 +276,7 @@ def test_upsert_rows_skips_noop_updates_when_fetchall_is_short():
         ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
         row = {col: None for col in DATASET_COLUMN_NAMES}
         row["timestamp_utc"] = ts
-        row["index_price"] = 40000.0
+        row["close_price"] = 40000.0
         row["symbol"] = "BTCUSDT"
         row["exchange"] = "bybit"
         row["timeframe"] = "60m"

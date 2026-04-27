@@ -77,7 +77,7 @@ def fetch_instrument_details(category: str, symbol: str) -> tuple[int, int]:
     return launch_time_ms, funding_interval_ms or 28_800_000
 
 
-def fetch_index_prices(
+def fetch_close_prices(
     category: str,
     symbol: str,
     interval: str,
@@ -87,7 +87,7 @@ def fetch_index_prices(
     progress_start_ms: int | None = None,
     progress_end_ms: int | None = None,
 ) -> list[tuple[int, float]]:
-    """Скачивает исторические index_price свечи параллельными запросами.
+    """Скачивает исторические close_price свечи параллельными запросами.
 
     Bybit API максимально возвращает 1000 свечей за запрос.
     Диапазон делится на окна по 1000 свечей, которые загружаются
@@ -114,7 +114,7 @@ def fetch_index_prices(
 
     t0 = now()
     tlog.info(
-        "fetch_index_prices | START symbol=%s interval=%s windows=%d range=[%d,%d]",
+        "fetch_close_prices | START symbol=%s interval=%s windows=%d range=[%d,%d]",
         symbol, interval, len(windows), start_ms, end_ms,
     )
     rows: dict[int, float] = {}
@@ -139,13 +139,13 @@ def fetch_index_prices(
                 if start_ms <= timestamp_ms <= end_ms:
                     partial[timestamp_ms] = float(item[4])
             tlog.debug(
-                "fetch_index_prices | window ws=%d we=%d rows=%d elapsed=%.3fs",
+                "fetch_close_prices | window ws=%d we=%d rows=%d elapsed=%.3fs",
                 ws, we, len(partial), now() - t_w,
             )
             return partial
         except Exception:
             tlog.exception(
-                "fetch_index_prices | window FAILED ws=%d we=%d elapsed=%.3fs",
+                "fetch_close_prices | window FAILED ws=%d we=%d elapsed=%.3fs",
                 ws, we, now() - t_w,
             )
             raise
@@ -160,12 +160,12 @@ def fetch_index_prices(
                     _cb(sum(1 for ts in rows if callback_start <= ts <= callback_end))
                 except Exception:
                     tlog.warning(
-                        "fetch_index_prices | progress_callback raised (non-fatal) — disabling"
+                        "fetch_close_prices | progress_callback raised (non-fatal) — disabling"
                     )
                     _cb = None
 
     tlog.info(
-        "fetch_index_prices | DONE symbol=%s interval=%s total_rows=%d elapsed=%.3fs",
+        "fetch_close_prices | DONE symbol=%s interval=%s total_rows=%d elapsed=%.3fs",
         symbol, interval, len(rows), now() - t0,
     )
     return sorted(rows.items())
@@ -227,7 +227,7 @@ def fetch_open_interest(category: str, symbol: str, interval: str, start_ms: int
     )
     window_ms = PAGE_LIMIT_OPEN_INTEREST * oi_step_ms
 
-    # Pre-compute non-overlapping time windows (newest first, same pattern as fetch_index_prices)
+    # Pre-compute non-overlapping time windows (newest first, same pattern as fetch_close_prices)
     windows: list[tuple[int, int]] = []
     t = end_ms
     while t >= start_ms:

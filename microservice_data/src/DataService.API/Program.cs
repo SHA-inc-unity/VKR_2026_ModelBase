@@ -1,6 +1,7 @@
 using DataService.API.Bybit;
 using DataService.API.Database;
 using DataService.API.HealthChecks;
+using DataService.API.Jobs;
 using DataService.API.Kafka;
 using DataService.API.Minio;
 using DataService.API.Settings;
@@ -60,10 +61,21 @@ try
     // ── Infrastructure ────────────────────────────────────────────────────
     builder.Services.AddSingleton<PostgresConnectionFactory>();
     builder.Services.AddSingleton<DatasetRepository>();
+    builder.Services.AddSingleton<DatasetJobsRepository>();
+    builder.Services.AddSingleton<DatasetJobsMutator>();
+    builder.Services.AddSingleton<JobLockManager>();
+    builder.Services.AddSingleton<IDatasetJobHandler, IngestJobHandler>();
+    builder.Services.AddSingleton<IDatasetJobHandler, ComputeFeaturesJobHandler>();
+    builder.Services.AddSingleton<IDatasetJobHandler, DetectAnomaliesJobHandler>();
+    builder.Services.AddSingleton<IDatasetJobHandler, CleanApplyJobHandler>();
+    builder.Services.AddSingleton<IDatasetJobHandler, ExportJobHandler>();
+    builder.Services.AddSingleton<IDatasetJobHandler, ImportCsvJobHandler>();
+    builder.Services.AddSingleton<IDatasetJobHandler, UpsertOhlcvJobHandler>();
     builder.Services.AddSingleton<KafkaProducer>();
     builder.Services.AddSingleton<MinioClaimCheckService>();
 
     // BybitApiClient via typed HttpClient
+    builder.Services.AddSingleton<BybitRateLimiter>();
     builder.Services.AddHttpClient<BybitApiClient>(client =>
     {
         client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
@@ -71,6 +83,9 @@ try
 
     // ── Kafka consumer (hosted service) ───────────────────────────────────
     builder.Services.AddHostedService<KafkaConsumerService>();
+
+    // ── Phase B: dataset job runner (scheduler + lock + recovery) ─────────
+    builder.Services.AddHostedService<DatasetJobRunner>();
 
     // ── Health checks ─────────────────────────────────────────────────────
     builder.Services.AddHealthChecks()
@@ -105,6 +120,21 @@ try
             [HealthStatus.Unhealthy] = 503,
         },
     });
+
+    // Phase A: ensure dataset_jobs / subtasks / stages tables exist before
+    // the Kafka consumer starts taking jobs.* requests. Idempotent.
+    using (var scope = app.Services.CreateScope())
+    {
+        var jobsRepo = scope.ServiceProvider.GetRequiredService<DatasetJobsRepository>();
+        try
+        {
+            await jobsRepo.EnsureSchemaAsync();
+        }
+        catch (Exception schemaEx)
+        {
+            Log.Error(schemaEx, "Failed to ensure dataset_jobs schema; jobs.* topics will fail until DB is reachable");
+        }
+    }
 
     app.Run();
 }

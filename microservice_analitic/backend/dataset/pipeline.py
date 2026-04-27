@@ -9,7 +9,7 @@ import pandas as pd
 
 from .api import (
     fetch_funding_rates,
-    fetch_index_prices,
+    fetch_close_prices,
     fetch_instrument_details,
     fetch_open_interest,
 )
@@ -42,7 +42,7 @@ def align_asof(series: list[tuple[int, float]], timestamps: list[int]) -> list[f
 
 
 def compute_rsi(prices: list[float], period: int) -> list[float | None]:
-    """Вычисляет RSI по index_price (pandas EWM — Cython, ~50x быстрее pure-Python).
+    """Вычисляет RSI по close_price (pandas EWM — Cython, ~50x быстрее pure-Python).
 
     Использует pandas ewm(alpha=1/period, adjust=False) для Wilder's smoothing,
     что эквивалентно рекурсивной формуле avg = (avg*(period-1) + delta) / period.
@@ -150,7 +150,7 @@ def fetch_range_rows(
 ) -> dict[int, dict]:
     """Скачивает недостающий диапазон и отдает частичный прогресс загрузки.
 
-    index_price, funding_rate и open_interest загружаются параллельно,
+    close_price, funding_rate и open_interest загружаются параллельно,
     что сокращает время ожидания от суммы до максимума трёх веток.
     """
     t0 = now()
@@ -160,7 +160,7 @@ def fetch_range_rows(
     )
     with ThreadPoolExecutor(max_workers=3) as executor:
         f_index = executor.submit(
-            fetch_index_prices,
+            fetch_close_prices,
             category,
             symbol,
             bybit_interval,
@@ -189,11 +189,11 @@ def fetch_range_rows(
             index_rows = f_index.result()
         except Exception:
             tlog.exception(
-                "fetch_range_rows | index_prices FAILED symbol=%s interval=%s wall=%.3fs",
+                "fetch_range_rows | close_prices FAILED symbol=%s interval=%s wall=%.3fs",
                 symbol, bybit_interval, now() - t0,
             )
             raise
-        tlog.info("fetch_range_rows | index_prices done rows=%d wall=%.3fs", len(index_rows), now() - t0)
+        tlog.info("fetch_range_rows | close_prices done rows=%d wall=%.3fs", len(index_rows), now() - t0)
         try:
             funding_rows = f_funding.result()
         except Exception:
@@ -224,7 +224,7 @@ def fetch_range_rows(
             "symbol": symbol,
             "exchange": "bybit",
             "timeframe": timeframe,
-            "index_price": prices[index],
+            "close_price": prices[index],
             "funding_rate": funding_aligned[index],
             "open_interest": open_interest_aligned[index],
             "rsi": None,
@@ -238,7 +238,7 @@ def fetch_range_rows(
 
 def rebuild_rsi(rows: list[dict], period: int) -> None:
     """Пересчитывает RSI для отсортированного ряда."""
-    rsi_values = compute_rsi([row["index_price"] for row in rows], period)
+    rsi_values = compute_rsi([row["close_price"] for row in rows], period)
     for row, value in zip(rows, rsi_values):
         row["rsi"] = value
 
@@ -253,11 +253,11 @@ def validate_rows(rows: list[dict], period: int) -> dict:
     if len({row["timestamp_utc"] for row in rows}) != len(rows):
         raise RuntimeError("Duplicate timestamps detected")
     # Единственный проход по строкам: считаем None и проверяем RSI диапазон.
-    missing_counts: dict[str, int] = {"index_price": 0, "funding_rate": 0, "open_interest": 0, "rsi": 0}
+    missing_counts: dict[str, int] = {"close_price": 0, "funding_rate": 0, "open_interest": 0, "rsi": 0}
     rsi_out_of_range = False
     for row in rows:
-        if row["index_price"] is None:
-            missing_counts["index_price"] += 1
+        if row["close_price"] is None:
+            missing_counts["close_price"] += 1
         if row["funding_rate"] is None:
             missing_counts["funding_rate"] += 1
         if row["open_interest"] is None:
@@ -267,8 +267,8 @@ def validate_rows(rows: list[dict], period: int) -> dict:
             missing_counts["rsi"] += 1
         elif not 0.0 <= rsi <= 100.0:
             rsi_out_of_range = True
-    if missing_counts["index_price"]:
-        raise RuntimeError("index_price contains NULL values")
+    if missing_counts["close_price"]:
+        raise RuntimeError("close_price contains NULL values")
     if rsi_out_of_range:
         raise RuntimeError("RSI value is out of range")
     if missing_counts["rsi"] > min(period, len(rows)):
@@ -317,7 +317,7 @@ def rebuild_rsi_and_upsert_rows(
         # Колоночное построение DataFrame ~2-3× быстрее pd.DataFrame(list-of-dicts)
         # и не требует инференса схемы по всем 3M строкам.
         _raw_cols = ("timestamp_utc", "symbol", "exchange", "timeframe",
-                     "index_price", "funding_rate", "open_interest", "rsi")
+                     "close_price", "funding_rate", "open_interest", "rsi")
         features_frame = pd.DataFrame({c: [r[c] for r in rows] for c in _raw_cols})
         # rows больше не нужен — освобождаем ~1.5 ГБ (3M dicts × ~500 байт)
         # ДО запуска тяжёлого build_features, чтобы GC мог их забрать.

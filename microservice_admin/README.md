@@ -83,24 +83,64 @@ KafkaJS 2.x шлёт `MetadataRequest v6` с флагом `auto-create` при `
 на этот запрос отвечает `INVALID_PARTITIONS` для несуществующего топика, и KafkaJS падает с
 `Error: Number of partitions is invalid`.
 
-Тот же паттерн применяется в двух местах: `src/lib/kafka.ts` (reply-inbox для
-request-reply) и `src/app/api/events/route.ts` (EVT_* топики для SSE). В обоих:
+Тот же паттерн применяется в двух местах — `src/lib/kafka.ts` (process-wide reply-inbox
+для request-reply) и `src/lib/sseHub.ts` (process-wide consumer для SSE):
 
 1. Consumer создаётся с `allowAutoTopicCreation: false` — KafkaJS не просит брокера авто-создавать топик.
 2. Перед `consumer.connect()` все нужные топики явно создаются через
    `admin.createTopics({ topics: [...], waitForLeaders: false })`
-   (`numPartitions: 1`, `replicationFactor: 1`). `waitForLeaders: false` —
-   Redpanda v24 возвращает неконсистентный ответ при `true`, и KafkaJS бросает
-   исключение, хотя топик реально создаётся. `TOPIC_ALREADY_EXISTS` (код 36)
-   тихо игнорируется как идемпотентный, прочие ошибки логируются через
-   `console.warn` и не пробрасываются.
-3. После `admin.disconnect()` — пауза (500 мс в `kafka.ts`, 300 мс в SSE
-   handler), за это время single-node Redpanda проводит leader election, и
-   `consumer.connect()` уже не получает `NOT_LEADER_OR_FOLLOWER`.
+   (`numPartitions: 1`, `replicationFactor: 1`). `TOPIC_ALREADY_EXISTS` (код 36)
+   тихо игнорируется как идемпотентный, прочие ошибки логируются через `console.warn`.
+3. Топик создаётся **один раз на жизнь процесса** (а не на каждый запрос),
+   поэтому 500-мс пауза для leader election теперь не нужна — она амортизируется
+   на тысячи запросов вместо одного.
 
-Без п.2/3 в SSE-хендлере KafkaJS слал `MetadataRequest v6` на несуществующие
-`EVT_*`-топики, Redpanda отвечала `INVALID_PARTITIONS`, стрим падал и
-браузер переподключался каждые несколько секунд.
+### Long-lived reply-inbox + SSE hub (производительность)
+
+**Было.** `kafkaRequest()` в каждом вызове создавал уникальный `reply.<svc>.<uuid>`
+топик, поднимал отдельный Kafka consumer + group, ждал 500 мс leader election,
+а в `finally` пытался удалить топик. SSE делал то же самое: каждое открытое
+окно браузера открывало отдельный Kafka consumer с уникальным `groupId`. Это:
+
+- добавляло ~700 мс латентности на каждый Kafka-запрос,
+- создавало десятки одноразовых топиков в минуту → потребовало 30-минутный
+  janitor для подметания мусора,
+- при 10 открытых вкладках admin'а Redpanda держала 10 consumer-групп для
+  одного и того же набора `EVT_*` событий.
+
+**Стало.** Каждый Admin-процесс владеет:
+
+| Объект | Файл | Лайфтайм |
+|--------|------|----------|
+| **Reply-inbox** `reply.microservice_admin.<instance>` | `src/lib/kafka.ts` | весь процесс |
+| **EVT_* consumer** group `admin-sse` | `src/lib/sseHub.ts` | весь процесс |
+
+`kafkaRequest()` теперь = `producer.send` + `await pending future`. Цикл консьюмера
+матчит входящие envelopes по `correlation_id` через `Map<string, TaskCompletionSource>`
+и резолвит ожидающего вызывающего. Локально латентность падает с ~700 мс до < 50 мс.
+
+SSE-хаб (`src/lib/sseHub.ts`) держит **один** Kafka-consumer на процесс, fan-out на
+всех подключённых браузеров через `Set<Subscriber>`. `/api/events` route просто
+регистрирует callback и возвращает SSE-стрим; новых Kafka-объектов на вкладку
+не создаётся. Heartbeat `:keepalive` каждые 25 с защищает от idle-таймаутов прокси.
+
+### Request coalescing
+
+`src/lib/kafkaCoalesce.ts` оборачивает `/api/kafka` коротким TTL-кэшем для
+read-only summary-запросов (health, list_tables, coverage, dataset.status,
+constants, model.list). Несколько компонентов, монтирующиеся одновременно и
+запрашивающие один и тот же топик с одинаковым payload, получают **один**
+Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, anomaly) не
+коалесцируются — payload-сличение по stable JSON; коалесинг отключается, если
+вызывающий передал собственный `correlationId` (значит, он подписан на progress).
+
+| Топик | TTL |
+|-------|-----|
+| `cmd.data.health`, `cmd.analytics.health`, `cmd.data.db.ping` | 1.5 c |
+| `cmd.data.dataset.list_tables`, `cmd.data.dataset.coverage`, `cmd.analitic.dataset.status` | 2 c |
+| `cmd.data.dataset.table_schema` | 10 c |
+| `cmd.analytics.model.list` | 5 c |
+| `cmd.data.dataset.constants` | 30 c |
 
 ## Design System (shadcn/ui)
 
@@ -174,7 +214,7 @@ request-reply) и `src/app/api/events/route.ts` (EVT_* топики для SSE).
 | `events.analytics.train.progress` | `EVT_ANALYTICS_TRAIN_PROGRESS` | Train page | Добавляет точку в `progressHistory`, обновляет `status.progress` |
 
 **Компоненты:**
-- `GET /api/events` — SSE Route Handler. Подписывается на все `EVT_*` Kafka-топики через отдельный consumer (unique group ID per connection). Стримит JSON `{ type, payload }` в формате SSE.
+- `GET /api/events` — SSE Route Handler. Подписывается на process-wide SSE-хаб (`src/lib/sseHub.ts`); каждое новое соединение лишь добавляет subscriber-callback в `Set<Subscriber>`. Один Kafka-consumer на процесс, fan-out всем подключённым клиентам. Heartbeat `:keepalive` каждые 25 с.
 - `src/hooks/useEvents.ts` — React hook `useEvents(handlers)`. Открывает `EventSource` на mount, диспатчит payload в нужный handler, закрывает на unmount. Handlers хранятся в ref — не вызывает реконнект при перерендере.
 
 ## Компоненты UI
@@ -187,12 +227,31 @@ request-reply) и `src/app/api/events/route.ts` (EVT_* топики для SSE).
 | Страница | Описание |
 |----------|----------|
 | `/` (Dashboard) | Bento Grid: Row 1 — 4 StatCard с `border-l-4 border-l-{color}` акцентами (`grid-cols-2 xl:grid-cols-4`). Row 2 — 2 колонки: стек из 4 ServiceCard (2 application через Kafka: `data`, `analitic`; 2 infra через HTTP `/api/health`: `Redpanda`, `MinIO`) + `CoverageBar` (recharts BarChart horizontal). Row 3 — shadcn Table датасетов с `pct.toFixed(1)%`. Кнопка Refresh обновляет все карточки одновременно. |
-| `/download` | 2-колоночный layout (`lg:grid-cols-[380px,1fr]`): левая — Dataset Configuration (Select/Input/кнопки); правая — Coverage Card с `CoverageBar` (один бар) + 3 stat строки, появляется после Check Coverage. Ниже: Available Tables + Action History на всю ширину. Таймфрейм `ALL` поддерживается в `handleIngest` (**concurrent batches**, concurrency = 2: батчи по 2 TF, каждый батч `Promise.allSettled`, один TF ошибка не прерывает второй), `handleCheckCoverage` (parallel), `handleDeleteRows` (sequential loop с confirm-диалогом). **Export CSV**: `handleExportCsv` — синхронная функция, один `<a>.click()` в рамках пользовательского жеста (никаких `await` до клика — иначе Chromium блокирует программное скачивание). Для `timeframe !== 'ALL'` URL вида `${NEXT_PUBLIC_BASE_PATH}/api/export/csv?table=&start_ms=&end_ms=`, `a.download="${table}.csv"`; сервер отвечает 302 на MinIO presigned URL (DataService стримит `COPY TO STDOUT` прямо в MinIO). Для `timeframe === 'ALL'` URL вида `?symbol=&timeframe=ALL&start_ms=&end_ms=`, `a.download="${symbol}_ALL.zip"`; `src/app/api/export/csv/route.ts` разворачивает список из `TIMEFRAMES`, шлёт `{ tables, start_ms, end_ms }` (таймаут 300 с), получает `{ claim_check }` → `@aws-sdk/client-s3` `GetObjectCommand` → `Response(bytes)` с `Content-Type: application/zip`, `Content-Disposition: attachment; filename="${symbol}_ALL.zip"`. Старый цикл `for (const tf of TIMEFRAMES) a.click(); await sleep(300)` удалён — Chromium пропускал только первые 3–5 загрузок. `handleDeleteRows` при `ALL`: confirm упоминает все таймфреймы, удаляет последовательно через `CMD_DATA_DATASET_DELETE_ROWS`, ошибка отдельного TF → info-toast, итог — success-toast. **Redis cache**: список таблиц, coverage и allCoverages восстанавливаются из Redis при маунте / смене symbol+timeframe (ключи см. таблицу выше). |
+| `/download` | 2-колоночный layout (`lg:grid-cols-[380px,1fr]`): левая — Dataset Configuration (Select/Input/кнопки + **Проверить целостность** кнопка); правая — Coverage Card с `CoverageBar` (один бар) + 3 stat строки, появляется после Check Coverage. Ниже: Available Tables (строки не кликабельны) + **Quality Block** (открывается кнопкой «Проверить целостность»; в режиме ALL при наличии хотя бы одной сломанной группы — кнопка **«Исправить всё»** запускает `handleFixAll`: последовательный ремонт всех сломанных групп по всем таймфреймам без параллелизма, порядок — `load_ohlcv` раньше `recompute_features`, дедупликация по типу на таблицу; прогресс показывается в панели `fixAllProgress`; кнопка «Отменить» появляется вместо «Исправить всё» во время выполнения; после завершения — итог с количеством исправленных и ошибок) + Action History на всю ширину. Таймфрейм `ALL` поддерживается в `handleIngest` (**concurrent batches**, concurrency = 2: батчи по 2 TF, каждый батч `Promise.allSettled`, один TF ошибка не прерывает второй), `handleCheckCoverage` (parallel), `handleDeleteRows` (sequential loop с confirm-диалогом). Все 5 async-handlers защищены `operationLockRef` (`useRef(false)`) — guard в начале, сброс в `finally` (при ранних `return` — перед return). **Repair Dataset**: `handleRepairDataset` — если `timeframe !== 'ALL'`, вычисляет `makeTableName`, вызывает `runQualityCheck(table)`, открывает Quality Block в режиме одного TF. Если `timeframe === 'ALL'`: запускает `kafkaCall(CMD_ANALITIC_DATASET_QUALITY_CHECK, { table }, { timeoutMs: 60_000 })` батчами по `CONCURRENCY = 2` через `Promise.allSettled`; перед каждым батчем оба TF переводятся в `'running'` в `qualityProgress.slots` с `startedAt: Date.now()`, после завершения — `'done'` или `'error'` (с `message`); ошибочные слоты накапливаются в `errorLog`. Счётчик `done` растёт после завершения запроса, не до. Тип: `qualityProgress: { done, total, slots: { tf, status, message?, startedAt? }[], errors: number, finished: boolean, errorLog: { tf, message }[] }`. После финального батча — пауза 900 мс при 100%, затем скрытие блока (если ошибок нет) или установка `finished: true` (если ошибки есть — блок остаётся, тоаст не выдаётся). `formatErrorHint(msg)` — чистая функция для сокращения ошибок (timeout/table not found/column_stats/обрезка 45 симв.). `useEffect`-таймер форс-ренедрит раз в секунду пока есть `'running'`-слоты. Прогресс-блок: при выполнении — spinner + счётчик + Progress (красный при ошибках) + два слота с таймером «Ns» и строкой `formatErrorHint` под ошибочным слотом; при `finished` — кнопка «×», секция «Детали ошибок:» с `max-h-24 overflow-y-auto` вместо слотов. В режиме ALL Quality Block показывает список таблиц с цветными точками-индикаторами по группам + кнопки ремонта; прогресс repair-стадий рендерится inline под строкой активно-ремонтируемой таблицы. После repair `runQualityCheck` обновляет конкретную запись в `allQualityResults`. **Export CSV**: `handleExportCsv` — async, с lock guard. State: `loadingExport` (входит в `isBusy`). Вызывает `fetch(url)`, ждёт JSON `{ presigned_url }` (Admin держит соединение открытым пока Kafka + DataService + MinIO завершают работу; байты через Admin не проходят). По получении URL создаёт невидимый `<a href={presigned_url} download>` → `click()` — браузер скачивает напрямую с MinIO. Прогресс-бар удалён; нативный прогресс отображается браузером в панели загрузок. Кнопка при `loadingExport`: spinner + `"Подготовка данных..."`, disabled. URL для `timeframe !== 'ALL'`: `?table=&start_ms=&end_ms=`; для `ALL`: `?symbol=&timeframe=ALL&start_ms=&end_ms=`. Серверный `route.ts` (runtime `'nodejs'`): без S3 SDK, оба режима вызывают `kafkaRequest` и возвращают `Response.json({ presigned_url })` 200. `handleDeleteRows` при `ALL`: confirm упоминает все таймфреймы, удаляет последовательно через `CMD_DATA_DATASET_DELETE_ROWS`, ошибка отдельного TF → info-toast, итог — success-toast. **Redis cache**: список таблиц, coverage и allCoverages восстанавливаются из Redis при маунте / смене symbol+timeframe (ключи см. таблицу выше). |
 | `/train` | Кастомный tab-switcher в header (без Radix Tabs). 2-колоночный grid на `lg+`: левая — Config + Status Card с `ProgressLine` (recharts LineChart, показывается после ≥2 точек прогресса); правая — Training History table. `progressHistory` state сбрасывается при каждом новом запуске. |
 | `/compare` | CSS grid 2 колонки, shadcn Card в каждой, shadcn Select, Button экспорта |
-| `/anomaly` | Инспекция / очистка / обработка датасетов. 5 свёртываемых секций (Inspect / Browse / Anomalies / Clean / Process). **Inspect**: df.info-таблица + lazy-гистограммы численных колонок. **Browse**: постраничный просмотр сырых строк (`cmd.data.dataset.browse`), clickable-заголовки числовых колонок → `BrowseAreaChart`. Anomalies/Clean/Process — «Coming soon». **Redis cache**: stats+coverage восстанавливаются при смене symbol/timeframe, сохраняются после Analyze. |
+| `/anomaly` | Инспекция / ML-детекция / очистка / экспорт датасетов. **Detection parameters**: 4 inline-секции c чекбоксами и параметрами для новых типов — Rolling Z-score/IQR (window/threshold/mode), Frozen/stale price (min consecutive), Return outlier (threshold %), Volume/turnover mismatch (tolerance %). **Inspect**: df.info-таблица + lazy-гистограммы. **Browse**: постраничный просмотр сырых строк + per-column charts. **Anomalies секция** (новый layout): summary-карточки + Smart Suggestions panel (ранжированный по severity список рекомендаций с inline кнопкой "Apply" — мгновенно включает соответствующий clean checkbox и запускает Apply) + Tabs: **Timeline** (scatter chart с категориальной Y-осью, цвет точек = severity), **Table** (paginated detail с фильтрами), **DBSCAN** (eps/min_samples/max_sample_rows), **IForest** (Isolation Forest: contamination/n_estimators/max_sample_rows через `cmd.analitic.anomaly.isolation_forest`), **Distribution** (skewness, excess kurtosis, JB p-value + histogram log-returns с N(μ,σ)-overlay через `cmd.analitic.dataset.distribution`), **History** (lazy-load `cmd.data.dataset.audit_log` — все clean.apply записи; кнопка Rollback зарезервирована, disabled). **Clean**: 5 операций в карточках с inline-параметрами при checked — drop_duplicates имеет strategy (first/last/none), fill_zero_streaks — columns selector (all/volume/open_interest/funding_rate), fill_gaps — method (forward_fill/linear/drop_rows). **Export**: dropdown в header с выбором формата (CSV/JSON) и subset (all/critical/dbscan/iforest); скачивание через Blob+`URL.createObjectURL` без backend, файл `anomaly_report_{symbol}_{tf}_{ts}.{ext}`. **Session badge** (Analyze авто-загружает сессию через `cmd.analitic.dataset.load`/`status`, Unload — `cmd.analitic.dataset.unload`). **Redis cache**: stats+coverage+anomalies восстанавливаются при смене symbol/timeframe; ML-детектора, distribution, audit log не кешируются. |
 
 ## Roadmap
+
+### Phase 3 — Performance & contracts (latest sweep)
+
+- **`list_tables` без N+1.** DataService уже отдаёт обогащённые записи
+  `{ table_name, rows, coverage_pct, date_from, date_to }` за один Kafka
+  round-trip. Dashboard (`src/app/page.tsx`) и Download (`src/app/download/page.tsx`)
+  больше **не** запускают `Promise.all(tables.map(coverage))`: ответ
+  маппится напрямую в строки таблиц, а `min_ts_ms` / `max_ts_ms`
+  реконструируются как `Date.parse(\`${date_from}T00:00:00Z\`)` /
+  `T23:59:59Z`. Транзитивный fallback на per-table coverage остаётся
+  только для legacy-string-элементов (rolling-deploy safety) и должен
+  быть удалён, когда все DataService-инстансы будут гарантированно новыми.
+- **Browse pagination contract.** Browse-ответ содержит `total_rows`
+  (точная цифра, single source of truth) и `total_rows_estimate`
+  (информационный, из планировщика PG). UI обязан **закреплять
+  `total_rows` на первой странице** и считать `pageCount` от него же —
+  использование `total_rows_estimate` в пагинационной математике
+  запрещено (приводит к "прыгающему" числу страниц при дрейфе
+  оценок планировщика).
 
 - ✅ **Step 1:** skeleton with health dashboard.
 - ✅ **Step 1.5:** Kafka-only IPC, HTTP clients deleted.

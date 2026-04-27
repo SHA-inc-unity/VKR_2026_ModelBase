@@ -19,6 +19,7 @@ export interface HistogramDatum {
 export interface HistogramChartProps {
   data: HistogramDatum[];
   height?: number;
+  countLabel?: string;
 }
 
 const MUTED_FG = 'hsl(215 20% 65%)';
@@ -36,7 +37,7 @@ function fmt(n: number): string {
   return n.toPrecision(3);
 }
 
-function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
+function CustomTooltip({ active, payload, countLabel = 'count' }: TooltipProps<number, string> & { countLabel?: string }) {
   if (!active || !payload?.length) return null;
   const item = payload[0].payload as HistogramDatum;
   return (
@@ -52,13 +53,13 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
         [{fmt(item.range_start)}, {fmt(item.range_end)})
       </p>
       <p style={{ color: PRIMARY, fontWeight: 600, fontSize: 13 }}>
-        count: {item.count.toLocaleString()}
+        {countLabel}: {item.count.toLocaleString()}
       </p>
     </div>
   );
 }
 
-export function HistogramChart({ data, height = 240 }: HistogramChartProps) {
+export function HistogramChart({ data, height = 240, countLabel = 'count' }: HistogramChartProps) {
   const display = data.map(d => ({
     ...d,
     label: fmt(d.range_start),
@@ -70,7 +71,7 @@ export function HistogramChart({ data, height = 240 }: HistogramChartProps) {
         <CartesianGrid stroke={GRID} strokeDasharray="3 3" vertical={false} />
         <XAxis dataKey="label" stroke={MUTED_FG} tick={{ fontSize: 10 }} interval="preserveStartEnd" />
         <YAxis stroke={MUTED_FG} tick={{ fontSize: 10 }} allowDecimals={false} />
-        <Tooltip content={<CustomTooltip />} cursor={{ fill: 'hsl(217 33% 22% / 0.4)' }} />
+        <Tooltip content={<CustomTooltip countLabel={countLabel} />} cursor={{ fill: 'hsl(217 33% 22% / 0.4)' }} />
         <Bar dataKey="count" fill={PRIMARY} radius={[2, 2, 0, 0]} />
       </BarChart>
     </ResponsiveContainer>

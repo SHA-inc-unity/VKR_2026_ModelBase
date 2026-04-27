@@ -15,7 +15,7 @@ pip install -e ./shared
 | `modelline_shared.schemas` | Pydantic BaseModel: `HealthResponse` и будущие shared-контракты |
 | `modelline_shared.messaging.schemas` | `Envelope` (универсальный Kafka-конверт), `HealthReply` |
 | `modelline_shared.messaging.topics` | Константы топиков Kafka (`CMD_DATA_*`, `CMD_ANALYTICS_*`, `EVT_*`) + `reply_inbox()` |
-| `modelline_shared.messaging.client` | `KafkaClient` (aiokafka): request/reply, pub/sub, регистрация хэндлеров |
+| `modelline_shared.messaging.client` | `KafkaClient` (aiokafka): request/reply, pub/sub, регистрация хэндлеров. Хэндлеры исполняются через `asyncio.create_task` — consume-loop никогда не блокируется, что исключает дедлок при вызове `client.request()` внутри хэндлера. **JSON hot-path:** при наличии `orjson` сериализация/парсинг сообщений идут через него (быстрее в ~2–3×); fallback на stdlib `json` использует `separators=(",", ":")` чтобы wire-формат был байт-в-байт совместим. На reply-пути парсится только `correlation_id` + `payload` из dict — без построения полного `Envelope` (Pydantic-валидация replies удалена как лишняя работа на горячем пути; продакшн-валидация остаётся для входящих команд через `Envelope.model_validate`). |
 
 ## Kafka-конвенция именования топиков
 

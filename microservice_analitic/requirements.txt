@@ -3,9 +3,14 @@ catboost>=1.2
 numpy>=1.26
 pandas>=2.0
 scikit-learn>=1.4
+scipy>=1.11
 
 # Data access (Kafka via microservice_data)
 aiokafka>=0.9
+
+# Dataset session — Parquet on disk + presigned download
+httpx[http2]>=0.27
+pyarrow>=15.0
 
 # PostgreSQL
 psycopg2-binary>=2.9

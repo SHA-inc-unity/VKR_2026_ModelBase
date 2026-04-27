@@ -8,38 +8,73 @@ using DataService.API.Dataset;
 using DataService.API.Minio;
 using DataService.API.Settings;
 using Microsoft.Extensions.Options;
+using Npgsql;
 
 namespace DataService.API.Kafka;
 
 /// <summary>
 /// BackgroundService that consumes all cmd.data.* Kafka topics and dispatches handlers.
 /// </summary>
-public sealed class KafkaConsumerService : BackgroundService
+public sealed partial class KafkaConsumerService : BackgroundService
 {
     private readonly IConsumer<string, string> _consumer;
     private readonly KafkaProducer              _producer;
     private readonly DatasetRepository          _repo;
+    private readonly DatasetJobsRepository      _jobsRepo;
     private readonly BybitApiClient             _bybit;
     private readonly MinioClaimCheckService     _minio;
     private readonly string                     _minioPublicUrl;
     private readonly ILogger<KafkaConsumerService> _log;
 
-    // Limit concurrent in-flight message handlers (not static — instance field)
-    private readonly SemaphoreSlim _concurrency = new(32, 32);
+    // Two-tier concurrency control. The whole consume loop is bounded by
+    // _concurrency; *heavy* SQL/export/anomaly handlers also acquire
+    // _heavyConcurrency so a burst of e.g. anomaly-detect requests cannot
+    // starve light health/coverage/list traffic that shares the same
+    // PostgreSQL pool.
+    //
+    // Tuning rationale (Npgsql default pool size = 100):
+    //   - heavy slots (4) × ~10 fan-out connections per anomaly run ≈ 40
+    //   - light handlers re-use the remaining pool for coverage/list/etc.
+    private readonly SemaphoreSlim _concurrency      = new(32, 32);
+    private readonly SemaphoreSlim _heavyConcurrency = new(4,  4);
+
+    // Topics that fan out into multiple parallel SQL queries or stream large
+    // payloads. They share the heavy-ops semaphore.
+    private static readonly HashSet<string> HeavyTopics = new(StringComparer.Ordinal)
+    {
+        Topics.CmdDataDatasetExport,
+        Topics.CmdDataDatasetIngest,
+        Topics.CmdDataDatasetDetectAnomalies,
+        Topics.CmdDataDatasetCleanPreview,
+        Topics.CmdDataDatasetCleanApply,
+        Topics.CmdDataDatasetComputeFeatures,
+        Topics.CmdDataDatasetImportCsv,
+        Topics.CmdDataDatasetUpsertOhlcv,
+        Topics.CmdDataDatasetColumnStats,
+        Topics.CmdDataDatasetColumnHistogram,
+    };
 
     // Payloads larger than this go through MinIO claim-check
     private const int InlinePayloadLimit = 512 * 1024; // 512 KB
+
+    // Anomaly response: how many sample rows to inline. Above this we still
+    // return the full grouped summary, but the row sample is capped and the
+    // complete report is published to MinIO so the UI can fetch it via a
+    // presigned URL on demand.
+    private const int AnomalyInlineRowSample = 200;
 
     public KafkaConsumerService(
         IOptions<DataServiceSettings> opts,
         KafkaProducer producer,
         DatasetRepository repo,
+        DatasetJobsRepository jobsRepo,
         BybitApiClient bybit,
         MinioClaimCheckService minio,
         ILogger<KafkaConsumerService> log)
     {
         _producer       = producer;
         _repo           = repo;
+        _jobsRepo       = jobsRepo;
         _bybit          = bybit;
         _minio          = minio;
         _minioPublicUrl = opts.Value.Minio.PublicUrl;
@@ -108,13 +143,23 @@ public sealed class KafkaConsumerService : BackgroundService
 
             if (result is null) continue;
 
-            // Fire-and-forget with concurrency limit
+            // Fire-and-forget with two-tier concurrency limit.
+            // The outer semaphore caps total in-flight handlers; heavy
+            // topics also acquire a dedicated slot so their fan-out cannot
+            // exhaust the PostgreSQL pool and starve light handlers.
             _ = Task.Run(async () =>
             {
                 await _concurrency.WaitAsync(stoppingToken);
+                bool acquiredHeavy = false;
                 JsonDocument? doc = null;
                 try
                 {
+                    if (HeavyTopics.Contains(result.Topic))
+                    {
+                        await _heavyConcurrency.WaitAsync(stoppingToken);
+                        acquiredHeavy = true;
+                    }
+
                     doc = JsonDocument.Parse(result.Message.Value);
                     var root         = doc.RootElement;
                     var correlationId = root.TryGetProperty("correlation_id", out var cid) ? cid.GetString() ?? "" : "";
@@ -130,6 +175,7 @@ public sealed class KafkaConsumerService : BackgroundService
                 finally
                 {
                     doc?.Dispose();
+                    if (acquiredHeavy) _heavyConcurrency.Release();
                     _concurrency.Release();
                 }
             }, stoppingToken);
@@ -190,6 +236,20 @@ public sealed class KafkaConsumerService : BackgroundService
         return null;
     }
 
+    private static decimal? TryGetDecimal(JsonElement p, string name)
+    {
+        if (p.ValueKind != JsonValueKind.Object) return null;
+        if (!p.TryGetProperty(name, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.Null) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetDecimal(out var d)) return d;
+        if (v.ValueKind == JsonValueKind.String
+            && decimal.TryParse(v.GetString(),
+                System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var s)) return s;
+        return null;
+    }
+
     private async Task DispatchAsync(
         string topic, string correlationId, string replyTo,
         JsonElement payload, CancellationToken ct)
@@ -210,6 +270,7 @@ public sealed class KafkaConsumerService : BackgroundService
             Topics.CmdDataDatasetMissing     => await HandleFindMissingAsync(payload, ct),
             Topics.CmdDataDatasetRows        => await HandleRowsAsync(payload, replyTo, correlationId, ct),
             Topics.CmdDataDatasetExport      => await HandleExportAsync(payload, replyTo, correlationId, ct),
+            Topics.CmdDataDatasetExportFull  => await HandleExportFullAsync(payload, ct),
             Topics.CmdDataDatasetSchema      => await HandleTableSchemaAsync(payload, ct),
             Topics.CmdDataDatasetNormalizeTf => HandleNormalizeTimeframe(payload),
             Topics.CmdDataDatasetMakeTable   => HandleMakeTableName(payload),
@@ -222,6 +283,15 @@ public sealed class KafkaConsumerService : BackgroundService
             Topics.CmdDataDatasetColumnHistogram => await HandleColumnHistogramAsync(payload, ct),
             Topics.CmdDataDatasetBrowse          => await HandleBrowseAsync(payload, ct),
             Topics.CmdDataDatasetComputeFeatures => await HandleComputeFeaturesAsync(payload, ct),
+            Topics.CmdDataDatasetDetectAnomalies => await HandleDetectAnomaliesAsync(payload, ct),
+            Topics.CmdDataDatasetCleanPreview    => await HandleCleanPreviewAsync(payload, ct),
+            Topics.CmdDataDatasetCleanApply      => await HandleCleanApplyAsync(payload, ct),
+            Topics.CmdDataDatasetAuditLog        => await HandleAuditLogAsync(payload, ct),
+            Topics.CmdDataDatasetUpsertOhlcv     => await HandleUpsertOhlcvAsync(payload, ct),
+            Topics.CmdDataDatasetJobsStart       => await HandleJobsStartAsync(payload, ct),
+            Topics.CmdDataDatasetJobsCancel      => await HandleJobsCancelAsync(payload, ct),
+            Topics.CmdDataDatasetJobsGet         => await HandleJobsGetAsync(payload, ct),
+            Topics.CmdDataDatasetJobsList        => await HandleJobsListAsync(payload, ct),
             _                                => new { error = $"Unknown topic: {topic}" },
         };
 
@@ -372,29 +442,49 @@ public sealed class KafkaConsumerService : BackgroundService
         // (matches what front-end asked about), otherwise fall back to the
         // observed data range.
         long expected = 0;
+        long rowsForPct = cov.Value.Rows;
+        bool rangeMode = false;
         if (stepMs is long step && step > 0)
         {
             if (startMs is not null && endMs is not null && endMs.Value > startMs.Value)
-                expected = Math.Max(0, (endMs.Value - startMs.Value) / step + 1);
+            {
+                // Range-scoped coverage: use real row count inside the window
+                // (Phase F) instead of the full-table count, which is what the
+                // user actually asked about.
+                var rng = await _repo.GetCoverageRangeAsync(
+                    table, startMs.Value, endMs.Value, step, ct);
+                if (rng is not null)
+                {
+                    expected = rng.Value.ExpectedInRange;
+                    rowsForPct = rng.Value.RowsInRange;
+                    rangeMode = true;
+                }
+                else
+                {
+                    expected = Math.Max(0, (endMs.Value - startMs.Value) / step + 1);
+                }
+            }
             else if (cov.Value.MaxTsMs > cov.Value.MinTsMs)
                 expected = Math.Max(0, (cov.Value.MaxTsMs - cov.Value.MinTsMs) / step + 1);
         }
 
         double pct = expected > 0
-            ? Math.Min(100.0, Math.Round((double)cov.Value.Rows / expected * 100.0, 2))
+            ? Math.Min(100.0, Math.Round((double)rowsForPct / expected * 100.0, 2))
             : 0.0;
-        long gaps = expected > cov.Value.Rows ? expected - cov.Value.Rows : 0L;
+        long gaps = expected > rowsForPct ? expected - rowsForPct : 0L;
 
         return new
         {
             exists       = true,
             table_name   = table,
             rows         = cov.Value.Rows,
+            rows_in_range = rangeMode ? (long?)rowsForPct : null,
             min_ts_ms    = cov.Value.MinTsMs,
             max_ts_ms    = cov.Value.MaxTsMs,
             expected,
             coverage_pct = pct,
             gaps,
+            range_mode   = rangeMode,
             date_from    = FormatDate(cov.Value.MinTsMs),
             date_to      = FormatDate(cov.Value.MaxTsMs),
         };
@@ -477,38 +567,76 @@ public sealed class KafkaConsumerService : BackgroundService
             if (tables.Count == 0)
                 return new { error = "tables must be a non-empty array of strings" };
 
-            try
+            // Pipe-based streaming pipeline — producer builds the ZIP sequentially
+            // (one table at a time) writing directly into the pipe; consumer multipart-
+            // uploads the pipe reader to MinIO.  Peak RAM: ~64 KB pipe buffer + one
+            // 5 MB TransferUtility part, regardless of how many tables or rows are
+            // exported.
+            var symbol  = TryGetString(p, "symbol") ?? "export";
+            var zipKey  = $"exports/{Guid.NewGuid():N}.zip";
+            var zipPipe = new Pipe();
+
+            Exception? zipProducerError = null;
+            var zipProducerTask = Task.Run(async () =>
             {
-                using var ms = new MemoryStream();
-                using (var archive = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+                Exception? captured = null;
+                try
                 {
-                    foreach (var tableName in tables)
+                    await using var writerStream = zipPipe.Writer.AsStream(leaveOpen: true);
+                    using (var archive = new ZipArchive(
+                        writerStream, ZipArchiveMode.Create, leaveOpen: true))
                     {
-                        // Fastest — keep CSV text readable; ZIP size is dominated
-                        // by compression ratio here, so Optimal pays off.
-                        var entry = archive.CreateEntry($"{tableName}.csv", CompressionLevel.Optimal);
-                        await using var entryStream = entry.Open();
-                        await _repo.ExportCsvToStreamAsync(
-                            tableName, startMs.Value, endMs.Value, entryStream, ct);
-                    }
-                } // archive.Dispose() writes the central directory
+                        foreach (var tableName in tables)
+                        {
+                            var entry = archive.CreateEntry(
+                                $"{tableName}.csv", CompressionLevel.Fastest);
+                            await using var entryStream = entry.Open();
+                            await _repo.ExportCsvToStreamAsync(
+                                tableName, startMs.Value, endMs.Value, entryStream, ct);
+                        }
+                    } // archive.Dispose() flushes ZIP central directory into writerStream
+                    await writerStream.FlushAsync(ct);
+                }
+                catch (Exception ex) { captured = ex; zipProducerError = ex; }
+                await zipPipe.Writer.CompleteAsync(captured);
+            }, ct);
 
-                var zipBytes = ms.ToArray();
-                var zipKey   = $"exports/{Guid.NewGuid():N}.zip";
-                var claim = await _minio.PutBytesAsync(
-                    zipBytes, zipKey, contentType: "application/zip", ct: ct);
-
-                _log.LogInformation(
-                    "[export:zip] tables={Count} bytes={Bytes} key={Key}",
-                    tables.Count, zipBytes.Length, zipKey);
-
-                return new { claim_check = claim };
-            }
-            catch (Exception ex)
+            Exception? zipConsumerError = null;
+            var zipConsumerTask = Task.Run(async () =>
             {
-                _log.LogError(ex, "zip export failed for tables={Tables}", string.Join(",", tables));
-                return new { error = ex.Message };
+                Exception? captured = null;
+                try
+                {
+                    await using var reader = zipPipe.Reader.AsStream(leaveOpen: true);
+                    await _minio.PutStreamAsync(reader, zipKey, "application/zip", ct);
+                }
+                catch (Exception ex) { captured = ex; zipConsumerError = ex; }
+                await zipPipe.Reader.CompleteAsync(captured);
+            }, ct);
+
+            await Task.WhenAll(zipProducerTask, zipConsumerTask);
+
+            var zipErr = zipProducerError ?? zipConsumerError;
+            if (zipErr is not null)
+            {
+                _log.LogError(zipErr,
+                    "[export:zip] streaming failed tables={Tables}",
+                    string.Join(",", tables));
+                return new { error = zipErr.Message };
             }
+
+            var zipDownloadName = $"{symbol}_ALL.zip";
+            var zipPresignedUrl = await _minio.GetPresignedUrlAsync(
+                zipKey, _minioPublicUrl, expiresMinutes: 60,
+                downloadFilename: zipDownloadName,
+                contentType: "application/zip",
+                ct: ct);
+
+            _log.LogInformation(
+                "[export:zip] tables={Count} key={Key} → presigned (60m)",
+                tables.Count, zipKey);
+
+            return new { presigned_url = zipPresignedUrl };
         }
 
         // ── Single-table mode: streaming CSV → presigned URL ──────────────
@@ -586,6 +714,104 @@ public sealed class KafkaConsumerService : BackgroundService
             table, startMs, endMs, key);
 
         return new { presigned_url = presignedUrl };
+    }
+
+    /// <summary>
+    /// Composite "load this whole dataset" command for downstream services
+    /// (currently microservice_analitic). Replaces the three-call dance of
+    /// make_table → coverage → export with a single Kafka round-trip:
+    ///
+    ///   request:  { symbol, timeframe, max_rows? }
+    ///   response: { table_name, row_count, presigned_url }      // success
+    ///             { error: "table_not_found" | "empty_table"
+    ///                    | "row_count_exceeds_limit", row_count?, limit? }
+    ///
+    /// Internally it resolves the table name via DatasetCore, looks up
+    /// coverage, enforces the optional row-count cap, then streams the full
+    /// table to MinIO using the same pipe-based pipeline as
+    /// <see cref="HandleExportAsync"/>. No alternative time-slice mode —
+    /// callers that need a window keep using cmd.data.dataset.export.
+    /// </summary>
+    private async Task<object> HandleExportFullAsync(JsonElement p, CancellationToken ct)
+    {
+        var symbol    = TryGetString(p, "symbol");
+        var timeframe = TryGetString(p, "timeframe");
+        if (string.IsNullOrEmpty(symbol) || string.IsNullOrEmpty(timeframe))
+            return new { error = "missing fields: symbol, timeframe" };
+
+        string table;
+        try { table = DatasetCore.MakeTableName(symbol, timeframe); }
+        catch (ArgumentException ex) { return new { error = ex.Message }; }
+
+        var cov = await _repo.GetCoverageIfExistsAsync(table, ct);
+        if (cov is null)
+            return new { error = "table_not_found", table };
+
+        var (rows, minTsMs, maxTsMs) = cov.Value;
+        if (rows <= 0)
+            return new { error = "empty_table", table };
+
+        var maxRows = TryGetInt64(p, "max_rows");
+        if (maxRows is long cap && cap > 0 && rows > cap)
+            return new { error = "row_count_exceeds_limit", row_count = rows, limit = cap };
+
+        // Same streaming pipeline as the time-slice export path: PostgreSQL
+        // COPY → pipe → MinIO multipart upload. Peak memory is one pipe
+        // buffer (~64 KB) plus one S3 part (~5 MB), regardless of row count.
+        var key  = $"exports/{Guid.NewGuid():N}.csv";
+        var pipe = new Pipe();
+
+        Exception? producerError = null;
+        var producerTask = Task.Run(async () =>
+        {
+            Exception? captured = null;
+            try
+            {
+                await using var writer = pipe.Writer.AsStream(leaveOpen: true);
+                await _repo.ExportCsvToStreamAsync(table, minTsMs, maxTsMs, writer, ct);
+            }
+            catch (Exception ex) { captured = ex; producerError = ex; }
+            await pipe.Writer.CompleteAsync(captured);
+        }, ct);
+
+        Exception? consumerError = null;
+        var consumerTask = Task.Run(async () =>
+        {
+            Exception? captured = null;
+            try
+            {
+                await using var reader = pipe.Reader.AsStream(leaveOpen: true);
+                await _minio.PutStreamAsync(reader, key, "text/csv; charset=utf-8", ct);
+            }
+            catch (Exception ex) { captured = ex; consumerError = ex; }
+            await pipe.Reader.CompleteAsync(captured);
+        }, ct);
+
+        await Task.WhenAll(producerTask, consumerTask);
+
+        var err = producerError ?? consumerError;
+        if (err is not null)
+        {
+            _log.LogError(err, "[export_full] streaming failed for {Table}", table);
+            return new { error = err.Message };
+        }
+
+        var presignedUrl = await _minio.GetPresignedUrlAsync(
+            key, _minioPublicUrl, expiresMinutes: 60,
+            downloadFilename: $"{table}.csv",
+            contentType: "text/csv; charset=utf-8",
+            ct: ct);
+
+        _log.LogInformation(
+            "[export_full] {Table} rows={Rows} key={Key} → presigned (60m)",
+            table, rows, key);
+
+        return new
+        {
+            table_name    = table,
+            row_count     = rows,
+            presigned_url = presignedUrl,
+        };
     }
 
     private async Task<object> HandleTableSchemaAsync(JsonElement p, CancellationToken ct)
@@ -803,10 +1029,10 @@ public sealed class KafkaConsumerService : BackgroundService
                     Symbol:       symbol.ToUpperInvariant(),
                     Exchange:     exchange,
                     Timeframe:    key,
-                    IndexPrice:   kline.Close,
                     OpenPrice:    kline.Open,
                     HighPrice:    kline.High,
                     LowPrice:     kline.Low,
+                    ClosePrice:   kline.Close,
                     Volume:       kline.Volume,
                     Turnover:     kline.Turnover,
                     FundingRate:  fr,
@@ -890,7 +1116,7 @@ public sealed class KafkaConsumerService : BackgroundService
     //
     // Each row object must expose a `timestamp_utc` key (ISO-8601 string OR
     // unix milliseconds) and arbitrary columns matching the market-data schema
-    // (symbol, exchange, timeframe, index_price, funding_rate, open_interest,
+    // (symbol, exchange, timeframe, close_price, funding_rate, open_interest,
     // rsi). Missing symbol / exchange / timeframe fall back to values derived
     // from the table name ("btcusdt_5m" → symbol=BTCUSDT, timeframe=5m,
     // exchange=bybit). Rows without a parseable timestamp are skipped and
@@ -932,15 +1158,39 @@ public sealed class KafkaConsumerService : BackgroundService
             var exchange  = ReadCellString(r, "exchange")  ?? defaultExchange;
             var timeframe = ReadCellString(r, "timeframe") ?? defaultTimeframe;
 
+            var op = ReadCellDecimal(r, "open_price");
+            var hp = ReadCellDecimal(r, "high_price");
+            var lp = ReadCellDecimal(r, "low_price");
+            var cp = ReadCellDecimal(r, "close_price");
+
+            // Phase-4 candle-source-of-truth: a row is only persisted when
+            // it carries a complete, internally-consistent OHLC tuple. Rows
+            // with partial OHLC data, or with prices that violate the
+            // invariant `low ≤ min(open, close) ≤ max(open, close) ≤ high`,
+            // are rejected — admitting them would corrupt the
+            // "every persisted candle is a single tuple" guarantee.
+            if (op is null || hp is null || lp is null || cp is null)
+            {
+                skipped++;
+                continue;
+            }
+            var loBound = Math.Min(op.Value, cp.Value);
+            var hiBound = Math.Max(op.Value, cp.Value);
+            if (lp.Value > loBound || hp.Value < hiBound)
+            {
+                skipped++;
+                continue;
+            }
+
             rows.Add(new DatasetRepository.MarketRow(
                 TimestampMs:  tsMs.Value,
                 Symbol:       (symbol    ?? "").ToUpperInvariant(),
                 Exchange:     exchange   ?? defaultExchange,
                 Timeframe:    timeframe  ?? defaultTimeframe ?? "",
-                IndexPrice:   ReadCellDecimal(r, "index_price"),
-                OpenPrice:    ReadCellDecimal(r, "open_price"),
-                HighPrice:    ReadCellDecimal(r, "high_price"),
-                LowPrice:     ReadCellDecimal(r, "low_price"),
+                OpenPrice:    op,
+                HighPrice:    hp,
+                LowPrice:     lp,
+                ClosePrice:   cp,
                 Volume:       ReadCellDecimal(r, "volume"),
                 Turnover:     ReadCellDecimal(r, "turnover"),
                 FundingRate:  ReadCellDecimal(r, "funding_rate"),
@@ -1091,9 +1341,26 @@ public sealed class KafkaConsumerService : BackgroundService
         var table = TryGetString(payload, "table");
         if (string.IsNullOrWhiteSpace(table))
             return new { error = "missing field: table" };
+
+        // Optional: restrict to a specific set of columns (e.g. quality audit
+        // only needs 16 columns, not all ~30).
+        List<string>? columnFilter = null;
+        if (payload.TryGetProperty("columns", out var colsEl)
+            && colsEl.ValueKind == JsonValueKind.Array)
+        {
+            columnFilter = colsEl.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString()!)
+                .ToList();
+        }
+
+        // Optional: skip MIN/MAX/AVG/STDDEV — only compute COUNT (much faster).
+        bool countOnly = payload.TryGetProperty("count_only", out var coEl)
+            && coEl.ValueKind == JsonValueKind.True;
+
         try
         {
-            var stats = await _repo.GetColumnStatsAsync(table, ct);
+            var stats = await _repo.GetColumnStatsAsync(table, columnFilter, countOnly, ct);
             if (stats is null) return new { error = "table not found" };
 
             var total = stats.TotalRows;
@@ -1174,10 +1441,39 @@ public sealed class KafkaConsumerService : BackgroundService
 
         if (page < 0) page = 0;
 
+        // Skip the expensive COUNT(*) on pages beyond the first: the caller
+        // already has the exact total from page 0. Fall back to the fast
+        // pg_class.reltuples estimate instead. The caller can override this
+        // by passing "include_total": true (force exact) or "include_total": false
+        // (always use approximate, even on page 0).
+        bool includeExactTotal;
+        if (payload.TryGetProperty("include_total", out var itEl) && itEl.ValueKind == JsonValueKind.True)
+            includeExactTotal = true;
+        else if (payload.TryGetProperty("include_total", out itEl) && itEl.ValueKind == JsonValueKind.False)
+            includeExactTotal = false;
+        else
+            includeExactTotal = page == 0;  // default: exact on first page, approx on subsequent
+
         try
         {
-            var (total, rows) = await _repo.BrowseRowsAsync(table, page, pageSize, orderDesc, ct);
-            return new { table, page, page_size = pageSize, total_rows = total, rows };
+            var (exactTotal, estimateTotal, rows) =
+                await _repo.BrowseRowsAsync(table, page, pageSize, orderDesc, includeExactTotal, ct);
+            // Contract:
+            //  total_rows           — exact COUNT(*), source of truth (only when computed)
+            //  total_rows_estimate  — pg_class.reltuples (informational only)
+            //  total_rows_known     — true iff total_rows is exact
+            // Caller should pin total_rows on first page and IGNORE estimate
+            // for pagination math (button availability, total page count).
+            return new
+            {
+                table,
+                page,
+                page_size           = pageSize,
+                total_rows          = exactTotal,
+                total_rows_estimate = estimateTotal,
+                total_rows_known    = exactTotal.HasValue,
+                rows,
+            };
         }
         catch (ArgumentException ex)
         {
@@ -1391,4 +1687,609 @@ public sealed class KafkaConsumerService : BackgroundService
         _consumer.Dispose();
         base.Dispose();
     }
+
+    // ── Anomaly detection / clean handlers ────────────────────────────────
+
+    /// <summary>
+    /// Run all anomaly checks in parallel and return a summary-first response.
+    ///
+    /// Response shape (always):
+    ///   table, total, critical, warning, by_type, sample (≤ AnomalyInlineRowSample rows),
+    ///   page, page_size, has_more, [optional] report_url.
+    ///
+    /// Behaviour:
+    ///   - When <c>page</c>/<c>page_size</c> are supplied the requested
+    ///     window is returned in <c>rows</c> (sorted by timestamp asc).
+    ///   - Otherwise the response carries only <c>sample</c> (top
+    ///     critical-first then chronological), with <c>has_more</c> set when
+    ///     <c>total</c> exceeds the inline cap.
+    ///   - When the full result exceeds <c>AnomalyInlineRowSample</c> rows,
+    ///     a JSON report of every detection is uploaded to MinIO and a
+    ///     presigned URL is returned in <c>report_url</c>. The UI is
+    ///     expected to show the summary + sample inline and let the user
+    ///     download the full report from the URL.
+    /// </summary>
+    private async Task<object> HandleDetectAnomaliesAsync(JsonElement p, CancellationToken ct)
+    {
+        var table  = TryGetString(p, "table");
+        if (string.IsNullOrWhiteSpace(table))
+            return new { error = "missing required field: table" };
+        var stepMs = TryGetInt64(p, "step_ms") ?? 0;
+        var z      = p.TryGetProperty("z_threshold", out var zEl)
+                      && zEl.ValueKind == JsonValueKind.Number
+                      ? zEl.GetDouble() : 3.0;
+
+        // ── New optional parameters for the four extra anomaly types ──
+        // All four can be turned off independently by passing the corresponding
+        // *_enabled = false. By default they're all on for backwards-compat —
+        // the old front-end will simply receive a richer reply.
+        bool RollingEnabled  = !p.TryGetProperty("rolling_enabled",  out var re) || re.ValueKind != JsonValueKind.False;
+        bool StaleEnabled    = !p.TryGetProperty("stale_enabled",    out var se) || se.ValueKind != JsonValueKind.False;
+        bool ReturnEnabled   = !p.TryGetProperty("return_enabled",   out var rne) || rne.ValueKind != JsonValueKind.False;
+        bool VolMismatchEnabled = !p.TryGetProperty("volmismatch_enabled", out var vme) || vme.ValueKind != JsonValueKind.False;
+
+        var rollingCol    = TryGetString(p, "rolling_column") ?? "close_price";
+        var rollingWindow = (int)(TryGetInt64(p, "rolling_window") ?? 96);
+        var rollingThr    = p.TryGetProperty("rolling_threshold", out var rtEl)
+                              && rtEl.ValueKind == JsonValueKind.Number
+                              ? rtEl.GetDouble() : 4.5;
+        var rollingMode   = TryGetString(p, "rolling_mode") ?? "zscore"; // zscore|iqr
+
+        var staleCol    = TryGetString(p, "stale_column") ?? "close_price";
+        var staleMinLen = (int)(TryGetInt64(p, "stale_min_len") ?? 5);
+
+        var returnCol   = TryGetString(p, "return_column") ?? "close_price";
+        var returnThr   = p.TryGetProperty("return_threshold_pct", out var rtpEl)
+                            && rtpEl.ValueKind == JsonValueKind.Number
+                            ? rtpEl.GetDouble() : 15.0;
+
+        var volTol      = p.TryGetProperty("volmismatch_tolerance_pct", out var vtEl)
+                            && vtEl.ValueKind == JsonValueKind.Number
+                            ? vtEl.GetDouble() : 5.0;
+
+        try
+        {
+            // Inner semaphore: cap the fan-out to 5 concurrent SQL connections
+            // per anomaly run. With _heavyConcurrency(4) that gives at most
+            // 4 × 5 = 20 connections from anomaly handlers, well within the
+            // MaxPoolSize=25 budget and leaving 5 slots for light handlers.
+            using var inner = new SemaphoreSlim(5, 5);
+            async Task<IReadOnlyList<DatasetRepository.AnomalyRow>> Guarded(
+                Func<Task<IReadOnlyList<DatasetRepository.AnomalyRow>>> factory)
+            {
+                await inner.WaitAsync(ct);
+                try   { return await factory(); }
+                finally { inner.Release(); }
+            }
+
+            var Empty = Task.FromResult<IReadOnlyList<DatasetRepository.AnomalyRow>>(
+                Array.Empty<DatasetRepository.AnomalyRow>());
+
+            var gapsTask     = stepMs > 0
+                ? Guarded(() => _repo.DetectGapsAsync(table, stepMs, ct))
+                : Empty;
+            var dupTask      = Guarded(() => _repo.DetectDuplicatesAsync(table, ct));
+            var ohlcTask     = Guarded(() => _repo.DetectOhlcViolationsAsync(table, ct));
+            var negTask      = Guarded(() => _repo.DetectNegativesAsync(table, ct));
+            var streakTask   = Guarded(() => _repo.DetectZeroStreaksAsync(table, 3, ct));
+            var outlierTask  = Guarded(() => _repo.DetectStatisticalOutliersAsync(table, z, ct));
+
+            // The four new structural detectors. We resolve each conditionally
+            // to an empty list when disabled so Task.WhenAll stays cheap.
+            var rollingTask = RollingEnabled
+                ? Guarded(() => _repo.DetectRollingZScoreAsync(table, rollingCol, rollingWindow, rollingThr, rollingMode, ct))
+                : Empty;
+            var staleTask   = StaleEnabled
+                ? Guarded(() => _repo.DetectStalePriceAsync(table, staleCol, staleMinLen, ct))
+                : Empty;
+            var retTask     = ReturnEnabled
+                ? Guarded(() => _repo.DetectReturnOutliersAsync(table, returnCol, returnThr, ct))
+                : Empty;
+            var volMismatchTask = VolMismatchEnabled
+                ? Guarded(() => _repo.DetectVolumeMismatchAsync(table, volTol, ct))
+                : Empty;
+
+            await Task.WhenAll(gapsTask, dupTask, ohlcTask, negTask, streakTask, outlierTask,
+                               rollingTask, staleTask, retTask, volMismatchTask);
+
+            var all = new List<DatasetRepository.AnomalyRow>();
+            all.AddRange(gapsTask.Result);
+            all.AddRange(dupTask.Result);
+            all.AddRange(ohlcTask.Result);
+            all.AddRange(negTask.Result);
+            all.AddRange(streakTask.Result);
+            all.AddRange(outlierTask.Result);
+            all.AddRange(rollingTask.Result);
+            all.AddRange(staleTask.Result);
+            all.AddRange(retTask.Result);
+            all.AddRange(volMismatchTask.Result);
+
+            var byType = all.GroupBy(r => r.AnomalyType)
+                            .ToDictionary(g => g.Key, g => (long)g.Count());
+            var critical = all.Count(r => r.Severity == "critical");
+            var warning  = all.Count(r => r.Severity == "warning");
+            var total    = all.Count;
+
+            // ── Pagination over the full chronological list ──────────────
+            // The caller can ask for a slice via { page, page_size } —
+            // typical UI flow: first request returns summary + sample; user
+            // clicks "next page" → same command with explicit pagination.
+            int? page     = (int?)TryGetInt64(p, "page");
+            int  pageSize = (int)(TryGetInt64(p, "page_size") ?? 0L);
+            object? rowsSlice = null;
+            bool hasMore   = total > AnomalyInlineRowSample;
+
+            // Pre-sort once — used by both pagination and the sample.
+            var sortedByTs = all.OrderBy(r => r.TsMs).ToList();
+
+            if (page is int pg && pageSize > 0)
+            {
+                pg = Math.Max(0, pg);
+                pageSize = Math.Clamp(pageSize, 1, 5_000);
+                var slice = sortedByTs
+                    .Skip(pg * pageSize)
+                    .Take(pageSize)
+                    .Select(MapAnomaly)
+                    .ToArray();
+                hasMore = (long)(pg + 1) * pageSize < total;
+                rowsSlice = slice;
+            }
+
+            // ── Sample for summary-first response ────────────────────────
+            // Critical first (so the UI's first impression is "what
+            // matters"), then chronological inside each severity tier.
+            var sample = all
+                .OrderByDescending(r => r.Severity == "critical" ? 1 : 0)
+                .ThenByDescending(r => r.Severity == "warning" ? 1 : 0)
+                .ThenBy(r => r.TsMs)
+                .Take(AnomalyInlineRowSample)
+                .Select(MapAnomaly)
+                .ToArray();
+
+            // ── Claim-check: full report → MinIO when total is large ─────
+            string? reportUrl = null;
+            if (total > AnomalyInlineRowSample)
+            {
+                try
+                {
+                    var key = $"reports/anomaly_{Guid.NewGuid():N}.json";
+                    // True streaming: write JSON directly into MinIO via a
+                    // Pipe using Utf8JsonWriter. We never materialise the row
+                    // array — `sortedByTs` is iterated lazily and each
+                    // anomaly is emitted to the writer one element at a
+                    // time. Peak memory is bounded to the pipe's internal
+                    // buffer plus the JsonWriter's flush threshold
+                    // (≈ tens of KB) regardless of total row count.
+                    var pipe = new Pipe();
+                    var serializeTask = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await using var ws = pipe.Writer.AsStream(leaveOpen: false);
+                            await using var writer = new Utf8JsonWriter(ws);
+                            writer.WriteStartObject();
+                            writer.WriteString("table", table);
+                            writer.WriteNumber("total", total);
+                            writer.WriteNumber("critical", critical);
+                            writer.WriteNumber("warning", warning);
+                            writer.WriteStartObject("by_type");
+                            foreach (var kv in byType)
+                                writer.WriteNumber(kv.Key, kv.Value);
+                            writer.WriteEndObject();
+                            writer.WriteStartArray("rows");
+                            int sinceFlush = 0;
+                            foreach (var r in sortedByTs)
+                            {
+                                writer.WriteStartObject();
+                                writer.WriteNumber("ts_ms", r.TsMs);
+                                writer.WriteString("anomaly_type", r.AnomalyType);
+                                writer.WriteString("severity", r.Severity);
+                                if (r.Column is null) writer.WriteNull("column");
+                                else writer.WriteString("column", r.Column);
+                                if (r.Value is double v) writer.WriteNumber("value", v);
+                                else writer.WriteNull("value");
+                                if (r.Details is null) writer.WriteNull("details");
+                                else writer.WriteString("details", r.Details);
+                                writer.WriteEndObject();
+                                if (++sinceFlush >= 1024)
+                                {
+                                    await writer.FlushAsync(ct);
+                                    sinceFlush = 0;
+                                }
+                            }
+                            writer.WriteEndArray();
+                            writer.WriteEndObject();
+                            await writer.FlushAsync(ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            await pipe.Writer.CompleteAsync(ex);
+                        }
+                    });
+                    await Task.WhenAll(
+                        _minio.PutStreamAsync(pipe.Reader.AsStream(), key, "application/json", ct),
+                        serializeTask);
+                    reportUrl = await _minio.GetPresignedUrlAsync(
+                        key, _minioPublicUrl, expiresMinutes: 60,
+                        downloadFilename: $"anomaly_{table}.json",
+                        contentType: "application/json",
+                        ct: ct);
+                }
+                catch (Exception ex)
+                {
+                    // Non-fatal: caller still gets the summary + sample.
+                    _log.LogWarning(ex, "anomaly report upload failed for {Table}", table);
+                }
+            }
+
+            return new
+            {
+                table,
+                total,
+                critical,
+                warning,
+                by_type    = byType,
+                page       = page ?? 0,
+                page_size  = pageSize,
+                has_more   = hasMore,
+                sample,
+                rows       = rowsSlice,
+                report_url = reportUrl,
+            };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Anomaly detection failed for {Table}", table);
+            return new { error = ex.Message };
+        }
+    }
+
+    /// <summary>Project an <see cref="DatasetRepository.AnomalyRow"/> to the JSON shape the UI expects.</summary>
+    private static object MapAnomaly(DatasetRepository.AnomalyRow r) => new
+    {
+        ts_ms        = r.TsMs,
+        anomaly_type = r.AnomalyType,
+        severity     = r.Severity,
+        column       = r.Column,
+        value        = r.Value,
+        details      = r.Details,
+    };
+
+    /// <summary>
+    /// Compute counts for each requested clean operation. Read-only.
+    /// </summary>
+    private async Task<object> HandleCleanPreviewAsync(JsonElement p, CancellationToken ct)
+    {
+        var table  = TryGetString(p, "table");
+        if (string.IsNullOrWhiteSpace(table))
+            return new { error = "missing required field: table" };
+        var stepMs = TryGetInt64(p, "step_ms") ?? 0;
+
+        long deleteByTimestampsCount = 0;
+        if (p.TryGetProperty("delete_timestamps", out var dtsEl)
+            && dtsEl.ValueKind == JsonValueKind.Array)
+        {
+            deleteByTimestampsCount = dtsEl.GetArrayLength();
+        }
+
+        try
+        {
+            var dupTask    = _repo.CountDuplicatesAsync(table, ct);
+            var ohlcTask   = _repo.CountOhlcViolationsAsync(table, ct);
+            var streakTask = _repo.CountZeroStreakRowsAsync(table, 3, ct);
+            var gapsTask   = stepMs > 0
+                ? _repo.CountGapsAsync(table, stepMs, ct)
+                : Task.FromResult(0L);
+
+            await Task.WhenAll(dupTask, ohlcTask, streakTask, gapsTask);
+
+            return new
+            {
+                table,
+                counts = new
+                {
+                    drop_duplicates       = dupTask.Result,
+                    fix_ohlc              = ohlcTask.Result,
+                    fill_zero_streaks     = streakTask.Result,
+                    delete_by_timestamps  = deleteByTimestampsCount,
+                    fill_gaps             = gapsTask.Result,
+                },
+            };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Clean preview failed for {Table}", table);
+            return new { error = ex.Message };
+        }
+    }
+
+    /// <summary>
+    /// Apply selected clean operations under an advisory lock keyed by table
+    /// name, in the documented order. Requires <c>confirm: true</c>.
+    /// </summary>
+    private async Task<object> HandleCleanApplyAsync(JsonElement p, CancellationToken ct)
+    {
+        var table = TryGetString(p, "table");
+        if (string.IsNullOrWhiteSpace(table))
+            return new { error = "missing required field: table" };
+
+        var confirm = p.TryGetProperty("confirm", out var cEl)
+                      && cEl.ValueKind == JsonValueKind.True;
+        if (!confirm)
+            return new { error = "operation requires confirm=true" };
+
+        bool getBool(string n) => p.TryGetProperty(n, out var e)
+                                   && e.ValueKind == JsonValueKind.True;
+
+        var doDup    = getBool("drop_duplicates");
+        var doOhlc   = getBool("fix_ohlc");
+        var doStreak = getBool("fill_zero_streaks");
+        var doDelete = getBool("delete_by_timestamps");
+        var doGaps   = getBool("fill_gaps");
+
+        var deleteTs = new List<long>();
+        if (doDelete && p.TryGetProperty("delete_timestamps", out var dtsEl)
+            && dtsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var t in dtsEl.EnumerateArray())
+                if (t.ValueKind == JsonValueKind.Number && t.TryGetInt64(out var v))
+                    deleteTs.Add(v);
+        }
+
+        var stepMs = TryGetInt64(p, "step_ms") ?? 0;
+        var method = TryGetString(p, "interpolation_method") ?? "forward_fill";
+        // "first" (default) | "last" | "none" — passed straight through to
+        // ApplyDropDuplicatesAsync.
+        var dedupStrategy = TryGetString(p, "dedup_strategy") ?? "first";
+
+        // fill_gaps now also supports "drop" (delete the bordering rows around
+        // each gap to remove the gap entirely instead of inserting synthetic
+        // rows). When "drop", we delegate to a different code path.
+        var fillGapsMethod = method; // alias for readability
+
+        // fill_zero_streaks columns selector. Empty / "all" → both legacy
+        // columns; otherwise we honour the comma-separated whitelist.
+        var streakColsSel = TryGetString(p, "fill_zero_streaks_columns") ?? "all";
+        var streakCols = streakColsSel == "all" || string.IsNullOrWhiteSpace(streakColsSel)
+            ? new[] { "open_interest", "funding_rate" }
+            : streakColsSel.Split(',', StringSplitOptions.RemoveEmptyEntries
+                                    | StringSplitOptions.TrimEntries)
+                .Where(c => c == "volume" || c == "open_interest"
+                         || c == "funding_rate" || c == "turnover")
+                .ToArray();
+
+        await _repo.EnsureAuditLogAsync(ct);
+
+        // Acquire advisory lock first to serialise concurrent applies.
+        var conn = await _repo.AcquireApplyLockAsync(table, ct);
+        var totals = new Dictionary<string, long>();
+        try
+        {
+            // Order matters: dedupe → in-place fixes → deletes → gap fills.
+            // This ensures fill_gaps sees a clean grid.
+            if (doDup)
+                totals["drop_duplicates"] = await _repo.ApplyDropDuplicatesAsync(
+                    table, conn, dedupStrategy, ct);
+
+            if (doOhlc)
+                totals["fix_ohlc"] = await _repo.ApplyFixOhlcAsync(table, conn, ct);
+
+            if (doStreak)
+            {
+                long sum = 0;
+                foreach (var col in streakCols)
+                {
+                    try { sum += await _repo.ApplyFillZeroStreakAsync(table, col, conn, ct); }
+                    catch (PostgresException) { /* column absent on this table */ }
+                }
+                totals["fill_zero_streaks"] = sum;
+            }
+
+            if (doDelete && deleteTs.Count > 0)
+                totals["delete_by_timestamps"] =
+                    await _repo.ApplyDeleteByTimestampsAsync(table, deleteTs, conn, ct);
+
+            if (doGaps && stepMs > 0)
+            {
+                // "drop_rows" is the third UI option — semantically "do not
+                // synthesise; keep gaps as-is". We treat it as a no-op so the
+                // checkbox can still be ticked without polluting the table.
+                if (string.Equals(fillGapsMethod, "drop_rows", StringComparison.OrdinalIgnoreCase))
+                {
+                    totals["fill_gaps"] = 0;
+                }
+                else
+                {
+                    totals["fill_gaps"] =
+                        await _repo.ApplyFillGapsAsync(table, stepMs, fillGapsMethod, conn, ct);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Clean apply failed for {Table}", table);
+            await _repo.ReleaseApplyLockAsync(conn, table, ct);
+            return new { error = ex.Message };
+        }
+
+        var totalRows = totals.Values.Sum();
+        // WriteAuditLogAsync opens its own connection (it does not reuse `conn`),
+        // so we wrap the audit + release pair in try/finally to guarantee the
+        // advisory lock is released even if the audit-log INSERT throws.
+        var paramsJson = JsonSerializer.Serialize(new
+        {
+            drop_duplicates           = doDup,
+            fix_ohlc                  = doOhlc,
+            fill_zero_streaks         = doStreak,
+            delete_by_timestamps      = doDelete ? deleteTs.Count : 0,
+            fill_gaps                 = doGaps,
+            step_ms                   = stepMs,
+            interpolation_method      = method,
+            dedup_strategy            = dedupStrategy,
+            fill_zero_streaks_columns = streakColsSel,
+        });
+        int auditId;
+        try
+        {
+            auditId = await _repo.WriteAuditLogAsync(table, "clean.apply", paramsJson, totalRows, ct);
+        }
+        finally
+        {
+            await _repo.ReleaseApplyLockAsync(conn, table, ct);
+        }
+
+        return new
+        {
+            table,
+            audit_id      = auditId,
+            rows_affected = totals,
+            total         = totalRows,
+        };
+    }
+
+    /// <summary>
+    /// Return the latest <c>limit</c> entries from the dataset_audit_log,
+    /// optionally filtered by <c>table_name</c>. Backs the History tab on
+    /// the Anomaly page.
+    /// </summary>
+    private async Task<object> HandleAuditLogAsync(JsonElement p, CancellationToken ct)
+    {
+        var table = TryGetString(p, "table");
+        var limit = (int)(TryGetInt64(p, "limit") ?? 50);
+        try
+        {
+            var entries = await _repo.GetAuditLogAsync(
+                string.IsNullOrWhiteSpace(table) ? null : table, limit, ct);
+            return new
+            {
+                entries = entries.Select(e => new
+                {
+                    id            = e.Id,
+                    table_name    = e.TableName,
+                    operation     = e.Operation,
+                    @params       = e.ParamsJson,
+                    rows_affected = e.RowsAffected,
+                    applied_at_ms = new DateTimeOffset(
+                        DateTime.SpecifyKind(e.AppliedAt, DateTimeKind.Utc))
+                        .ToUnixTimeMilliseconds(),
+                }).ToArray(),
+            };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "audit_log query failed");
+            return new { error = ex.Message, entries = Array.Empty<object>() };
+        }
+    }
+
+    // ── OHLCV upsert (Analitic-orchestrated repair) ───────────────────────
+
+    /// <summary>
+    /// Handle <c>cmd.data.dataset.upsert_ohlcv</c>: merges OHLCV rows into an
+    /// existing market table, preserving any non-OHLCV columns on conflict.
+    /// </summary>
+    /// <remarks>
+    /// Payload shape:
+    /// <code>
+    /// {
+    ///   "table":     string (required),
+    ///   "symbol":    string (required, used for fresh-row identity),
+    ///   "exchange":  string (default "bybit"),
+    ///   "timeframe": string (required),
+    ///   "rows": [
+    ///     { "ts_ms": long, "open": number, "high": number,
+    ///       "low": number, "close": number,
+    ///       "volume": number?, "turnover": number? },
+    ///     ...
+    ///   ]
+    /// }
+    /// </code>
+    /// Phase-4 candle-source-of-truth contract: every row must carry a full
+    /// O/H/L/C tuple sourced from the same kline. Rows that omit any of the
+    /// four prices, or whose prices violate the OHLC invariant
+    /// (<c>low ≤ min(open, close) ≤ max(open, close) ≤ high</c>), are
+    /// rejected — a single hybrid row would otherwise corrupt the
+    /// "every persisted candle is a single tuple" guarantee.
+    ///
+    /// Reply: <c>{ rows_affected: long, rows_rejected: long,
+    /// rejection_reasons: string[] }</c> on success, <c>{ error }</c>
+    /// otherwise.
+    /// </remarks>
+    private async Task<object> HandleUpsertOhlcvAsync(JsonElement p, CancellationToken ct)
+    {
+        var table     = TryGetString(p, "table");
+        var symbol    = TryGetString(p, "symbol");
+        var exchange  = TryGetString(p, "exchange") ?? "bybit";
+        var timeframe = TryGetString(p, "timeframe");
+        if (string.IsNullOrWhiteSpace(table)
+            || string.IsNullOrWhiteSpace(symbol)
+            || string.IsNullOrWhiteSpace(timeframe))
+        {
+            return new { error = "missing fields: table, symbol, timeframe" };
+        }
+        if (!p.TryGetProperty("rows", out var rowsEl) || rowsEl.ValueKind != JsonValueKind.Array)
+        {
+            return new { error = "missing field: rows (array)" };
+        }
+
+        var parsed   = new List<DatasetRepository.OhlcvRow>(rowsEl.GetArrayLength());
+        var rejected = 0L;
+        var reasons  = new List<string>();
+        foreach (var item in rowsEl.EnumerateArray())
+        {
+            var ts = TryGetInt64(item, "ts_ms");
+            if (ts is null) { rejected++; continue; }
+
+            var o = TryGetDecimal(item, "open");
+            var h = TryGetDecimal(item, "high");
+            var l = TryGetDecimal(item, "low");
+            var c = TryGetDecimal(item, "close");
+            if (o is null || h is null || l is null || c is null)
+            {
+                rejected++;
+                if (reasons.Count < 5)
+                    reasons.Add($"ts={ts.Value}: missing OHLC field (open/high/low/close all required under candle-source-of-truth)");
+                continue;
+            }
+
+            // OHLC invariant check — if violated, the four prices came from
+            // different sources (or one is corrupt) and cannot form a valid
+            // candle.
+            var lo = Math.Min(o.Value, c.Value);
+            var hi = Math.Max(o.Value, c.Value);
+            if (l.Value > lo || h.Value < hi)
+            {
+                rejected++;
+                if (reasons.Count < 5)
+                    reasons.Add($"ts={ts.Value}: OHLC violation (low={l} open={o} close={c} high={h})");
+                continue;
+            }
+
+            parsed.Add(new DatasetRepository.OhlcvRow(
+                ts.Value, o, h, l, c,
+                TryGetDecimal(item, "volume"),
+                TryGetDecimal(item, "turnover")));
+        }
+        if (parsed.Count == 0)
+            return new { rows_affected = 0L, rows_rejected = rejected, rejection_reasons = reasons };
+
+        try
+        {
+            await _repo.CreateTableIfNotExistsAsync(table, ct);
+            var affected = await _repo.BulkUpdateOhlcvAsync(
+                table, symbol, exchange, timeframe, parsed, ct);
+            return new
+            {
+                rows_affected     = affected,
+                rows_rejected     = rejected,
+                rejection_reasons = reasons,
+            };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "upsert_ohlcv failed for {Table}", table);
+            return new { error = ex.Message };
+        }
+    }
 }
+

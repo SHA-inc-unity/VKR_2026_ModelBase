@@ -25,14 +25,18 @@ public sealed class RefreshTokenRepository : IRefreshTokenRepository
         token?.Revoke();
     }
 
-    public async Task RevokeAllUserTokensAsync(Guid userId, CancellationToken ct = default)
+    /// <summary>
+    /// Set-based revoke: a single UPDATE statement, no entities materialised.
+    /// Replaces the previous "load all + loop + Revoke()" path which round-tripped
+    /// every active row of the user across the wire and held them in EF's
+    /// change-tracker until SaveChangesAsync.
+    /// </summary>
+    public Task RevokeAllUserTokensAsync(Guid userId, CancellationToken ct = default)
     {
-        var tokens = await _db.RefreshTokens
+        var nowUtc = DateTimeOffset.UtcNow;
+        return _db.RefreshTokens
             .Where(t => t.UserId == userId && t.RevokedAt == null)
-            .ToListAsync(ct);
-
-        foreach (var t in tokens)
-            t.Revoke();
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.RevokedAt, nowUtc), ct);
     }
 
     public Task SaveChangesAsync(CancellationToken ct = default) =>

@@ -21,15 +21,8 @@ services:
       ACCOUNT_URL: ${ACCOUNT_URL:-account_service_api:5000}
       GATEWAY_URL: ${GATEWAY_URL:-exchange-gateway:5020}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      # MinIO access used only by the ZIP-export branch in /api/export/csv:
-      # DataService bundles all timeframes into one ZIP, parks it in MinIO,
-      # and hands back a claim-check; Admin fetches via S3 GetObject and
-      # re-streams to the browser with Content-Disposition attachment.
-      # (Single-table exports still use a 302 redirect to a presigned URL
-      # and don't need these vars.)
+      # MinIO URL used by /api/health liveness probe.
       MINIO_URL: ${MINIO_URL:-minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-modelline}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-modelline_secret}
       NODE_ENV: production
     ports:
       - "${ADMIN_PORT:-8501}:3000"

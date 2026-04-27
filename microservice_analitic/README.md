@@ -13,6 +13,92 @@
   вызывает `backend.model.report.load_registry(models_dir=MODELS_DIR, limit=1000)`
   и возвращает `{"models": [...]}` для `microservice_admin` (дашборд читает
   `response.models.length`).
+- `cmd.analitic.dataset.load` — загрузка датасета в постоянную сессию
+  (`backend/anomaly/session.py`). Один round-trip к DataService через
+  `cmd.data.dataset.export_full` (`{symbol, timeframe, max_rows}`) — DataService
+  сам резолвит таблицу, проверяет coverage, валидирует лимит строк и стримит CSV
+  в MinIO. В ответе `{table_name, row_count, presigned_url}` (или прокинутая
+  ошибка `table_not_found` / `empty_table` / `row_count_exceeds_limit`).
+  Сервис стримит presigned URL по HTTP/2 (`httpx.AsyncClient(http2=True)`)
+  во временный CSV (1 MB-чанками), магически детектит ZIP по сигнатуре
+  `PK\x03\x04` и распаковывает, затем CSV → Parquet идёт через
+  `pyarrow.csv.open_csv` (block_size 8 MiB) с per-RecordBatch downcast'ом
+  `float64 → float32` на Arrow-уровне (без промежуточных pandas-фреймов) и
+  `pyarrow.ParquetWriter(snappy)` append per batch на диск.
+  Лимит: `MAX_SESSION_ROWS=5_000_000`. Хранилище: env `MODELLINE_SESSION_DIR`
+  (default `/tmp/modelline_sessions`).
+- `cmd.analitic.dataset.unload` — очистка сессии (`unlink` Parquet + `gc.collect`).
+- `cmd.analitic.dataset.status` — состояние сессии (для admin badge).
+- `cmd.analitic.anomaly.dbscan` — multivariate DBSCAN на загруженной сессии
+  (`StandardScaler` + `sklearn.cluster.DBSCAN`). Систематический сэмпл до
+  `max_sample_rows`, читает только нужные колонки через
+  `pd.read_parquet(columns=…)`. Параметры: `eps=0.5`, `min_samples=5`,
+  `max_sample_rows=50_000`, `columns=[close_price, volume, turnover, open_interest]`.
+  Ответ: `{ summary: {…}, anomaly_timestamps_ms: [...] }`.
+- `cmd.analitic.anomaly.isolation_forest` — Isolation Forest на загруженной
+  сессии (`backend/anomaly/isolation_forest.py`). Tree-based detector
+  (`sklearn.ensemble.IsolationForest`, `n_jobs=-1`, `random_state=42`).
+  Параметры: `contamination=0.01` (`[1e-4, 0.5]`), `n_estimators=100` (`[20, 500]`),
+  `max_sample_rows=50_000`, `columns=[close_price, volume, turnover, open_interest]`.
+  Систематический сэмплинг для preserving temporal order (одинаковая стратегия
+  что и в DBSCAN, чтобы UI мог сравнивать результаты двух методов). Ответ:
+  `{ summary: { n_anomalies, contamination, n_estimators, … }, anomaly_timestamps_ms: [...] }`.
+- `cmd.analitic.dataset.distribution` — диагностика распределения log-доходностей
+  (`backend/anomaly/distribution.py`). Считает skewness, excess kurtosis (Fisher),
+  Jarque-Bera statistic + p-value через `scipy.stats`. **Чтение данных
+  чанк-выборкой нарушало бы математику log-returns** (на стыках выпадал бы
+  diff между несоседними строками), поэтому `read_parquet_contiguous` тянет
+  целые row-group'ы из хвоста файла — выдаёт ≥ `target_rows` строк, всегда
+  смежных по `timestamp_utc`, без `shuffle`/`tail`/`stride`. Возвращает гистограмму
+  log-returns ±5σ + точки нормальной кривой N(μ,σ), отскейленные под expected
+  counts, а также `verdict` — текстовый вывод ("Heavy tails detected" /
+  "Distribution appears compatible with normal" / `Sample too small`). Используется
+  Anomaly → Distribution tab. JB надёжен при n ≥ 2000, иначе verdict
+  предупреждает о ненадёжности.
+- `cmd.analitic.dataset.quality_check` — аудит заполненности колонок
+  (`backend/dataset/quality.py`). Запрашивает `cmd.data.dataset.column_stats`
+  с `columns=[16 колонок QUALITY_GROUPS]` и `count_only=True` (только COUNT —
+  без MIN/MAX/AVG/STDDEV, многократно быстрее на больших таблицах),
+  агрегирует по трём группам:
+  **OHLCV-сырые** (`open_price`, `high_price`, `low_price`, `volume`, `turnover`),
+  **Производные от OHLCV** (`atr_6`, `atr_24`, `candle_body`, `upper_wick`,
+  `lower_wick`, `volume_roll6_mean`, `volume_roll24_mean`, `volume_to_roll6_mean`,
+  `volume_to_roll24_mean`, `volume_return_1`),
+  **Производные от RSI** (`rsi_slope`).
+  Для каждой группы возвращает `fill_pct = sum(non_null) * 100 / (total_rows * n_cols)`
+  и статус: `≥99 → full`, `≥1 → partial`, `<1 → missing`. Каждая группа знает свой
+  `repair_action` (`load_ohlcv` или `recompute_features`), который admin использует
+  для соответствующей кнопки. Ответ:
+  `{ table, total_rows, groups: [{ id, label, columns, fill_pct, status, repair_action }] }`.
+- `cmd.analitic.dataset.load_ohlcv` — догрузка OHLCV-свечей через Bybit
+  `/v5/market/kline` (`backend/dataset/repair.py`) **без перезаписи** остальных
+  колонок таблицы. Pipeline: `prepare` (вызов `cmd.data.dataset.make_table`) →
+  `fetch` (параллельный fan-out по `MAX_PARALLEL_API_WORKERS` окнам
+  `PAGE_LIMIT_KLINE=1000`) → `upsert` (`cmd.data.dataset.upsert_ohlcv`,
+  **батчами по `_UPSERT_BATCH_SIZE=4 500` строк** — каждое Kafka-сообщение
+  ≈ 675 КБ × 150 б/строка < 1 МБ aiokafka-лимита).
+  Таймаут на батч: `max(300, batch_size / 5000)` с (минимум **5 мин**,
+  +1 с на каждые 5 000 строк батча). При ошибке любого батча операция
+  немедленно прерывается. Прогресс стадии upsert отражает накопленный
+  процент по всем батчам.
+  Прогресс по стадиям публикуется в `events.analitic.dataset.repair.progress`.
+  Payload: `{ symbol, timeframe, start_ms, end_ms, exchange="bybit"? }`.
+  Ответ: `{ table, rows_affected, elapsed_sec }` или `{ error }`.
+- `cmd.analitic.dataset.recompute_features` — пересчёт OHLCV-производных
+  (`backend/dataset/repair.py`). Pipeline: `prepare` → `recompute`
+  (`cmd.data.dataset.compute_features`). Таймаут recompute-запроса
+  **адаптивный по таймфрейму**: `1m → 3600 с` (1 ч), `3m/5m → 1800 с` (30 мин),
+  остальные → `600 с` (10 мин). Вынесено в константы `_RECOMPUTE_TIMEOUT` и
+  `_RECOMPUTE_TIMEOUT_DEFAULT`.
+  Прогресс в `events.analitic.dataset.repair.progress`.
+  Payload: `{ symbol, timeframe }`. Ответ: `{ table, rows_updated, elapsed_sec }`.
+
+### Kafka-события (`events.analitic.*`)
+
+- `events.analitic.dataset.repair.progress` — стадии repair pipeline
+  (`load_ohlcv` или `recompute_features`). Payload:
+  `{ correlation_id, stage: 'prepare'|'fetch'|'upsert'|'recompute',
+     label, status: 'running'|'done'|'error', progress: 0..100, detail? }`.
 
 `data_client.get_coverage(table)` возвращает `{rows, min_ts_ms, max_ts_ms}` либо
 `None` — парсит ответ `cmd.data.dataset.coverage` на верхнем уровне

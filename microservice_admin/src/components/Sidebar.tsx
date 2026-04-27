@@ -17,13 +17,14 @@ import { cn } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
 import { kafkaCall } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
+import { useLocale } from '@/lib/i18nContext';
 
-const NAV = [
-  { href: '/',         label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/download', label: 'Dataset',   icon: Database },
-  { href: '/train',    label: 'Train',     icon: BrainCircuit },
-  { href: '/compare',  label: 'Compare',   icon: GitCompare },
-  { href: '/anomaly',  label: 'Anomaly',   icon: ShieldAlert },
+const NAV_KEYS = [
+  { href: '/',         key: 'nav.dashboard' as const, icon: LayoutDashboard },
+  { href: '/download', key: 'nav.dataset'   as const, icon: Database },
+  { href: '/train',    key: 'nav.train'     as const, icon: BrainCircuit },
+  { href: '/compare',  key: 'nav.compare'   as const, icon: GitCompare },
+  { href: '/anomaly',  key: 'nav.anomaly'   as const, icon: ShieldAlert },
 ] as const;
 
 type Mode = 'expanded-collapsible' | 'icon-only' | 'bottom-nav';
@@ -38,6 +39,7 @@ function detectMode(): Mode {
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { locale, setLocale, t } = useLocale();
   const [kafkaOk,   setKafkaOk]   = useState<boolean | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [mode, setMode] = useState<Mode>('expanded-collapsible');
@@ -83,7 +85,8 @@ export function Sidebar() {
     return (
       <aside className="order-last flex flex-row w-full h-14 bg-card border-t border-border flex-shrink-0">
         <nav className="flex flex-row items-stretch justify-around w-full">
-          {NAV.map(({ href, label, icon: Icon }) => {
+          {NAV_KEYS.map(({ href, key, icon: Icon }) => {
+            const label = t(key);
             const active = pathname === href;
             return (
               <Link
@@ -155,7 +158,8 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex flex-col gap-0.5 p-2 pt-3 flex-1">
-        {NAV.map(({ href, label, icon: Icon }) => {
+        {NAV_KEYS.map(({ href, key, icon: Icon }) => {
+          const label = t(key);
           const active = pathname === href;
           return (
             <Link
@@ -182,22 +186,52 @@ export function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className={cn('p-3', effectiveCollapsed ? 'flex justify-center' : '')}>
+      <div className={cn('p-3', effectiveCollapsed ? 'flex flex-col items-center gap-2' : '')}>
         {!effectiveCollapsed && <Separator className="mb-3" />}
         {effectiveCollapsed ? (
-          <div
-            className={cn(
-              'w-2 h-2 rounded-full',
-              kafkaOk === true  ? 'bg-success'    :
-              kafkaOk === false ? 'bg-destructive' : 'bg-muted-foreground',
-            )}
-            title={
-              kafkaOk === true  ? 'Kafka connected' :
-              kafkaOk === false ? 'Kafka error'     : 'Checking...'
-            }
-          />
+          <>
+            {/* Collapsed: language toggle as two-char button */}
+            <button
+              onClick={() => setLocale(locale === 'en' ? 'ru' : 'en')}
+              className="text-[10px] font-bold text-muted-foreground hover:text-foreground transition-colors leading-none"
+              title={locale === 'en' ? 'Switch to Russian' : 'Switch to English'}
+            >
+              {locale === 'en' ? 'RU' : 'EN'}
+            </button>
+            <div
+              className={cn(
+                'w-2 h-2 rounded-full',
+                kafkaOk === true  ? 'bg-success'    :
+                kafkaOk === false ? 'bg-destructive' : 'bg-muted-foreground',
+              )}
+              title={
+                kafkaOk === true  ? 'Kafka connected' :
+                kafkaOk === false ? 'Kafka error'     : 'Checking...'
+              }
+            />
+          </>
         ) : (
           <>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              {/* Language toggle */}
+              <div className="flex gap-0.5 p-0.5 rounded bg-muted">
+                {(['en', 'ru'] as const).map(l => (
+                  <button
+                    key={l}
+                    onClick={() => setLocale(l)}
+                    className={cn(
+                      'px-2 py-0.5 text-xs font-semibold rounded transition-colors',
+                      locale === l
+                        ? 'bg-card text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    {l.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground opacity-50">v1.0.0</p>
+            </div>
             <div className="flex items-center gap-2">
               <div className={cn(
                 'w-1.5 h-1.5 rounded-full flex-shrink-0',
@@ -208,7 +242,6 @@ export function Sidebar() {
                 {kafkaOk === true ? 'Kafka connected' : kafkaOk === false ? 'Kafka error' : 'Checking...'}
               </span>
             </div>
-            <p className="text-xs text-muted-foreground mt-2 opacity-50">v1.0.0</p>
           </>
         )}
       </div>

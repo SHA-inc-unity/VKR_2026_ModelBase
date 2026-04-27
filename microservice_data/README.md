@@ -12,12 +12,13 @@
 |----------------------------------------|-----------|-----------|------------------------------------------------------|
 | `cmd.data.health`                      | in        | req/reply | Liveness + version                                   |
 | `cmd.data.db.ping`                     | in        | req/reply | PostgreSQL connectivity check                        |
-| `cmd.data.dataset.list_tables`         | in        | req/reply | List dataset tables                                  |
+| `cmd.data.dataset.list_tables`         | in        | req/reply | List dataset tables. **Enriched response**: `{ tables: [{ table_name, rows, coverage_pct, date_from, date_to }] }` — emitted in a single round-trip so admin clients no longer fan out per-table coverage calls. |
 | `cmd.data.dataset.coverage`            | in        | req/reply | `{exists, rows, min_ts_ms, max_ts_ms}`               |
 | `cmd.data.dataset.timestamps`          | in        | req/reply | All timestamps (ms) in `[start_ms, end_ms]`          |
 | `cmd.data.dataset.find_missing`        | in        | req/reply | Missing timestamps (ms) for a stepped grid           |
 | `cmd.data.dataset.rows`                | in        | req/reply | Row slice (projects `timestamp_ms`)                  |
-| `cmd.data.dataset.export`              | in        | req/reply | CSV export: streaming per-table (→ presigned URL) or bundled multi-table ZIP (→ claim-check) |
+| `cmd.data.dataset.export`              | in        | req/reply | CSV export: streaming per-table (→ presigned URL) or bundled multi-table ZIP (→ presigned URL) |
+| `cmd.data.dataset.export_full`         | in        | req/reply | **Composite "load this dataset" command** for downstream services. Payload `{symbol, timeframe, max_rows?}` → server resolves the table name, validates existence + row-count cap, and streams the full table to MinIO in one round-trip. Response `{table_name, row_count, presigned_url}` or `{error: "table_not_found" \| "empty_table" \| "row_count_exceeds_limit", …}`. Replaces the make_table → coverage → export sequence used by microservice_analitic. |
 | `cmd.data.dataset.table_schema`        | in        | req/reply | Column names + types                                 |
 | `cmd.data.dataset.normalize_timeframe` | in        | req/reply | Resolve timeframe alias                              |
 | `cmd.data.dataset.make_table_name`     | in        | req/reply | Build canonical `{symbol}_{timeframe}`               |
@@ -25,10 +26,14 @@
 | `cmd.data.dataset.constants`           | in        | req/reply | Supported timeframes + page limits                   |
 | `cmd.data.dataset.ingest`              | in        | req/reply | **Fetch Bybit → RSI → upsert** in the given window   |
 | `cmd.data.dataset.delete_rows`         | in        | req/reply | Delete rows by range or TRUNCATE whole table         |
-| `cmd.data.dataset.column_stats`        | in        | req/reply | df.info()-style per-column stats (non-null/min/max/mean/std) — values cast to `float8` to avoid Decimal overflow |
+| `cmd.data.dataset.column_stats`        | in        | req/reply | df.info()-style per-column stats (non-null/min/max/mean/std) — значения приводятся в `float8`. Опциональные поля: `columns` (string[]) — запросить только эти колонки; `count_only` (bool) — пропустить MIN/MAX/AVG/STDDEV (только COUNT — многократно быстрее на больших таблицах) |
 | `cmd.data.dataset.column_histogram`    | in        | req/reply | Distribution histogram for a single numeric column   |
-| `cmd.data.dataset.browse`             | in        | req/reply | Paginated raw-row browse (`page`, `page_size` 1–500, `order` asc/desc). Returns `{ table, page, page_size, total_rows, rows[] }` |
-| `cmd.data.dataset.compute_features`    | in        | req/reply | Idempotent SQL pass: `ALTER TABLE … ADD COLUMN IF NOT EXISTS` + `UPDATE` via window functions over raw OHLC/OI/RSI → 27 feature columns. Payload `{ table }` → `{ status, table, rows_updated }` |
+| `cmd.data.dataset.browse`             | in        | req/reply | Paginated raw-row browse (`page`, `page_size` 1–500, `order` asc/desc). Returns `{ table, page, page_size, total_rows, total_rows_estimate, total_rows_known, rows[] }`. **`total_rows` is the source of truth** — callers must pin it on the first page; `total_rows_estimate` is informational only and must not drive pagination math (no jumping page-counts when the planner estimate drifts). |
+| `cmd.data.dataset.detect_anomalies`   | in        | req/reply | Detect 10 anomaly classes in parallel. **Summary-first response.** Always returns `{ table, total, critical, warning, by_type, sample[≤200], page, page_size, has_more, rows?, report_url? }`. `sample` is a critical-first slice. To page over the full chronological list pass `{ page, page_size }` (`page_size` clamped to 1–5000) → `rows` carries the slice. When `total > 200` the full report is uploaded to MinIO and a 60-min presigned URL is returned in `report_url` — the report is **streamed** straight to MinIO via `Utf8JsonWriter` over a `System.IO.Pipelines` writer (no `JsonSerializer.Serialize(rows.ToArray())` materialisation), so peak RAM stays at one pipe buffer + one S3 part regardless of how many anomalies were detected. UI is expected to keep summary + sample inline and offer the full report as a download. |
+| `cmd.data.dataset.clean.preview`      | in        | req/reply | Counts only (no mutation). Returns `{ table, counts: { drop_duplicates, fix_ohlc, fill_zero_streaks, delete_by_timestamps, fill_gaps } }` |
+| `cmd.data.dataset.clean.apply`        | in        | req/reply | Mutates DB. Requires `confirm: true`. Holds `pg_advisory_lock` keyed by table name. Writes `dataset_audit_log(id, table_name, operation, params JSONB, rows_affected, applied_at)`. Returns `{ table, audit_id, rows_affected, total }` |
+| `cmd.data.dataset.upsert_ohlcv`        | in        | req/reply | Insert/update the six OHLCV-raw columns (open/high/low/close/volume/turnover) keyed by `timestamp_utc`. All other columns (funding_rate, open_interest, rsi, derived features) are preserved on conflict. Phase-4 candle-source-of-truth: every row must carry a complete O/H/L/C tuple sourced from the same kline; rows with partial OHLC or with prices that violate `low ≤ min(open, close) ≤ max(open, close) ≤ high` are rejected. Payload: `{ table, symbol, exchange, timeframe, rows:[{ts_ms, open, high, low, close, volume, turnover}] }`. Returns `{ rows_affected, rows_rejected, rejection_reasons }`. |
+| `cmd.data.dataset.compute_features`    | in        | req/reply | Idempotent SQL pass: `ALTER TABLE … ADD COLUMN IF NOT EXISTS` + `UPDATE` via window functions over raw OHLC/OI/RSI → 27 feature columns. Payload `{ table }` → `{ status, table, rows_updated }`. Ботх SQL commands run with `commandTimeout: 0` (no Npgsql timeout) — the windowed UPDATE over 1m tables (>2.5 M rows) routinely exceeds the default 30 s limit. |
 | `events.data.ingest.progress`          | out       | event     | Staged ingest progress (fire-and-forget, no reply)   |
 
 ### Ingest pipeline (`cmd.data.dataset.ingest`)
@@ -39,8 +44,8 @@ Payload: `{ symbol, timeframe, start_ms, end_ms }`. The handler:
    `{symbol}_{timeframe}` in `crypt_date`.
 2. Creates the target table if missing — schema:
    `timestamp_utc TIMESTAMPTZ PRIMARY KEY, symbol VARCHAR, exchange VARCHAR,
-    timeframe VARCHAR, index_price NUMERIC, open_price NUMERIC, high_price NUMERIC,
-    low_price NUMERIC, volume NUMERIC, turnover NUMERIC,
+    timeframe VARCHAR, open_price NUMERIC, high_price NUMERIC,
+    low_price NUMERIC, close_price NUMERIC, volume NUMERIC, turnover NUMERIC,
     funding_rate NUMERIC, open_interest NUMERIC, rsi NUMERIC`.
 3. Computes the set of **missing timestamps** via
    `generate_series(start, end, step) EXCEPT existing`. If the set is empty,
@@ -92,20 +97,18 @@ Two payload shapes, dispatched on the presence of `tables`:
 **Single table** — `{ table, start_ms, end_ms }` → `{ presigned_url }`
 (full streaming, no intermediate buffers).
 
-**Multi-table ZIP** — `{ tables: string[], start_ms, end_ms }` →
-`{ claim_check: { key, bucket, size, url } }`. The handler opens a
-`ZipArchive(MemoryStream, ZipArchiveMode.Create, leaveOpen:true)`, and
-for each requested table creates a `CompressionLevel.Optimal` entry
-`{table}.csv`; `entry.Open()` exposes a writable stream into which
-`DatasetRepository.ExportCsvToStreamAsync` streams CSV directly from
-PostgreSQL (`COPY TO STDOUT`). Individual CSVs are never materialised
-as `byte[]` — only the final compressed ZIP is buffered (compression
-ratio makes this cheap vs. raw text). The ZIP is uploaded to MinIO
-under `exports/{guid}.zip` via `MinioClaimCheckService.PutBytesAsync`
-and a claim-check descriptor is returned. This mode exists because
-Chromium-based browsers suppress programmatic multi-file download
-loops after the first few `<a>.click()` calls — delivering one archive
-sidesteps the limit entirely.
+**Multi-table ZIP** — `{ tables: string[], symbol: string, start_ms, end_ms }` →
+`{ presigned_url }`. The handler uses the same `System.IO.Pipelines.Pipe`
+pattern as single-table mode: a producer task wraps `pipe.Writer.AsStream()`
+in a `ZipArchive(leaveOpen:true)` and iterates tables **sequentially**,
+writing each entry directly from `DatasetRepository.ExportCsvToStreamAsync`
+(no CSV buffers). After `archive.Dispose()` flushes the central directory the
+producer flushes the stream and completes the pipe writer. The consumer task
+calls `MinioClaimCheckService.PutStreamAsync(pipe.Reader.AsStream(), ...)` for
+a streaming multipart upload. Both tasks run concurrently via `Task.WhenAll`.
+After success `GetPresignedUrlAsync` is called with `downloadFilename=
+"{symbol}_ALL.zip"` and the URL is returned. Peak RAM: ~64 KB pipe buffer +
+one 5 MB multipart part, independent of dataset size.
 
 ### Streaming CSV export (single table)
 
@@ -149,6 +152,28 @@ the object itself can be life-cycled by a bucket policy if desired).
 Peak RAM: pipe buffer (~64 KB) + one multipart part (~5 MB) — instead
 of the prior ≈10 GB blow-up for a 1m/5y window.
 
+### Composite full-table export (`cmd.data.dataset.export_full`)
+
+Designed for downstream services (microservice_analitic in particular)
+that previously had to issue three sequential commands (`make_table_name`
+→ `coverage` → `export`) before they could start streaming a dataset.
+The composite handler does all three steps in-process:
+
+1. Resolve `{symbol, timeframe}` → table name via `DatasetCore.MakeTableName`.
+2. `GetCoverageIfExistsAsync` to check existence and pick up `min_ts_ms`
+   / `max_ts_ms` (re-used as the export window).
+3. Enforce the optional `max_rows` cap; on overflow reply with
+   `{error: "row_count_exceeds_limit", row_count, limit}` without
+   touching the export pipeline.
+4. Reuse the same Pipe-based streaming pipeline as the single-table
+   export — peak RAM stays at one pipe buffer + one S3 part regardless
+   of row count.
+
+Response on success: `{ table_name, row_count, presigned_url }`. The
+caller is the only thing that changes — the wire format for the
+underlying COPY/MinIO upload is identical to the existing
+`cmd.data.dataset.export` path.
+
 ### Delete rows (`cmd.data.dataset.delete_rows`)
 
 Payload: `{ table, start_ms?, end_ms? }`. Both timestamps are optional:
@@ -188,6 +213,32 @@ intermediate `running` updates (at most once every 10 completed pages +
 a final event), driven by the `onPageDone` callback on
 `BybitApiClient.FetchKlinesAsync`. `compute_rsi` emits one
 `running` update per finished segment.
+
+### Performance & concurrency
+
+The Kafka consume loop bounds concurrency at two tiers so that heavy SQL
+operations cannot starve light ones that share the same PostgreSQL pool:
+
+| Tier | Limit | Topics |
+|------|-------|--------|
+| Outer (all handlers) | 32 in-flight | every `cmd.data.*` topic |
+| Inner (heavy ops)    | 4 in-flight  | `dataset.export`, `dataset.ingest`, `dataset.detect_anomalies`, `dataset.clean.preview`, `dataset.clean.apply`, `dataset.compute_features`, `dataset.import_csv`, `dataset.upsert_ohlcv`, `dataset.column_stats`, `dataset.column_histogram` |
+
+Light commands (`health`, `db.ping`, `list_tables`, `coverage`,
+`timestamps`, `find_missing`, `rows`, `browse`, `table_schema`,
+`audit_log`, `delete_rows`) acquire only the outer slot and never wait on
+heavy operations.
+
+Anomaly detection fans out into ~10 parallel SQL queries internally; the
+heavy-ops cap of 4 keeps the worst case at ~40 simultaneous connections —
+well under Npgsql's default pool size of 100 — so a burst of anomaly
+requests never blocks `coverage` / `health` queries.
+
+Anomaly responses are **summary-first**: the inline `sample` is capped at
+200 rows. Whenever the total exceeds the cap, the full report is parked in
+MinIO (`reports/anomaly_<guid>.json`) and a presigned URL is returned in
+`report_url`. Pagination over the full list is available through
+`{ page, page_size }`. The UI never receives an unbounded JSON array.
 
 ### Resilience
 
@@ -235,17 +286,17 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 | `symbol` | `VARCHAR` | Торговая пара, напр. `BTCUSDT` |
 | `exchange` | `VARCHAR` | Биржа-источник, напр. `bybit` |
 | `timeframe` | `VARCHAR` | Таймфрейм, напр. `5m` |
-| `index_price` | `NUMERIC` | Цена закрытия торговой свечи (`/v5/market/kline`, `item[4]`) |
 | `open_price` | `NUMERIC` | Цена открытия свечи (`item[1]`) |
 | `high_price` | `NUMERIC` | Максимум свечи (`item[2]`) |
 | `low_price` | `NUMERIC` | Минимум свечи (`item[3]`) |
+| `close_price` | `NUMERIC` | Цена закрытия торговой свечи (`/v5/market/kline`, `item[4]`) |
 | `volume` | `NUMERIC` | Объём в базовой монете (`item[5]`) |
 | `turnover` | `NUMERIC` | Объём в котируемой монете — оборот (`item[6]`) |
 | `funding_rate` | `NUMERIC` | Ставка фандинга на момент свечи (`/v5/market/funding/history`) |
 | `open_interest` | `NUMERIC` | Открытый интерес в базовой монете (`/v5/market/open-interest`) |
 | `rsi` | `NUMERIC` | RSI-14, вычислен на стороне сервиса (алгоритм Уайлдера) |
 
-> **Примечание:** `index_price` хранит цену закрытия торговой свечи (`/v5/market/kline`). Полный OHLCV собирается с того же эндпоинта.
+> **Phase-4 candle-source-of-truth:** все четыре цены свечи (`open_price`, `high_price`, `low_price`, `close_price`) приходят из одного и того же `/v5/market/kline` ответа Bybit и записываются единым кортежем; гибридные строки (часть полей — от старой свечи, часть — от новой) запрещены и отбраковываются на стороне data-сервиса. Колонка `close_price` исторически называлась `index_price` — при первом обращении `CreateTableIfNotExistsAsync` идемпотентно переименовывает старую колонку.
 
 ### Feature-колонки (37 штук — вычисляются SQL window-функциями)
 
@@ -311,7 +362,7 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 
 | Данные | Статус | Эндпоинт | Примечание |
 |--------|--------|----------|------------|
-| `index_price` (close) | ✅ Собирается | `/v5/market/kline` item[4] | Торговая цена закрытия |
+| `close_price` (close) | ✅ Собирается | `/v5/market/kline` item[4] | Торговая цена закрытия (исторически `index_price`) |
 | `open`, `high`, `low` | ✅ Собирается | `/v5/market/kline` item[1-3] | Полный OHLCV |
 | `volume`, `turnover` | ✅ Собирается | `/v5/market/kline` item[5-6] | Объём торговли |
 | `funding_rate` | ✅ Собирается | `/v5/market/funding/history` | Forward-fill на таймфрейм |

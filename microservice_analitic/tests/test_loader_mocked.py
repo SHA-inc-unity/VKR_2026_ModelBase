@@ -51,7 +51,7 @@ def _make_df_rows(n: int = 300) -> tuple[list[tuple], list[str]]:
     """Creates fake rows and column names for a training dataset."""
     columns = [
         "timestamp_utc", "symbol", "exchange", "timeframe",
-        "index_price", "feat_a", "feat_b", "target_return_1",
+        "close_price", "feat_a", "feat_b", "target_return_1",
     ]
     ts_base = datetime(2024, 1, 1, tzinfo=timezone.utc)
     rows = []

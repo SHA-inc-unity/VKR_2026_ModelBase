@@ -12,41 +12,65 @@ public sealed class BybitApiClient
 {
     private readonly HttpClient _http;
     private readonly ILogger<BybitApiClient> _log;
+    private readonly BybitRateLimiter _rate;
 
     // key = "category:symbol", value = (launchTimeMs, fundingTimeMs)
     private readonly ConcurrentDictionary<string, (long LaunchMs, long FundingMs)>
         _instrumentCache = new();
 
-    public BybitApiClient(HttpClient http, ILogger<BybitApiClient> log)
+    public BybitApiClient(HttpClient http, ILogger<BybitApiClient> log, BybitRateLimiter rate)
     {
         _http = http;
         _log  = log;
+        _rate = rate;
     }
 
     /// <summary>
     /// GET the given URL with retry, returning the parsed JSON document.
     /// Caller must dispose the returned JsonDocument.
+    ///
+    /// Phase D: requests are rate-limited via <see cref="BybitRateLimiter"/>
+    /// (default 96 r/s); HTTP 429 / 5xx trigger exponential backoff with
+    /// jitter; non-zero <c>retCode</c> in the JSON body raises
+    /// <see cref="BybitApiException"/> without retrying.
     /// </summary>
     public async Task<JsonDocument> GetJsonAsync(string url, CancellationToken ct = default)
     {
         Exception? last = null;
         for (int attempt = 0; attempt < DatasetConstants.MaxRetries; attempt++)
         {
+            await _rate.AcquireAsync(ct);
             HttpResponseMessage? response = null;
             try
             {
                 response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
+                {
+                    response.EnsureSuccessStatusCode();
+                }
                 response.EnsureSuccessStatusCode();
                 var doc = await JsonDocument.ParseAsync(
                     await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                if (doc.RootElement.TryGetProperty("retCode", out var rc)
+                    && rc.ValueKind == JsonValueKind.Number
+                    && rc.GetInt32() != 0)
+                {
+                    var msg = doc.RootElement.TryGetProperty("retMsg", out var m) ? m.GetString() ?? "" : "";
+                    var code = rc.GetInt32();
+                    doc.Dispose();
+                    throw new BybitApiException(code, msg);
+                }
                 return doc;
             }
+            catch (BybitApiException) { throw; }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 last = ex;
                 _log.LogWarning(ex, "GET {Url} failed (attempt {A}/{Max})", url, attempt + 1, DatasetConstants.MaxRetries);
-                await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), ct);
+                var jitterMs = Random.Shared.Next(0, 250);
+                var backoff = TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 1000 + jitterMs);
+                await Task.Delay(backoff, ct);
             }
             finally
             {

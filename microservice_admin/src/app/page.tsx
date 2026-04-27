@@ -9,6 +9,7 @@ import { Topics } from '@/lib/topics';
 import type { ServiceHealth, TableCoverage, ModelInfo, InfraServiceHealth } from '@/lib/types';
 import { useEvents } from '@/hooks/useEvents';
 import { getCoveragePct } from '@/lib/constants';
+import { useLocale } from '@/lib/i18nContext';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -25,7 +26,7 @@ const CoverageBar = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-[220px] w-full" /> },
 );
 
-const HEALTH_TIMEOUT   = 2_000;
+const HEALTH_TIMEOUT   = 5_000;
 const TABLES_TIMEOUT   = 8_000;
 const COVERAGE_TIMEOUT = 5_000;
 
@@ -206,16 +207,52 @@ export default function DashboardPage() {
       .catch(() => setAnaliticHealth({ status: 'error', error: 'unreachable' }))
       .finally(() => setAnaliticLoading(false));
 
-    kafkaCall<{ tables: Array<string | { table_name: string }> }>(Topics.CMD_DATA_DATASET_LIST_TABLES, {}, TABLES_TIMEOUT)
+    kafkaCall<{
+      tables: Array<string | {
+        table_name: string;
+        rows?: number;
+        coverage_pct?: number;
+        date_from?: string | null;
+        date_to?: string | null;
+      }>;
+    }>(Topics.CMD_DATA_DATASET_LIST_TABLES, {}, TABLES_TIMEOUT)
       .then(r => {
-        const t = (r.tables ?? []).map(x => typeof x === 'string' ? x : x.table_name);
-        setTables(t);
+        const raw = r.tables ?? [];
+        const names: string[] = raw.map(x => typeof x === 'string' ? x : x.table_name);
+        setTables(names);
         pendingSaveRef.current = true;
-        t.forEach(table => {
-          kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table }, COVERAGE_TIMEOUT)
-            .then(cv => setCoverage(prev => ({ ...prev, [table]: cv })))
+
+        // Happy path: backend already returned enriched fields for each
+        // table (rows + min/max ts derivable from date_from/date_to). One
+        // round-trip total.
+        const initialCoverage: Record<string, TableCoverage> = {};
+        for (const t of raw) {
+          if (typeof t === 'string') continue;
+          if (t.rows == null) continue;
+          initialCoverage[t.table_name] = {
+            table:      t.table_name,
+            exists:     true,
+            rows:       t.rows ?? 0,
+            // We don't carry ts back from the enriched response (the backend
+            // formats them as YYYY-MM-DD); reconstruct from the date strings
+            // when present so charts that key off min/max_ts_ms still render.
+            min_ts_ms:  t.date_from ? Date.parse(`${t.date_from}T00:00:00Z`) : null,
+            max_ts_ms:  t.date_to   ? Date.parse(`${t.date_to}T23:59:59Z`)   : null,
+            status:     'ok',
+          };
+        }
+        if (Object.keys(initialCoverage).length > 0) {
+          setCoverage(prev => ({ ...prev, ...initialCoverage }));
+        }
+
+        // Transitional fallback: only fetch per-table coverage for legacy
+        // string entries (older DataService that didn't enrich the list).
+        for (const t of raw) {
+          if (typeof t !== 'string') continue;
+          kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table: t }, COVERAGE_TIMEOUT)
+            .then(cv => setCoverage(prev => ({ ...prev, [t]: cv })))
             .catch(() => {});
-        });
+        }
       })
       .catch(() => {})
       .finally(() => setTablesLoading(false));
@@ -289,6 +326,7 @@ export default function DashboardPage() {
   });
 
   const anyLoading = dataLoading || analiticLoading || tablesLoading || modelsLoading || infraLoading;
+  const { t } = useLocale();
 
   const infraToHealth = (h: InfraServiceHealth | null): ServiceHealth | null => {
     if (!h) return null;
@@ -302,7 +340,7 @@ export default function DashboardPage() {
 
       {/* в”Ђв”Ђ Header в”Ђв”Ђ */}
       <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+        <h1 className="text-2xl font-bold tracking-tight">{t('dashboard.title')}</h1>
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-xs text-muted-foreground hidden sm:block">
@@ -317,7 +355,7 @@ export default function DashboardPage() {
             className="gap-2"
           >
             <RefreshCw className={cn('w-3.5 h-3.5', anyLoading && 'animate-spin')} />
-            Refresh
+            {t('common.refresh')}
           </Button>
         </div>
       </header>
@@ -325,28 +363,28 @@ export default function DashboardPage() {
       {/* в”Ђв”Ђ Row 1: Stat cards в”Ђв”Ђ */}
       <section className="grid grid-cols-1 xs:grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-3">
         <StatCard
-          label="Total Tables"
+          label={t('dashboard.totalTables')}
           value={String(tables.length)}
           loading={tablesLoading}
           icon={Table2}
           accentColor="primary"
         />
         <StatCard
-          label="Total Rows"
+          label={t('dashboard.totalRows')}
           value={totalRows > 0 ? totalRows.toLocaleString() : '–'}
           loading={statsLoading}
           icon={Rows}
           accentColor="success"
         />
         <StatCard
-          label="Last Ingestion"
+          label={t('dashboard.lastIngestion')}
           value={lastIngestion > 0 ? new Date(lastIngestion).toISOString().slice(0, 10) : '–'}
           loading={statsLoading}
           icon={CalendarClock}
           accentColor="warning"
         />
         <StatCard
-          label="Models Trained"
+          label={t('dashboard.modelsTrained')}
           value={modelCount !== null ? String(modelCount) : '–'}
           loading={modelsLoading}
           icon={GitMerge}
@@ -405,7 +443,7 @@ export default function DashboardPage() {
         {/* Coverage bar chart */}
         <Card>
           <CardHeader className="pb-0 px-6 pt-5">
-            <CardTitle className="text-sm font-semibold">Coverage by Table</CardTitle>
+            <CardTitle className="text-sm font-semibold">{t('dashboard.coverage')}</CardTitle>
           </CardHeader>
           <CardContent className="pt-4 px-4 pb-4">
             {tablesLoading || (tables.length > 0 && coverageLoaded === 0) ? (
@@ -426,7 +464,7 @@ export default function DashboardPage() {
         <Card>
           <CardHeader className="pb-0 px-6">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-semibold">Dataset Tables</CardTitle>
+              <CardTitle className="text-sm font-semibold">{t('dashboard.tables')}</CardTitle>
               {!tablesLoading && coverageLoaded < tables.length && tables.length > 0 && (
                 <span className="text-xs text-muted-foreground">
                   Loading coverage {coverageLoaded}/{tables.length}

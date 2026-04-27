@@ -65,7 +65,7 @@ RAW_TABLE_SCHEMA = [
     ("symbol", "character varying"),
     ("exchange", "character varying"),
     ("timeframe", "character varying"),
-    ("index_price", "numeric"),
+    ("close_price", "numeric"),
     ("open_price",  "numeric"),
     ("high_price",  "numeric"),
     ("low_price",   "numeric"),
@@ -121,7 +121,7 @@ FEATURE_TABLE_SCHEMA = [
 EXPECTED_TABLE_SCHEMA = RAW_TABLE_SCHEMA + FEATURE_TABLE_SCHEMA
 DATASET_COLUMN_NAMES = [column_name for column_name, _ in EXPECTED_TABLE_SCHEMA]
 TEXT_DATASET_COLUMNS = {"symbol", "exchange", "timeframe"}
-REQUIRED_NOT_NULL_COLUMNS = {"timestamp_utc", "symbol", "exchange", "timeframe", "index_price"}
+REQUIRED_NOT_NULL_COLUMNS = {"timestamp_utc", "symbol", "exchange", "timeframe", "close_price"}
 FORBIDDEN_TABLE_COLUMNS = {"bid1_price", "ask1_price", "bid1_size", "ask1_size"}
 RAW_FEATURE_COLUMNS: frozenset[str] = frozenset(
     {
@@ -129,7 +129,7 @@ RAW_FEATURE_COLUMNS: frozenset[str] = frozenset(
         "symbol",
         "exchange",
         "timeframe",
-        "index_price",
+        "close_price",
         "open_price",
         "high_price",
         "low_price",

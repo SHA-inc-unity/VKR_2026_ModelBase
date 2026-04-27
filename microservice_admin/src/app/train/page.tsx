@@ -9,6 +9,7 @@ import { useToast } from '@/components/Toast';
 import { SYMBOLS, TIMEFRAMES } from '@/lib/constants';
 import { useHistory } from '@/hooks/useHistory';
 import { useEvents } from '@/hooks/useEvents';
+import { useLocale } from '@/lib/i18nContext';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -99,7 +100,7 @@ export default function TrainPage() {
       );
       setStatus(res);
       if (res.status === 'running') {
-        toast('Training started - polling for status...', 'info');
+        toast(t('train.started'), 'info');
         startPolling(symbol, timeframe);
       } else {
         setLoading(false);
@@ -118,6 +119,7 @@ export default function TrainPage() {
   const progressPct  = status?.progress !== undefined ? Math.round(status.progress * 100) : null;
   const trainHistory = history.filter(h => h.action === 'Train').slice(0, 20);
   const [activeTab, setActiveTab] = useState<'new' | 'history'>('new');
+  const { t } = useLocale();
 
   useEvents({
     EVT_ANALYTICS_TRAIN_PROGRESS: (evt: TrainProgressEvent) => {
@@ -144,7 +146,7 @@ export default function TrainPage() {
 
       {/* ── Header with inline tab switcher ── */}
       <header className="flex items-center justify-between gap-4 flex-wrap">
-        <h1 className="text-2xl font-bold tracking-tight">Model Training</h1>
+        <h1 className="text-2xl font-bold tracking-tight">{t('train.title')}</h1>
         <div className="flex gap-1 p-1 rounded-md bg-muted">
           {(['new', 'history'] as const).map(tab => (
             <button
@@ -157,7 +159,7 @@ export default function TrainPage() {
                   : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              {tab === 'new' ? 'New Training' : 'History'}
+              {tab === 'new' ? t('train.newTraining') : t('train.history')}
             </button>
           ))}
         </div>
@@ -170,36 +172,36 @@ export default function TrainPage() {
         <div className={cn('flex flex-col gap-4', activeTab !== 'new' && 'hidden lg:flex')}>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold">Train Configuration</CardTitle>
+              <CardTitle className="text-sm font-semibold">{t('train.config')}</CardTitle>
             </CardHeader>
             <Separator />
             <CardContent className="pt-4 space-y-4">
               <div className="flex flex-wrap gap-4 items-end">
                 <div className="flex flex-col gap-1.5 w-44">
-                  <label className="text-xs text-muted-foreground">Symbol</label>
+                  <label className="text-xs text-muted-foreground">{t('common.symbol')}</label>
                   <Select value={symbol} onValueChange={setSymbol}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>{SYMBOLS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
                 <div className="flex flex-col gap-1.5 w-32">
-                  <label className="text-xs text-muted-foreground">Timeframe</label>
+                  <label className="text-xs text-muted-foreground">{t('common.timeframe')}</label>
                   <Select value={timeframe} onValueChange={setTimeframe}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>{TIMEFRAMES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-xs text-muted-foreground">Date From</label>
+                  <label className="text-xs text-muted-foreground">{t('common.dateFrom')}</label>
                   <Input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="w-40" style={{ colorScheme: 'dark' }} />
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-xs text-muted-foreground">Date To</label>
+                  <label className="text-xs text-muted-foreground">{t('common.dateTo')}</label>
                   <Input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="w-40" style={{ colorScheme: 'dark' }} />
                 </div>
                 <Button onClick={handleTrain} disabled={loading} className="gap-2 self-end">
                   {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BrainCircuit className="w-3.5 h-3.5" />}
-                  {loading ? 'Training...' : 'Start Training'}
+                  {loading ? t('train.running') : t('train.start')}
                 </Button>
               </div>
             </CardContent>
@@ -222,7 +224,7 @@ export default function TrainPage() {
                       <Progress value={progressPct} className="h-2" />
                     )}
                     <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>Progress</span>
+                      <span>{t('common.progress')}</span>
                       <span>{progressPct}%</span>
                     </div>
                   </div>
@@ -230,7 +232,7 @@ export default function TrainPage() {
 
                 {status.model_id && (
                   <div className="space-y-1">
-                    <div className="text-xs text-muted-foreground">Model ID</div>
+                    <div className="text-xs text-muted-foreground">{t('train.modelId')}</div>
                     <code className="block text-xs px-3 py-2 rounded-md bg-muted font-mono">{status.model_id}</code>
                   </div>
                 )}
@@ -244,28 +246,28 @@ export default function TrainPage() {
           <Card>
             <CardHeader className="pb-0">
               <div className="flex items-center justify-between">
-                <CardTitle className="text-sm font-semibold">Training History</CardTitle>
-                <span className="text-xs text-muted-foreground">Last 20 runs</span>
+                <CardTitle className="text-sm font-semibold">{t('train.history')}</CardTitle>
+                <span className="text-xs text-muted-foreground">{t('train.last20')}</span>
               </div>
             </CardHeader>
             <Separator className="mt-4" />
             <CardContent className="p-0">
               {trainHistory.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 gap-2">
-                  <p className="text-sm font-medium">No training runs yet</p>
-                  <p className="text-xs text-muted-foreground">Start a training session to see results here</p>
+                  <p className="text-sm font-medium">{t('train.noRuns')}</p>
+                  <p className="text-xs text-muted-foreground">{t('train.noRunsHint')}</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Time</TableHead>
-                      <TableHead>Symbol</TableHead>
-                      <TableHead>TF</TableHead>
-                      <TableHead>Dates</TableHead>
-                      <TableHead>Result</TableHead>
-                      <TableHead className="text-right">ms</TableHead>
+                      <TableHead>{t('train.colTime')}</TableHead>
+                      <TableHead>{t('train.colSymbol')}</TableHead>
+                      <TableHead>{t('train.colTF')}</TableHead>
+                      <TableHead>{t('train.colDates')}</TableHead>
+                      <TableHead>{t('train.colResult')}</TableHead>
+                      <TableHead className="text-right">{t('train.colMs')}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>

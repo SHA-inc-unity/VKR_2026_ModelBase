@@ -3,7 +3,7 @@ from __future__ import annotations
 from .api import (
     api_get_json,
     fetch_funding_rates,
-    fetch_index_prices,
+    fetch_close_prices,
     fetch_instrument_details,
     fetch_open_interest,
 )
@@ -119,7 +119,7 @@ __all__ = [
     "fetch_db_timestamps",
     "find_missing_timestamps_sql",
     "fetch_funding_rates",
-    "fetch_index_prices",
+    "fetch_close_prices",
     "fetch_instrument_details",
     "fetch_open_interest",
     "fetch_range_rows",

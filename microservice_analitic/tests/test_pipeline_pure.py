@@ -133,7 +133,7 @@ def _make_rows(n: int = 20) -> list[dict]:
     return [
         {
             "timestamp_utc": datetime(2024, 1, 1, i // 60, i % 60, tzinfo=timezone.utc),
-            "index_price": float(40000 + i),
+            "close_price": float(40000 + i),
             "funding_rate": 0.0001,
             "open_interest": 12345.0,
             "rsi": None,
@@ -193,9 +193,9 @@ def test_validate_rows_duplicate_timestamps_raises():
         validate_rows(rows, period=14)
 
 
-def test_validate_rows_null_index_price_raises():
+def test_validate_rows_null_close_price_raises():
     rows = _make_valid_rows(20)
-    rows[5]["index_price"] = None
+    rows[5]["close_price"] = None
     with pytest.raises(RuntimeError, match="NULL"):
         validate_rows(rows, period=14)
 
@@ -288,7 +288,7 @@ def test_rsi_warmup_rows_are_none_features_rows_are_valid():
     rows = [
         {
             "timestamp_utc": datetime.fromtimestamp((base_ms + i * step_ms) / 1000, tz=timezone.utc),
-            "index_price": float(40_000 + i * 10),
+            "close_price": float(40_000 + i * 10),
             "funding_rate": 0.0001,
             "open_interest": 100.0 + i,
             "rsi": None,

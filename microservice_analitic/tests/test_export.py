@@ -86,7 +86,7 @@ def test_build_copy_no_filters_uses_star():
 
 
 def test_build_copy_with_columns_quotes_each():
-    cols = ["timestamp_utc", "index_price", "rsi"]
+    cols = ["timestamp_utc", "close_price", "rsi"]
     stmt, params = _build_copy_statement("btcusdt_1m", None, None, cols)
     rendered = _render(stmt)
     for c in cols:
@@ -171,7 +171,7 @@ def _make_conn_with_copy(output_csv: str):
 
 
 def test_export_dataset_csv_returns_bytes_header_plus_rows():
-    csv_text = "timestamp_utc,index_price\n2024-01-01 00:00:00+00,42000.0\n"
+    csv_text = "timestamp_utc,close_price\n2024-01-01 00:00:00+00,42000.0\n"
     conn, cur = _make_conn_with_copy(csv_text)
     out = export_dataset_csv(conn, "btcusdt_5m")
     assert isinstance(out, bytes)
@@ -217,9 +217,9 @@ def test_export_dataset_csv_with_explicit_columns():
 
 
 def test_export_dataset_csv_empty_result_returns_only_header():
-    conn, _ = _make_conn_with_copy("timestamp_utc,index_price\n")
+    conn, _ = _make_conn_with_copy("timestamp_utc,close_price\n")
     out = export_dataset_csv(conn, "t")
-    assert out == b"timestamp_utc,index_price\n"
+    assert out == b"timestamp_utc,close_price\n"
 
 
 def test_export_dataset_csv_exported_from_package():

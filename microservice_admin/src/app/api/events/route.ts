@@ -1,52 +1,20 @@
 /**
  * GET /api/events — Server-Sent Events stream.
  *
- * Subscribes to all EVT_* Kafka topics and forwards each message to the client
- * as an SSE event with the shape: { type: string; payload: unknown }
+ * Subscribes the connecting browser to the process-wide SSE hub
+ * (`lib/sseHub.ts`). The hub runs a single Kafka consumer for all
+ * EVT_* topics and fans every received event out to all active SSE
+ * subscribers — there is **no** per-client Kafka consumer or group.
  *
- * A new Kafka consumer is created per connection (unique group ID) so every
- * connected client receives all events independently.
- * The consumer is disconnected when the HTTP connection is closed.
+ * Heartbeat: a `:keepalive` comment is emitted every 25 s so that
+ * idle Nginx/Cloudflare proxies don't close the stream.
  */
 import { NextRequest } from 'next/server';
-import { Kafka, logLevel } from 'kafkajs';
-import { v4 as uuidv4 } from 'uuid';
-import { Topics } from '@/lib/topics';
-
-const BOOTSTRAP_SERVERS = process.env.KAFKA_BOOTSTRAP_SERVERS ?? 'redpanda:29092';
-
-// Collect all EVT_ topic values from the Topics map
-const EVT_TOPICS = (Object.entries(Topics) as [string, string][])
-  .filter(([key]) => key.startsWith('EVT_'))
-  .map(([, value]) => value);
-
-// Shared Kafka client for SSE consumers (not the same as lib/kafka.ts)
-let sseKafka: Kafka | null = null;
-function getSseKafka(): Kafka {
-  if (!sseKafka) {
-    sseKafka = new Kafka({
-      clientId: 'admin-sse',
-      brokers: BOOTSTRAP_SERVERS.split(','),
-      retry: { retries: 2 },
-      logLevel: logLevel.ERROR,
-    });
-  }
-  return sseKafka;
-}
+import { subscribe } from '@/lib/sseHub';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest): Promise<Response> {
-  const instanceId = uuidv4().replace(/-/g, '');
-  const consumer = getSseKafka().consumer({
-    groupId: `admin-sse-${instanceId}`,
-    // KafkaJS MetadataRequest v6 against Redpanda returns INVALID_PARTITIONS for
-    // non-existent topics; disable auto-create and create EVT_* topics explicitly
-    // via Admin API below.
-    allowAutoTopicCreation: false,
-  });
-
-  // Encoder is created once per connection
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({
@@ -56,70 +24,53 @@ export async function GET(request: NextRequest): Promise<Response> {
         return;
       }
 
-      // Clean up Kafka consumer when the client disconnects
-      request.signal.addEventListener('abort', () => {
-        consumer.disconnect().catch(() => { /* ignore */ });
+      let unsubscribe: (() => void) | null = null;
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+      const cleanup = () => {
+        if (unsubscribe) { try { unsubscribe(); } catch { /* ignore */ } unsubscribe = null; }
+        if (heartbeat)   { clearInterval(heartbeat); heartbeat = null; }
         try { controller.close(); } catch { /* already closed */ }
-      });
+      };
+
+      request.signal.addEventListener('abort', cleanup);
 
       try {
-        // Explicitly create all EVT_* topics before the consumer subscribes —
-        // same workaround as lib/kafka.ts for KafkaJS/Redpanda INVALID_PARTITIONS.
-        const admin = getSseKafka().admin();
-        try {
-          await admin.connect();
-          await admin.createTopics({
-            topics: EVT_TOPICS.map((t) => ({
-              topic: t,
-              numPartitions: 1,
-              replicationFactor: 1,
-            })),
-            waitForLeaders: false,
-          });
-        } catch (err) {
-          const e = err as { type?: string; code?: number; message?: string };
-          const isAlreadyExists =
-            e?.type === 'TOPIC_ALREADY_EXISTS' || e?.code === 36 ||
-            /already exists/i.test(e?.message ?? '');
-          if (!isAlreadyExists) {
-            console.warn('[sse] admin.createTopics(EVT_*) failed:', e?.message ?? err);
+        unsubscribe = await subscribe((event) => {
+          if (request.signal.aborted) return;
+          try {
+            const data = JSON.stringify(event);
+            controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+          } catch {
+            // controller closed mid-write — ignore
           }
-        } finally {
-          try { await admin.disconnect(); } catch { /* ignore */ }
-        }
-
-        // Let Redpanda elect leaders before the consumer connects.
-        await new Promise((r) => setTimeout(r, 300));
-
-        await consumer.connect();
-        await consumer.subscribe({ topics: EVT_TOPICS, fromBeginning: false });
-        await consumer.run({
-          eachMessage: async ({ topic, message }) => {
-            if (request.signal.aborted) return;
-            try {
-              const payload = JSON.parse(message.value?.toString() ?? 'null') as unknown;
-              const data = JSON.stringify({ type: topic, payload });
-              controller.enqueue(encoder.encode(`data: ${data}\n\n`));
-            } catch {
-              // skip malformed messages
-            }
-          },
         });
+
+        heartbeat = setInterval(() => {
+          if (request.signal.aborted) return;
+          try {
+            controller.enqueue(encoder.encode(`: keepalive\n\n`));
+          } catch {
+            // controller closed — let abort handler clean up
+          }
+        }, 25_000);
       } catch {
-        // Kafka unavailable – close stream gracefully so the client can reconnect
-        try { controller.close(); } catch { /* already closed */ }
+        // Hub failed to start (Kafka unavailable) — close gracefully so
+        // the browser's EventSource reconnects.
+        cleanup();
       }
     },
     cancel() {
-      consumer.disconnect().catch(() => { /* ignore */ });
+      // The abort listener above runs as well; nothing extra needed.
     },
   });
 
   return new Response(stream, {
     headers: {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
     },
   });
 }

@@ -93,6 +93,74 @@ export interface IngestStage {
   detail?: string;
 }
 
+// ── Quality-audit / repair progress (analitic → admin) ──────────────────────
+
+export type RepairStageId = 'prepare' | 'fetch' | 'upsert' | 'recompute';
+
+export interface RepairProgressEvent {
+  correlation_id: string;
+  stage: RepairStageId;
+  label: string;
+  status: 'running' | 'done' | 'error';
+  progress: number;
+  detail?: string;
+}
+
+export interface RepairStage {
+  id: RepairStageId;
+  label: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  progress: number;
+  detail?: string;
+}
+
+// ── Dataset jobs (microservice_data → admin, Phase B/C) ─────────────────────
+
+export type DatasetJobStatus =
+  | 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'skipped';
+
+export type DatasetJobType =
+  | 'ingest' | 'detect_anomalies' | 'compute_features'
+  | 'clean_apply' | 'export' | 'import_csv' | 'upsert_ohlcv';
+
+export interface DatasetJobProgressEvent {
+  job_id: string;
+  type: DatasetJobType;
+  status: DatasetJobStatus;
+  progress: number;        // 0..100
+  stage?: string | null;
+  detail?: string | null;
+  target_table?: string | null;
+  updated_at?: string;
+}
+
+export interface DatasetJobCompletedEvent {
+  job_id: string;
+  type: DatasetJobType;
+  status: DatasetJobStatus; // succeeded | failed | canceled | skipped
+  target_table?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  finished_at?: string;
+}
+
+export type QualityStatus = 'full' | 'partial' | 'missing';
+
+export interface QualityGroupReport {
+  id: string;
+  label: string;
+  columns: string[];
+  fill_pct: number;
+  status: QualityStatus;
+  repair_action: 'load_ohlcv' | 'recompute_features';
+}
+
+export interface QualityReport {
+  table: string;
+  total_rows: number;
+  groups: QualityGroupReport[];
+}
+
 // ── Infrastructure health (HTTP probes via /api/health) ───────────────────────
 
 export interface InfraServiceHealth {

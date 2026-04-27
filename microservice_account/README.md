@@ -161,3 +161,38 @@ dotnet test
 - Internal API: API key header only, not JWT
 - DB user should have minimal privileges (SELECT/INSERT/UPDATE/DELETE only)
 - Rotate `JWT_SECRET_KEY` via refresh token rotation (all sessions will invalidate)
+
+---
+
+## EF Core performance notes
+
+The repositories use `AsNoTracking()` everywhere except where the caller
+must mutate the returned entity:
+
+| Method | Tracking | Why |
+|--------|----------|-----|
+| `UserRepository.GetByIdAsync` | tracked | mutated by `UpdateProfileAsync` |
+| `UserRepository.GetSettingsAsync` | tracked | mutated by `UpdateSettingsAsync` |
+| `RefreshTokenRepository.GetByHashAsync` | tracked | revoked by `RefreshAsync`/`LogoutAsync` |
+| `UserRepository.GetByEmailAsync` | no-track | login flow only reads |
+| `UserRepository.GetByIdWithRolesAsync` | no-track + `AsSplitQuery()` | profile/internal/refresh — read-only |
+| `UserRepository.{Email,Username}ExistsAsync` | no-track | existence check only |
+| `RoleRepository.{GetByCode,GetUserRoleCodes}Async` | no-track | read-only catalogue |
+
+**Set-based revoke.** `RevokeAllUserTokensAsync` uses
+`ExecuteUpdateAsync(SetProperty(t => t.RevokedAt, now))` — a single SQL
+UPDATE, no entities materialised. The previous "load all + loop +
+SaveChanges" path round-tripped every active token across the wire and
+held them in EF's change-tracker until commit.
+
+**No duplicate role queries.** `GetByIdWithRolesAsync` already eagerly
+loads `UserRoles → Role`. `AccountAppService` projects role codes from
+the in-memory graph via the private `ExtractRoleCodes(user)` helper —
+saving one extra DB query per `Refresh` / `GetCurrentUser` /
+`GetInternalUser` call.
+
+**Indexes.** All hot filter columns are indexed (initial migration
+`InitialCreate`):
+`users(email)`, `users(username)`, `refresh_tokens(token_hash)`,
+`refresh_tokens(user_id)`, `audit_login_events(user_id)`,
+`roles(code)`, `user_roles(role_id)`.

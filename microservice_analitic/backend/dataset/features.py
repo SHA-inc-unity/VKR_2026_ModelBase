@@ -46,7 +46,7 @@ def _compute_group_features(
     ~700 МБ для 3M строк × 8 raw-колонок).
     """
     g = g.sort_values("timestamp_utc", ignore_index=True)
-    price: pd.Series = g["index_price"]
+    price: pd.Series = g["close_price"]
 
     for horizon in RETURN_HORIZONS:
         g[f"return_{horizon}"] = price.pct_change(horizon)
@@ -113,7 +113,7 @@ def build_features(
     до min(n_groups, cpu_count) воркеров. Каждая группа независима,
     поэтому параллелизм прямолинеен.
     """
-    required = {"timestamp_utc", "index_price"}
+    required = {"timestamp_utc", "close_price"}
     missing_cols = required - set(df.columns)
     if missing_cols:
         raise ValueError(f"Недостающие обязательные столбцы: {missing_cols}")

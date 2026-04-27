@@ -24,7 +24,9 @@ public sealed class PostgresSettings
     public string Password { get; set; } = "postgres";
 
     public string ConnectionString =>
-        $"Host={Host};Port={Port};Database={Database};Username={User};Password={Password};Pooling=true;MinPoolSize=1;MaxPoolSize=10;CommandTimeout=60";
+        // Pool budget: _heavyConcurrency(4) × ~5 parallel detector connections ≈ 20 heavy
+        // + a few light handlers → 25 is the safe ceiling for this service's concurrency model.
+        $"Host={Host};Port={Port};Database={Database};Username={User};Password={Password};Pooling=true;MinPoolSize=1;MaxPoolSize=25;CommandTimeout=60";
 }
 
 public sealed class KafkaSettings
