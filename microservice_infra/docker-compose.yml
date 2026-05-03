@@ -183,17 +183,27 @@ services:
     networks:
       - modelline_net
 
-  # Nginx reverse proxy — routes sha-trade.tech/admin → admin panel.
-  # Listens on port 80. Requires admin container on modelline_net.
-  # DNS: point A-record sha-trade.tech → <server public IP>.
-  # HTTPS: add certbot + ssl.conf volume; port 443 open in firewall.
+  # Nginx reverse proxy — единственный внешний вход в ModelLine.
+  #
+  # Публикуется как host-порт 8501 (override через NGINX_PORT). Внутри
+  # контейнера слушает 80. Маршрутизирует:
+  #   /admin/*           → admin:3000 (Next.js, basePath=/admin)
+  #   /admin/api/events  → admin:3000 (SSE, без буферизации)
+  #   /modelline-blobs/* → minio:9000 (signed object downloads)
+  #
+  # Поднимается всегда вместе с остальной infra. В local/full stack это
+  # browser-facing ingress на :8501; в split deployment этот же nginx
+  # остаётся download endpoint-ом backend-хоста для /modelline-blobs/*.
+  # HTTPS: смонтировать ssl.conf в /etc/nginx/conf.d/ и открыть :443 на
+  # хосте.
   nginx:
     image: nginx:1.27-alpine
     container_name: modelline-nginx
     restart: unless-stopped
-    profiles: ["proxy"]
+    depends_on:
+      - minio
     ports:
-      - "${NGINX_PORT:-80}:80"
+      - "${NGINX_PORT:-8501}:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:

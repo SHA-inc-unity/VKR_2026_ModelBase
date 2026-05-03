@@ -23,7 +23,16 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly DatasetJobsRepository      _jobsRepo;
     private readonly BybitApiClient             _bybit;
     private readonly MinioClaimCheckService     _minio;
-    private readonly string                     _minioPublicUrl;
+    // Browser-facing origin для presigned URL'ов, которые получает admin
+    // и в итоге показывает в браузере (CSV/ZIP экспорт, anomaly report).
+    // По умолчанию — внешний вход infra-nginx на host-порте 8501; путь
+    // /modelline-blobs/* проксируется в minio:9000 без потери query.
+    private readonly string                     _browserDownloadBaseUrl;
+    // Internal S3 endpoint (http://minio:9000). Используется для
+    // server-to-server presigned URL'ов (export_full → analitic),
+    // которые потребляются изнутри docker-сети, где host браузерного
+    // входа не резолвится.
+    private readonly string                     _internalDownloadBaseUrl;
     private readonly ILogger<KafkaConsumerService> _log;
 
     // Two-tier concurrency control. The whole consume loop is bounded by
@@ -72,13 +81,14 @@ public sealed partial class KafkaConsumerService : BackgroundService
         MinioClaimCheckService minio,
         ILogger<KafkaConsumerService> log)
     {
-        _producer       = producer;
-        _repo           = repo;
-        _jobsRepo       = jobsRepo;
-        _bybit          = bybit;
-        _minio          = minio;
-        _minioPublicUrl = opts.Value.Minio.PublicUrl;
-        _log            = log;
+        _producer                = producer;
+        _repo                    = repo;
+        _jobsRepo                = jobsRepo;
+        _bybit                   = bybit;
+        _minio                   = minio;
+        _browserDownloadBaseUrl  = opts.Value.Minio.PublicDownloadBaseUrl;
+        _internalDownloadBaseUrl = opts.Value.Minio.Endpoint;
+        _log                     = log;
 
         var cfg = new ConsumerConfig
         {
@@ -632,7 +642,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
 
             var zipDownloadName = $"{symbol}_ALL.zip";
             var zipPresignedUrl = await _minio.GetPresignedUrlAsync(
-                zipKey, _minioPublicUrl, expiresMinutes: 60,
+                zipKey, _browserDownloadBaseUrl, expiresMinutes: 60,
                 downloadFilename: zipDownloadName,
                 contentType: "application/zip",
                 ct: ct);
@@ -709,7 +719,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
 
         var downloadName = $"{table}.csv";
         var presignedUrl = await _minio.GetPresignedUrlAsync(
-            key, _minioPublicUrl, expiresMinutes: 60,
+            key, _browserDownloadBaseUrl, expiresMinutes: 60,
             downloadFilename: downloadName,
             contentType: "text/csv; charset=utf-8",
             ct: ct);
@@ -801,8 +811,11 @@ public sealed partial class KafkaConsumerService : BackgroundService
             return new { error = err.Message };
         }
 
+        // export_full отдаётся другим микросервисам (microservice_analitic),
+        // которые тянут CSV прямо из docker-сети. Там browser-facing nginx
+        // недоступен, поэтому подписываем URL на внутренний `minio:9000`.
         var presignedUrl = await _minio.GetPresignedUrlAsync(
-            key, _minioPublicUrl, expiresMinutes: 60,
+            key, _internalDownloadBaseUrl, expiresMinutes: 60,
             downloadFilename: $"{table}.csv",
             contentType: "text/csv; charset=utf-8",
             ct: ct);
@@ -1915,7 +1928,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
                         _minio.PutStreamAsync(pipe.Reader.AsStream(), key, "application/json", ct),
                         serializeTask);
                     reportUrl = await _minio.GetPresignedUrlAsync(
-                        key, _minioPublicUrl, expiresMinutes: 60,
+                        key, _browserDownloadBaseUrl, expiresMinutes: 60,
                         downloadFilename: $"anomaly_{table}.json",
                         contentType: "application/json",
                         ct: ct);

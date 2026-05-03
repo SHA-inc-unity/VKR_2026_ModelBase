@@ -8,9 +8,9 @@
 
 | Сервис | Технологии | Порты | Описание |
 |--------|-----------|-------|----------|
-| [microservice_infra](microservice_infra/README.md) | Docker Compose, Redpanda, MinIO, Nginx | `9092`, `8080`, `9000`, `9001`, `80` | Общая инфраструктура платформы: Kafka, S3 claim-check, reverse proxy |
+| [microservice_infra](microservice_infra/README.md) | Docker Compose, Redpanda, MinIO, Nginx | `9092`, `8080`, `9000`, `9001`, `8501` | Общая инфраструктура платформы: Kafka, S3 claim-check и локальный ingress/download endpoint backend-стека |
 | [microservice_data](microservice_data/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Kafka, MinIO | `8100` | Владелец рыночных данных, датасета, export и фоновых jobs |
-| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, Redis | `8501` внешне, `3000` внутри | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов |
+| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, Redis | `3000` (local stack), `8501` (`onlyadmin`) | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов. В local-стеке идёт через infra-nginx, в split deployment может публиковаться как отдельная online-head нода |
 | [microservice_analitic](microservice_analitic/README.md) | Python 3.12, CatBoost, FastAPI, PostgreSQL, Redis | API: `8000` | ML-сервис: обучение, прогнозы, аналитика рынка |
 | [microservice_account](microservice_account/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Redis | `5010` | Сервис аутентификации и управления аккаунтами (Clean Architecture) |
 | [microservice_gateway](microservice_gateway/README.md) | .NET 8, ASP.NET Core | `5020` | Mobile BFF Gateway — маршрутизация и агрегация запросов |
@@ -50,6 +50,44 @@
 
 ---
 
+## Внешний вход и схема download
+
+В репозитории теперь поддерживаются **две топологии запуска**.
+
+### 1. Local/full stack
+
+По умолчанию browser-facing вход держит nginx из `microservice_infra`
+на host-порту `8501`:
+
+| URL                                       | Куда проксируется                       |
+|-------------------------------------------|-----------------------------------------|
+| `http://localhost:8501/`                  | 301 → `/admin/`                         |
+| `http://localhost:8501/admin/*`           | `admin:3000` (Next.js, basePath=/admin) |
+| `http://localhost:8501/admin/api/events`  | `admin:3000` (SSE, без буферизации)     |
+| `http://localhost:8501/modelline-blobs/*` | `minio:9000` (signed downloads)         |
+
+В этом режиме `microservice_admin` сам наружу не публикуется: браузер
+идёт через infra-nginx, а большие dataset-export файлы скачиваются через
+тот же origin. `microservice_data` подписывает browser-bound presigned
+URL через `PUBLIC_DOWNLOAD_BASE_URL` (по умолчанию `http://localhost:8501`),
+nginx стримит `/modelline-blobs/*` напрямую из MinIO, байты через admin
+runtime не идут.
+
+### 2. Split deployment: `noadmin` + `onlyadmin`
+
+Backend-хост можно поднять в режиме `noadmin`: локально стартуют infra,
+data, analitic, account и gateway, но без `microservice_admin`. Отдельно
+можно поднять `microservice_admin` в режиме `onlyadmin` на другой машине
+как **online-head**: admin сам публикует `8501:3000`, остаётся на basePath
+`/admin` и работает против внешних Kafka/HTTP endpoints через namespace
+переменных `ONLINE_*`.
+
+В split deployment download path остаётся прямым и zero-byte для admin:
+remote admin-head получает `presigned_url` от data-сервиса и браузер
+качает CSV/ZIP напрямую с backend ingress-а, заданного через
+`PUBLIC_DOWNLOAD_BASE_URL`. Это может быть другой host/origin, чем тот,
+на котором живёт admin-head.
+
 ## Документация для агентов
 
 В репозитории включён docs-first workflow для агентной разработки.
@@ -79,6 +117,12 @@ cd microservicestarter/
 # Запуск всех сервисов
 ./start.sh
 
+# Запуск всего backend-стека без admin
+./start.sh all noadmin
+
+# Запуск только отдельной online-head admin-ноды
+./start.sh all onlyadmin
+
 # Запуск конкретного сервиса
 ./start.sh microservice_infra
 ./start.sh microservice_data
@@ -93,6 +137,8 @@ cd microservicestarter/
 
 # Перезапуск с git pull
 ./restart.sh
+./restart.sh all noadmin
+./restart.sh all onlyadmin
 ./restart.sh microservice_analitic
 
 # Статус контейнеров
@@ -108,6 +154,12 @@ cd microservicestarter\
 # Запуск всех сервисов
 .\start.ps1
 
+# Запуск всего backend-стека без admin
+.\start.ps1 -Mode noadmin
+
+# Запуск только отдельной online-head admin-ноды
+.\start.ps1 -Mode onlyadmin
+
 # Запуск конкретного сервиса
 .\start.ps1 -Service microservice_infra
 .\start.ps1 -Service microservice_data
@@ -122,6 +174,8 @@ cd microservicestarter\
 
 # Перезапуск с git pull
 .\restart.ps1
+.\restart.ps1 -Mode noadmin
+.\restart.ps1 -Mode onlyadmin
 .\restart.ps1 -Service microservice_analitic
 
 # Статус
@@ -136,6 +190,8 @@ cd microservicestarter\
 | Режим       | Описание                                                           |
 |-------------|--------------------------------------------------------------------|
 | `core`      | Запуск основного стека — **по умолчанию**                          |
+| `noadmin`   | Запуск всего backend-стека, кроме `microservice_admin`             |
+| `onlyadmin` | Запуск только `microservice_admin` как отдельной online-head ноды  |
 | `full`      | Core + планировщик переобучения (scheduler)                        |
 | `scheduler` | Только scheduler (требует запущенного core)                        |
 | `build`     | Пересборка образов без кеша + запуск                               |
@@ -145,6 +201,13 @@ cd microservicestarter\
 | `clean`     | Остановить + удалить volumes (только `stop`) — **СБРОС БД!**       |
 | `prune`     | Остановить + удалить Docker-образы сервиса (только `stop`)         |
 
+Для multi-service сценариев `start` и `restart` больше не выполняют все
+compose-команды строго последовательно. Launcher сначала поднимает
+`microservice_infra`, а затем запускает остальные выбранные сервисы
+параллельно отдельными дочерними процессами. За счёт этого общий `build + up`
+для полного стека заметно быстрее, но bootstrap общей сети и ingress-а
+остаётся детерминированным.
+
 ---
 
 ## Переменные окружения
@@ -152,6 +215,10 @@ cd microservicestarter\
 При **первом запуске** через `start.sh` / `start.ps1` launcher автоматически создаёт `.env` из `.env.example` в тех сервисах, где это поддерживается, и запрашивает обязательные секреты.
 
 Если нужно подготовить окружение вручную, ориентируйся на `README.md` конкретного сервиса и его `.env.example`.
+
+Для `onlyadmin`/online-head сценария ориентируйся дополнительно на
+`microservice_admin/README.md`: remote admin использует namespace
+`ONLINE_*` для Kafka bootstrap и внешних health endpoints.
 
 ---
 

@@ -42,7 +42,11 @@ services:
       PGPASSWORD: ${PGPASSWORD:-postgres}
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
+      # Browser-facing origin для signed download path /modelline-blobs/*.
+      # Совпадает с внешним входом infra-nginx (host:8501) — браузер
+      # качает CSV/ZIP с того же origin, что и admin-панель, без
+      # упоминания сырого MinIO host:9000.
+      PUBLIC_DOWNLOAD_BASE_URL: ${PUBLIC_DOWNLOAD_BASE_URL:-http://localhost:8501}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-modelline_secret}
       MINIO_BUCKET: modelline-blobs

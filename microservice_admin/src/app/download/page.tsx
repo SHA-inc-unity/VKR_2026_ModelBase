@@ -1139,43 +1139,6 @@ export default function DatasetPage() {
     }
   };
 
-  const explainExportDownloadPath = (downloadUrl: string): string | null => {
-    if (typeof window === 'undefined') return null;
-
-    const isLoopbackHost = (hostname: string): boolean => {
-      const host = hostname.toLowerCase();
-      return host === 'localhost'
-        || host === '127.0.0.1'
-        || host === '0.0.0.0'
-        || host === '::1'
-        || host === '[::1]';
-    };
-
-    let target: URL;
-    try {
-      target = new URL(downloadUrl, window.location.href);
-    } catch {
-      return 'Сервер вернул некорректный download path';
-    }
-
-    const pageHost = window.location.hostname.toLowerCase();
-    const targetHost = target.hostname.toLowerCase();
-
-    if (targetHost === 'minio') {
-      return 'Download path указывает на внутренний host "minio". Нужен внешний путь /modelline-blobs/* через nginx или корректный MINIO_PUBLIC_URL.';
-    }
-
-    if (isLoopbackHost(targetHost) && !isLoopbackHost(pageHost)) {
-      return 'Download path указывает на локальный object-storage адрес. Для browser download нужен внешний маршрут /modelline-blobs/* или browser-reachable MINIO_PUBLIC_URL.';
-    }
-
-    if (target.port === '9000' && !isLoopbackHost(pageHost)) {
-      return 'Download path всё ещё использует сырой object-storage port 9000. Для внешнего браузера нужен проксируемый путь /modelline-blobs/* или внешний MINIO_PUBLIC_URL.';
-    }
-
-    return null;
-  };
-
   const handleExportCsv = async () => {
     if (operationLockRef.current) return;
     operationLockRef.current = true;
@@ -1215,14 +1178,13 @@ export default function DatasetPage() {
       const { presigned_url } = await res.json() as { presigned_url?: string };
       if (!presigned_url) throw new Error('Сервер не вернул presigned_url');
 
-  const downloadPathIssue = explainExportDownloadPath(presigned_url);
-  if (downloadPathIssue) throw new Error(downloadPathIssue);
-
-  // Browser downloads the already prepared object directly from the returned URL.
+      // Браузер качает напрямую из object storage через тот же внешний
+      // origin (infra-nginx → /modelline-blobs/*). Никакой нормализации
+      // host'а здесь нет: data-service сам выдаёт browser-reachable URL.
       const a    = document.createElement('a');
       a.href     = presigned_url;
       a.download = filename;
-  a.rel      = 'noopener noreferrer';
+      a.rel      = 'noopener noreferrer';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);

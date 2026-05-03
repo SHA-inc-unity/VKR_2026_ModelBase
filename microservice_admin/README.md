@@ -4,9 +4,26 @@
 
 **Стек:** Next.js 14, React 18, TypeScript 5, Tailwind CSS 3, shadcn/ui, Radix UI, kafkajs, ioredis, recharts  
 **Конфиги:** `tailwind.config.js` + `postcss.config.js` (последний критичен — регистрирует `tailwindcss` и `autoprefixer` как PostCSS плагины, без него `@tailwind` директивы не обрабатываются)  
-**Порт:** `3000`  
-**Base path:** `/admin` — приложение обслуживается по пути `/admin` (настроено через `basePath` и `assetPrefix` в `next.config.js`). Nginx пробрасывает `sha-trade.tech/admin` → `admin:3000`. Статика `_next/static/*` тоже проксируется корректно. Next.js **не** применяет `basePath` автоматически к `fetch()` и `EventSource` — все клиентские обращения к API используют `process.env.NEXT_PUBLIC_BASE_PATH ?? ''` как префикс (`healthClient.ts`, `kafkaClient.ts`, `useEvents.ts`).
-**Зависимости:** `microservice_infra` (Redpanda broker, Redis)
+**Base path:** `/admin` — приложение обслуживается по пути `/admin` (настроено через `basePath` и `assetPrefix` в `next.config.js`). Next.js **не** применяет `basePath` автоматически к `fetch()` и `EventSource` — все клиентские обращения к API используют `process.env.NEXT_PUBLIC_BASE_PATH ?? ''` как префикс (`healthClient.ts`, `kafkaClient.ts`, `useEvents.ts`).
+
+## Deployment modes
+
+### 1. Local stack (`admin`)
+
+- контейнерный порт `3000`, только внутри `modelline_net`
+- наружу не публикуется
+- browser-facing вход даёт nginx из `microservice_infra`: `http://localhost:8501/admin/`
+- используется при обычном полном локальном запуске платформы
+
+### 2. Online head (`admin-online`)
+
+- отдельный compose-service под profile `online`
+- публикует `8501:3000` напрямую на своей машине
+- не требует `modelline_net`
+- используется в split deployment, когда backend-хост поднят в режиме `noadmin`, а admin живёт отдельно
+- внешние адреса берутся из namespace `ONLINE_*`: `ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`
+
+В обоих режимах admin остаётся Kafka-driven UI-слоем без собственного job-runner'а.
 
 ## Документация для агентов
 
@@ -72,16 +89,16 @@ Browser → Next.js page (client component)
              ↓ fetch
           GET /api/health           (Next.js Route Handler, server-side)
              ↓ HTTP (fetch, timeout 2 с, Promise.allSettled)
-          redpanda admin | minio     ← только shared-infra, НЕ application
+          redpanda admin | minio | account | gateway  ← внешние health probes, НЕ application IPC
 ```
 
 Клиентский код использует `kafkaCall()` из `src/lib/kafkaClient.ts` для команд (POST /api/kafka).
 Для event-driven обновлений используется `useEvents()` хук, который открывает `EventSource('/api/events')`.
 Health application-сервисов (`data`, `analitic`) — через Kafka (`cmd.*.health`), не через HTTP.
-`fetchInfraHealth()` из `src/lib/healthClient.ts` остался только для инфраструктурных
-health-чеков (Redpanda admin, MinIO) — эти два не слушают Kafka и находятся в
-`modelline_net`, поэтому достижимы по имени контейнера. URL'ы задаются env-переменными
-`REDPANDA_ADMIN_URL` / `MINIO_URL`. Прямого доступа браузера к Kafka нет.
+`fetchInfraHealth()` из `src/lib/healthClient.ts` используется для server-side HTTP
+probe Redpanda admin, MinIO, account и gateway. В local stack эти адреса обычно
+резолвятся по docker-hostname внутри `modelline_net`; в online-head режиме — через
+`ONLINE_*` namespace. Прямого доступа браузера к Kafka нет.
 
 ### KafkaJS 2.x + Redpanda workaround
 
@@ -233,7 +250,7 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 | Страница | Описание |
 |----------|----------|
 | `/` (Dashboard) | Bento Grid: Row 1 — 4 StatCard с `border-l-4 border-l-{color}` акцентами (`grid-cols-2 xl:grid-cols-4`). Row 2 — 2 колонки: стек из 4 ServiceCard (2 application через Kafka: `data`, `analitic`; 2 infra через HTTP `/api/health`: `Redpanda`, `MinIO`) + `CoverageBar` (recharts BarChart horizontal). Row 3 — shadcn Table датасетов с `pct.toFixed(1)%`. Кнопка Refresh обновляет все карточки одновременно. |
-| `/download` | 2-колоночный layout (`lg:grid-cols-[380px,1fr]`): слева Dataset Configuration, ingest controls и quality actions; справа coverage/stat cards; ниже Available Tables, Quality Block и Action History. Ingest работает только через dataset jobs: и single-TF, и `ALL` сначала делают `refreshCoverageState()` без обнуления покрытия, затем отправляют быстрый `CMD_DATA_DATASET_JOBS_START` (`timeoutMs: 5_000`). После успешного ответа timeframe попадает в `queued` и seed-ится через `seedQueuedJob(...)`; в `running` он переходит только после реального backend-progress/job update. Локальный `loading/busy` и page-level lock не снимаются сразу после `JOBS_START`: admin остаётся занятым, пока принятая remote job действительно не перейдёт в terminal state; если job не создана, busy-state отпускается сразу по явному backend-отказу. `ALL`-виджет `AllIngestProgress` показывает 2 execution slot-а, отдельную очередь queued jobs, stalled-state если очередь есть, а running нет слишком долго, и recent done/error list. Для running-slot видны stage, progress, detail, elapsed и short job id. Успешное завершение с `completed=0` показывается как нормальный no-op (`без новых строк` / `дозагрузка не потребовалась`), а не как скрытая ошибка. Верхний блок активных dataset jobs приведён к обычному тёмному card-стилю admin-панели: без яркого белого фона, со спокойными muted-подложками и status/progress-элементами в текущей теме. Backend start errors (`schema_not_ready`, `bad_request`, `db_unavailable`, `pg_*`, `internal_error`) сразу переводят конкретный TF в `error`. После terminal jobs, quality-check и repair coverage подтягивается автоматически; пользователь всё время видит последнее реальное состояние данных, а не фальшивый zero-skeleton. Dataset CSV/ZIP export по-прежнему не тащит байты через Admin: route получает только `presigned_url`, при необходимости нормализует raw `localhost/minio:9000` host в текущий внешний origin для `/modelline-blobs/*`, а страница до клика отсекает явно non-browser-reachable download path понятным toast-сообщением. Delete rows и repair по-прежнему идут через Kafka-команды владельцам сервисов: admin только инициирует операции и отображает удалённое состояние. |
+| `/download` | 2-колоночный layout (`lg:grid-cols-[380px,1fr]`): слева Dataset Configuration, ingest controls и quality actions; справа coverage/stat cards; ниже Available Tables, Quality Block и Action History. Ingest работает только через dataset jobs: и single-TF, и `ALL` сначала делают `refreshCoverageState()` без обнуления покрытия, затем отправляют быстрый `CMD_DATA_DATASET_JOBS_START` (`timeoutMs: 5_000`). После успешного ответа timeframe попадает в `queued` и seed-ится через `seedQueuedJob(...)`; в `running` он переходит только после реального backend-progress/job update. Локальный `loading/busy` и page-level lock не снимаются сразу после `JOBS_START`: admin остаётся занятым, пока принятая remote job действительно не перейдёт в terminal state; если job не создана, busy-state отпускается сразу по явному backend-отказу. `ALL`-виджет `AllIngestProgress` показывает 2 execution slot-а, отдельную очередь queued jobs, stalled-state если очередь есть, а running нет слишком долго, и recent done/error list. Для running-slot видны stage, progress, detail, elapsed и short job id. Успешное завершение с `completed=0` показывается как нормальный no-op (`без новых строк` / `дозагрузка не потребовалась`), а не как скрытая ошибка. Верхний блок активных dataset jobs приведён к обычному тёмному card-стилю admin-панели: без яркого белого фона, со спокойными muted-подложками и status/progress-элементами в текущей теме. Backend start errors (`schema_not_ready`, `bad_request`, `db_unavailable`, `pg_*`, `internal_error`) сразу переводят конкретный TF в `error`. После terminal jobs, quality-check и repair coverage подтягивается автоматически; пользователь всё время видит последнее реальное состояние данных, а не фальшивый zero-skeleton. **Dataset CSV/ZIP export — zero-byte для admin**: route `/api/export/csv` только проксирует Kafka-ответ `{ presigned_url }` и пробрасывает URL клиенту как есть, без host-нормализации и без legacy raw-localhost fallback. URL уже подписан data-сервисом на browser-facing origin (внешний вход infra-nginx, по умолчанию `http://localhost:8501`), а `/modelline-blobs/*` стримит файл из MinIO напрямую — байты не проходят через admin runtime, поэтому файлы значительно больше 2 ГБ работают штатно. Delete rows и repair по-прежнему идут через Kafka-команды владельцам сервисов: admin только инициирует операции и отображает удалённое состояние. |
 | `/train` | Кастомный tab-switcher в header (без Radix Tabs). 2-колоночный grid на `lg+`: левая — Config + Status Card с `ProgressLine` (recharts LineChart, показывается после ≥2 точек прогресса); правая — Training History table. `progressHistory` state сбрасывается при каждом новом запуске. |
 | `/compare` | CSS grid 2 колонки, shadcn Card в каждой, shadcn Select, Button экспорта |
 | `/anomaly` | Инспекция / ML-детекция / очистка / экспорт датасетов. **Detection parameters**: 4 inline-секции c чекбоксами и параметрами для новых типов — Rolling Z-score/IQR (window/threshold/mode), Frozen/stale price (min consecutive), Return outlier (threshold %), Volume/turnover mismatch (tolerance %). **Inspect**: df.info-таблица + lazy-гистограммы. **Browse**: постраничный просмотр сырых строк + per-column charts. **Anomalies секция** (новый layout): summary-карточки + Smart Suggestions panel (ранжированный по severity список рекомендаций с inline кнопкой "Apply" — мгновенно включает соответствующий clean checkbox и запускает Apply) + Tabs: **Timeline** (scatter chart с категориальной Y-осью, цвет точек = severity), **Table** (paginated detail с фильтрами), **DBSCAN** (eps/min_samples/max_sample_rows), **IForest** (Isolation Forest: contamination/n_estimators/max_sample_rows через `cmd.analitic.anomaly.isolation_forest`), **Distribution** (skewness, excess kurtosis, JB p-value + histogram log-returns с N(μ,σ)-overlay через `cmd.analitic.dataset.distribution`), **History** (lazy-load `cmd.data.dataset.audit_log` — все clean.apply записи; кнопка Rollback зарезервирована, disabled). **Clean**: 5 операций в карточках с inline-параметрами при checked — drop_duplicates имеет strategy (first/last/none), fill_zero_streaks — columns selector (all/volume/open_interest/funding_rate), fill_gaps — method (forward_fill/linear/drop_rows). **Export**: dropdown в header с выбором формата (CSV/JSON) и subset (all/critical/dbscan/iforest); скачивание через Blob+`URL.createObjectURL` без backend, файл `anomaly_report_{symbol}_{tf}_{ts}.{ext}`. **Session badge** (Analyze авто-загружает сессию через `cmd.analitic.dataset.load`/`status`, Unload — `cmd.analitic.dataset.unload`). **Redis cache**: stats+coverage+anomalies восстанавливаются при смене symbol/timeframe; ML-детектора, distribution, audit log не кешируются. |

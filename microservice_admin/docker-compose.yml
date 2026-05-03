@@ -1,13 +1,21 @@
 # microservice_admin — standalone docker-compose.
 #
 # TypeScript / Next.js 14 admin panel.
-# IPC: Kafka only. Requires `microservice_infra` running (provides Redpanda
-# and the shared `modelline_net`).
+# IPC: Kafka only. Requires `microservice_infra` running — оно поднимает
+# Redpanda, MinIO, общий `modelline_net` и **nginx-вход на host-порте
+# 8501**, который и проксирует /admin/* в этот контейнер.
+#
+# В local/full stack сервис `admin` не публикует порты в хост: browser
+# идёт через nginx из microservice_infra на http://localhost:8501/admin/.
+# Для split deployment ниже есть отдельный сервис `admin-online`, который
+# публикует `${ADMIN_PORT:-8501}:3000` и работает без `modelline_net`.
 #
 # Run:
 #   cd microservice_admin
 #   docker compose up -d --build
-#   → http://localhost:8501
+#   → http://localhost:8501/admin/   (через nginx-вход infra)
+#   docker compose --profile online up -d --build admin-online
+#   → http://localhost:8501/admin/   (отдельная online-head нода)
 
 services:
   admin:
@@ -24,10 +32,35 @@ services:
       # MinIO URL used by /api/health liveness probe.
       MINIO_URL: ${MINIO_URL:-minio:9000}
       NODE_ENV: production
-    ports:
-      - "${ADMIN_PORT:-8501}:3000"
+    expose:
+      - "3000"
     networks:
       - modelline_net
+
+  # Online admin head for split deployment.
+  #
+  # Used when the backend stack runs elsewhere (`noadmin`) and this host
+  # should run only the browser-facing admin panel. In this mode the
+  # container publishes its own host port and talks to external Kafka / HTTP
+  # endpoints via the ONLINE_* env namespace. No shared `modelline_net`
+  # attachment is required.
+  admin-online:
+    profiles: ["online"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${ONLINE_KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}
+      REDPANDA_ADMIN_URL: ${ONLINE_REDPANDA_ADMIN_URL:-localhost:9644}
+      ACCOUNT_URL: ${ONLINE_ACCOUNT_URL:-localhost:5010}
+      GATEWAY_URL: ${ONLINE_GATEWAY_URL:-localhost:5020}
+      REDIS_URL: ${ONLINE_REDIS_URL:-}
+      # Used only by /api/health; may point to a remote MinIO endpoint.
+      MINIO_URL: ${ONLINE_MINIO_URL:-localhost:9000}
+      NODE_ENV: production
+    ports:
+      - "${ADMIN_PORT:-8501}:3000"
 
 networks:
   modelline_net:

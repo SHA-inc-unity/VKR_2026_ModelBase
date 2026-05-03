@@ -105,14 +105,21 @@ public sealed class MinioClaimCheckService : IDisposable
     /// <summary>
     /// Build a presigned GET URL for <paramref name="key"/> valid for
     /// <paramref name="expiresMinutes"/>. The AWS SDK signs the URL against
-    /// the internal <c>ServiceURL</c> (e.g. <c>http://minio:9000</c>), which
-    /// browsers can't resolve. We rewrite the host portion with
-    /// <paramref name="publicBaseUrl"/> (e.g. <c>http://localhost:9000</c>)
-    /// — the signature remains valid because MinIO, unlike AWS S3, does not
-    /// bind the signature to the <c>Host</c> header when the signing vhost
-    /// matches the request vhost. Additionally attaches a
-    /// <c>response-content-disposition</c> override so the browser downloads
-    /// the object with a <c>{key}</c>-based filename.
+    /// the internal <c>ServiceURL</c> (e.g. <c>http://minio:9000</c>),
+    /// which browsers can't resolve. We rewrite the host portion with
+    /// <paramref name="publicBaseUrl"/>:
+    /// <list type="bullet">
+    ///   <item>для browser-bound экспорта (CSV/ZIP, anomaly report) это
+    ///   внешний вход <c>http://localhost:8501</c>, где infra-nginx
+    ///   проксирует <c>/modelline-blobs/*</c> в MinIO без потери query;</item>
+    ///   <item>для server-to-server потребителей в той же docker-сети
+    ///   (например <c>cmd.data.dataset.export_full</c> → analitic) —
+    ///   внутренний <c>http://minio:9000</c>.</item>
+    /// </list>
+    /// Подпись остаётся валидной: MinIO, в отличие от AWS S3, не
+    /// биндит её к заголовку <c>Host</c>. Также прикрепляется
+    /// <c>response-content-disposition</c>, чтобы браузер качал объект
+    /// с указанным именем файла.
     /// </summary>
     public Task<string> GetPresignedUrlAsync(
         string key, string publicBaseUrl, int expiresMinutes,
@@ -141,11 +148,12 @@ public sealed class MinioClaimCheckService : IDisposable
 
         var signed = _client.GetPreSignedURL(req);
 
-        // Rewrite internal host ("http://minio:9000") → publicBaseUrl
-        // ("http://localhost:9000"). AWSSDK signs against the ServiceURL,
-        // which is the Docker-internal hostname — not reachable from a
-        // browser. Replace only the scheme+authority prefix; the path and
-        // query (including the SigV4 signature) are preserved verbatim.
+        // Rewrite internal host ("http://minio:9000") → publicBaseUrl.
+        // Для browser-bound URL это внешний proxy origin
+        // (`http://localhost:8501`), для server-to-server — тот же
+        // `http://minio:9000`. AWSSDK подписывает против ServiceURL,
+        // который — внутренний hostname; заменяем только scheme+authority,
+        // path и query (включая SigV4 подпись) сохраняются как есть.
         var internalPrefix = _endpoint.TrimEnd('/');
         var publicPrefix   = publicBaseUrl.TrimEnd('/');
         if (!string.IsNullOrEmpty(internalPrefix)

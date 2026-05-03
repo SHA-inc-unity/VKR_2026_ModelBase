@@ -41,8 +41,11 @@ try
         cfg2["DataService:Kafka:BootstrapServers"] = kafka;
     if (Environment.GetEnvironmentVariable("MINIO_ENDPOINT") is { } minioEp)
         cfg2["DataService:Minio:Endpoint"] = minioEp;
-    if (Environment.GetEnvironmentVariable("MINIO_PUBLIC_URL") is { } minioPub)
-        cfg2["DataService:Minio:PublicUrl"] = minioPub;
+    // PUBLIC_DOWNLOAD_BASE_URL — browser-facing origin, на котором
+    // публикуется /modelline-blobs/* (тот же внешний вход, что и
+    // admin-панель). См. DataServiceSettings.MinioSettings.
+    if (Environment.GetEnvironmentVariable("PUBLIC_DOWNLOAD_BASE_URL") is { } downloadBase)
+        cfg2["DataService:Minio:PublicDownloadBaseUrl"] = downloadBase;
     if (Environment.GetEnvironmentVariable("MINIO_ACCESS_KEY") is { } minioAk)
         cfg2["DataService:Minio:AccessKey"] = minioAk;
     if (Environment.GetEnvironmentVariable("MINIO_ROOT_USER") is { } minioRu)

@@ -12,24 +12,32 @@
                         ┌──────────────────────────────────────┐
                         │         microservice_infra           │
                         │  Redpanda (Kafka) :9092              │
-                        │  MinIO (S3)       :9000              │
-                        │  Nginx (proxy)    :80                │
+                        │  MinIO (S3)       :9000 (internal)   │
+                        │  Nginx (proxy)    :8501 (host)       │
                         │  modelline_net (docker bridge)       │
                         └──────────────┬───────────────────────┘
                                        │ Kafka IPC only
               ┌────────────────────────┼────────────────────────┐
               │                        │                        │
-   ┌──────────▼──────────┐  ┌──────────▼──────────┐  ┌─────────▼─────────┐
-   │ microservice_data   │  │ microservice_analitic│  │ microservice_admin│
-   │ C#/.NET 8           │  │ Python 3.12          │  │ Next.js 14        │
-   │ PostgreSQL :5433    │  │ FastAPI :8000        │  │ React/TS :3000    │
-   │ Kafka consumer      │  │                      │  │ Admin UI :8501    │
-   └─────────────────────┘  └──────────────────────┘  └───────────────────┘
+   ┌──────────▼──────────┐  ┌──────────▼──────────┐  ┌─────────▼──────────┐
+   │ microservice_data   │  │ microservice_analitic│  │ microservice_admin │
+   │ C#/.NET 8           │  │ Python 3.12          │  │ Next.js 14         │
+   │ PostgreSQL :5433    │  │ FastAPI :8000        │  │ React/TS :3000     │
+   │ Kafka consumer      │  │                      │  │ (только в          │
+   │                     │  │                      │  │  modelline_net)    │
+   └─────────────────────┘  └──────────────────────┘  └────────────────────┘
 
    microservice_account (.NET 8, :5010)  ─── REST (JWT auth)
    microservice_gateway (.NET 8, :5020)  ─── Mobile BFF (HTTP routing)
 
-   Nginx (в infra, :80): sha-trade.tech/admin → admin:3000
+       Local/full stack:
+             Nginx (в infra, host:8501 → :80)
+                   /admin/*           → admin:3000
+                   /modelline-blobs/* → minio:9000  (signed dataset downloads)
+
+       Split deployment:
+             backend-host         → noadmin
+             remote admin-host    → onlyadmin (admin-head на :8501/admin)
 ```
 
 **Правило:** межсервисная коммуникация внутри ML-платформы — только Kafka. HTTP между сервисами запрещён. `account` и `gateway` — отдельный независимый стек (REST + JWT).
@@ -98,9 +106,9 @@
 | Файл | Описание |
 |---|---|
 | `services.conf` | Реестр сервисов: `имя  относительный_путь` (по одному на строку) |
-| `start.ps1` / `start.sh` | Запуск сервисов. При первом запуске создаёт `.env` и запрашивает пароль PostgreSQL. Собирает base-образ если нужен. После сборки удаляет dangling-образы Docker. |
+| `start.ps1` / `start.sh` | Запуск сервисов. При первом запуске создаёт `.env` и запрашивает пароль PostgreSQL. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `scheduler`, `build`, `logs`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах сначала синхронно стартует `microservice_infra`, затем остальные сервисы уходят в параллельный fan-out. |
 | `stop.ps1` / `stop.sh` | Остановка контейнеров. Режимы: `stop` (default), `clean` (удалить volumes), `prune` (удалить образы). |
-| `restart.ps1` / `restart.sh` | `git pull` + пересборка + перезапуск. Режимы: `core`, `full`, `deps`, `api`. После сборки удаляет dangling-образы. |
+| `restart.ps1` / `restart.sh` | `git pull` + пересборка + перезапуск. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `deps`, `api`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах делает один `git pull`, затем синхронно поднимает `microservice_infra` и fan-out перезапускает остальные сервисы параллельно. После сборки удаляет dangling-образы. |
 | `update.ps1` / `update.sh` | Только `git pull` без рестарта контейнеров. |
 | `status.ps1` / `status.sh` | Показывает `docker compose ps` для каждого сервиса. |
 
@@ -109,6 +117,8 @@
 | Режим | Описание |
 |---|---|
 | `core` | Основной стек (по умолчанию) |
+| `noadmin` | Весь backend-стек без `microservice_admin` |
+| `onlyadmin` | Только `microservice_admin` в online-режиме |
 | `full` | Core + планировщик (scheduler profile) |
 | `scheduler` | Только контейнер scheduler |
 | `build` | Пересборка без кеша + запуск |
@@ -367,12 +377,13 @@
 **Роль:** Shared инфраструктура платформы. Поднимается первым, создаёт `modelline_net`.  
 **Детали:** [microservice_infra/STRUCTURE.md](microservice_infra/STRUCTURE.md)
 
-| Компонент | Порт (host) | Назначение |
-|-----------|------------|------------|
-| Redpanda | `9092` | Kafka-API broker. Внутри сети: `redpanda:29092` |
-| Redpanda Console | `8080` | Web UI топиков |
-| MinIO | `9000` | S3 claim-check хранилище |
-| MinIO Console | `9001` | Web UI MinIO |
+| Компонент        | Порт (host) | Назначение |
+|------------------|-------------|------------|
+| Nginx            | `8501`      | Browser-facing ingress local/full-стека и download ingress backend-host'а: `/admin/*` → admin:3000, `/modelline-blobs/*` → minio:9000 |
+| Redpanda         | `9092`      | Kafka-API broker. Внутри сети: `redpanda:29092` |
+| Redpanda Console | `8080`      | Web UI топиков |
+| MinIO            | `9000`      | S3 claim-check хранилище (внутренний; наружу не публикуется как download path — для браузера используется `8501/modelline-blobs/*`) |
+| MinIO Console    | `9001`      | Web UI MinIO |
 
 ---
 

@@ -36,12 +36,20 @@ public sealed class KafkaSettings
 
 public sealed class MinioSettings
 {
+    // Internal S3 endpoint inside the Docker network — used as the SDK
+    // ServiceURL (signing) и для server-to-server presigned URL'ов
+    // (например, ответ `cmd.data.dataset.export_full`, который потребляет
+    // microservice_analitic из той же сети).
     public string Endpoint { get; set; } = "http://minio:9000";
-    // Public hostname that browsers use to reach MinIO (presigned URL host rewrite).
-    // Internal Endpoint lives on the Docker network ("http://minio:9000"); browsers
-    // can't resolve that, so presigned URLs are rewritten to this base before being
-    // returned to the client.
-    public string PublicUrl { get; set; } = "http://localhost:9000";
+
+    // Browser-facing origin для signed download path /modelline-blobs/*.
+    // Это **тот же внешний вход**, на котором живёт admin-панель: nginx
+    // в microservice_infra публикуется на host-порте 8501 и проксирует
+    // /modelline-blobs/* → http://minio:9000, поэтому presigned URL,
+    // выданный браузеру, ходит через тот же origin, что и UI.
+    // Перекрывается env-переменной PUBLIC_DOWNLOAD_BASE_URL.
+    public string PublicDownloadBaseUrl { get; set; } = "http://localhost:8501";
+
     public string AccessKey { get; set; } = "modelline";
     public string SecretKey { get; set; } = "modelline_secret";
     public string Bucket { get; set; } = "modelline-blobs";

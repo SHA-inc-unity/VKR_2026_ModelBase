@@ -5,8 +5,11 @@
 #
 # Использование:
 #   .\restart.ps1                                                 - git pull + все сервисы
+#   .\restart.ps1 -Mode noadmin                                   - git pull + все, кроме admin
+#   .\restart.ps1 -Mode onlyadmin                                 - git pull + только admin-head
 #   .\restart.ps1 -Service microservice_analitic                  - git pull + конкретный
 #   .\restart.ps1 -Service all                                    - git pull + все
+#   .\restart.ps1 -Service microservice_admin -Mode onlyadmin     - git pull + только admin-head
 #   .\restart.ps1 -Service microservice_analitic -Mode full       - core + scheduler
 #   .\restart.ps1 -Service microservice_analitic -Mode api        - только api
 #   .\restart.ps1 -Service microservice_analitic -Mode deps       - пересобрать base
@@ -16,19 +19,26 @@
 
 param(
     [string]$Service = "all",
-    [ValidateSet("core","full","api","deps","postgres","redis","")]
-    [string]$Mode = "core"
+    [ValidateSet("core","full","api","deps","postgres","redis","noadmin","onlyadmin","")]
+    [string]$Mode = "core",
+    [string]$ResultFile = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LauncherScript = $MyInvocation.MyCommand.Path
 $RepoRoot   = Split-Path -Parent $ScriptDir
 $ConfFile   = Join-Path $ScriptDir "services.conf"
 
 function Write-Info  { param($m) Write-Host "[starter] $m" -ForegroundColor Cyan   }
 function Write-Ok    { param($m) Write-Host "[starter] $m" -ForegroundColor Green  }
 function Write-Warn  { param($m) Write-Host "[starter] $m" -ForegroundColor Yellow }
-function Write-Fail  { param($m) Write-Host "[starter] ERROR: $m" -ForegroundColor Red; exit 1 }
+function Set-InvocationResult {
+    param([string]$Status)
+    if ([string]::IsNullOrWhiteSpace($ResultFile)) { return }
+    [System.IO.File]::WriteAllText($ResultFile, $Status, [System.Text.Encoding]::ASCII)
+}
+function Write-Fail  { param($m) Set-InvocationResult -Status "FAIL"; Write-Host "[starter] ERROR: $m" -ForegroundColor Red; exit 1 }
 
 if (-not (Get-Command "docker" -ErrorAction SilentlyContinue)) { Write-Fail "docker не найден." }
 docker info 2>&1 | Out-Null
@@ -48,10 +58,87 @@ function Remove-DanglingImages {
     if ($dangling) { docker image prune -f | Out-Null }
 }
 
+function Get-ServiceDirectory {
+    param([string]$Name)
+    if (-not $ServicePaths.ContainsKey($Name)) { Write-Fail "Сервис '$Name' не найден в services.conf" }
+    $svcDir = Join-Path $RepoRoot $ServicePaths[$Name]
+    if (-not (Test-Path $svcDir)) { Write-Fail "Директория не найдена: $svcDir" }
+    return $svcDir
+}
+
+function Invoke-ParallelRestartSelection {
+    param(
+        [string[]]$Services,
+        [string]$RunMode
+    )
+
+    if (-not $Services -or $Services.Count -eq 0) { return }
+
+    Write-Info ("Параллельный перезапуск: " + ($Services -join ', '))
+    $previousSkipGitPull = $env:MODELLINE_SKIP_GIT_PULL
+    $env:MODELLINE_SKIP_GIT_PULL = "1"
+
+    try {
+        $children = @()
+        foreach ($name in $Services) {
+            $resultFile = [System.IO.Path]::GetTempFileName()
+            $proc = Start-Process -FilePath "powershell.exe" `
+                -ArgumentList @(
+                    '-NoLogo',
+                    '-NoProfile',
+                    '-ExecutionPolicy', 'Bypass',
+                    '-File', $LauncherScript,
+                    '-Service', $name,
+                    '-Mode', $RunMode,
+                    '-ResultFile', $resultFile
+                ) `
+                -WorkingDirectory $ScriptDir `
+                -NoNewWindow `
+                -PassThru
+            $children += [pscustomobject]@{
+                Service = $name
+                Process = $proc
+                Result  = $resultFile
+            }
+        }
+
+        $failed = @()
+        foreach ($child in $children) {
+            try {
+                $child.Process.WaitForExit()
+
+                $result = if (Test-Path $child.Result) { (Get-Content $child.Result -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
+                if ($result -eq 'OK') {
+                    Write-Ok "[$($child.Service)] Параллельный перезапуск завершён."
+                } else {
+                    Write-Warn "[$($child.Service)] Параллельный перезапуск завершился с ошибкой."
+                    $failed += $child.Service
+                }
+            } finally {
+                Remove-Item $child.Result -ErrorAction SilentlyContinue
+            }
+        }
+
+        if ($failed.Count -gt 0) {
+            Write-Fail ("Параллельный перезапуск завершился ошибкой для: " + ($failed -join ', '))
+        }
+    } finally {
+        if ($null -eq $previousSkipGitPull) {
+            Remove-Item Env:MODELLINE_SKIP_GIT_PULL -ErrorAction SilentlyContinue
+        } else {
+            $env:MODELLINE_SKIP_GIT_PULL = $previousSkipGitPull
+        }
+    }
+}
+
 # git pull — выполняется один раз для всего репозитория
 $gitPullDone = $false
 function Invoke-GitPull {
     if ($script:gitPullDone) { return }
+    if ($env:MODELLINE_SKIP_GIT_PULL -eq "1") {
+        $script:gitPullDone = $true
+        return
+    }
     Write-Info "git pull — загружаем последние изменения..."
     Push-Location $RepoRoot
     if (Get-Command "git" -ErrorAction SilentlyContinue) {
@@ -67,9 +154,7 @@ function Invoke-GitPull {
 
 function Restart-Microservice {
     param([string]$Name, [string]$RunMode)
-    if (-not $ServicePaths.ContainsKey($Name)) { Write-Fail "Сервис '$Name' не найден в services.conf" }
-    $SvcDir = Join-Path $RepoRoot $ServicePaths[$Name]
-    if (-not (Test-Path $SvcDir)) { Write-Fail "Директория не найдена: $SvcDir" }
+    $SvcDir = Get-ServiceDirectory -Name $Name
 
     Write-Info "[$Name] Перезапуск (mode=$RunMode)..."
     Push-Location $SvcDir
@@ -85,25 +170,16 @@ function Restart-Microservice {
         try { docker image inspect $BaseTag 2>&1 | Out-Null; $baseFound = ($LASTEXITCODE -eq 0) } catch { $baseFound = $false }
     }
 
-    # Nginx port forwarding prompt (only for microservice_infra)
-    $composeProfile = @()
-    if ($Name -eq 'microservice_infra') {
-        Write-Host ""
-        $ans = Read-Host "[nginx] Включить проброс порта в хост-сеть? [Y/N]"
-        if ($ans -match '^[Yy]') {
-            $port = ''
-            while ($port -notin @('80','443')) {
-                $port = Read-Host "[nginx] Выберите порт: 80 или 443"
-            }
-            $env:NGINX_PORT = $port
-            $composeProfile = @('--profile', 'proxy')
-            Write-Info "[nginx] Nginx будет запущен на порту $port."
-        } else {
-            Write-Info "[nginx] Nginx запущен без проброса в хост-сеть."
-        }
-    }
+    # microservice_infra поднимает nginx-вход на host-порте 8501
+    # автоматически. Никаких опциональных профилей proxy: единая
+    # внешняя топология должна стартовать штатно при обычном restart.
 
     switch ($RunMode) {
+        "onlyadmin" {
+            if ($Name -ne "microservice_admin") { Write-Fail "mode=onlyadmin поддерживается только для microservice_admin" }
+            docker compose --profile online up -d --build admin-online
+            if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск admin-online провалился." }
+        }
         "deps" {
             if ($hasBase) {
                 Write-Info "[$Name] Пересборка base-образа (requirements.txt изменился)..."
@@ -111,17 +187,17 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
                 Remove-DanglingImages
             }
-            docker compose $composeProfile build
+            docker compose build
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Build провалился." }
             Remove-DanglingImages
-            docker compose $composeProfile up -d
+            docker compose up -d
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
         "api" {
             if ($hasApi) {
-                docker compose $composeProfile up -d --no-deps --build api
+                docker compose up -d --no-deps --build api
             } else {
-                docker compose $composeProfile up -d --build
+                docker compose up -d --build
             }
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск api провалился." }
         }
@@ -143,7 +219,7 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
                 Remove-DanglingImages
             }
-            docker compose $composeProfile --profile scheduler up -d --build
+            docker compose --profile scheduler up -d --build
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
         default {
@@ -153,19 +229,55 @@ function Restart-Microservice {
                 if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Сборка base провалилась." }
                 Remove-DanglingImages
             }
-            docker compose $composeProfile up -d --build
+            docker compose up -d --build
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск провалился." }
         }
     }
 
     Pop-Location
     Write-Ok "[$Name] Перезапущен."
+    Set-InvocationResult -Status "OK"
 }
 
 Invoke-GitPull
 
-if ($Service -eq "all") {
-    foreach ($svc in $ServiceOrder) { Restart-Microservice -Name $svc -RunMode $Mode }
+if ($Mode -eq "onlyadmin") {
+    if ($Service -ne "all" -and $Service -ne "microservice_admin") {
+        Write-Fail "mode=onlyadmin поддерживается только для microservice_admin"
+    }
+    Restart-Microservice -Name "microservice_admin" -RunMode "onlyadmin"
 } else {
-    Restart-Microservice -Name $Service -RunMode $Mode
+    $selectedServices = @()
+    $dispatchMode = $Mode
+
+    if ($Mode -eq "noadmin") {
+        if ($Service -ne "all") {
+            Write-Fail "mode=noadmin поддерживается только вместе с -Service all"
+        }
+        $dispatchMode = "core"
+        foreach ($svc in $ServiceOrder) {
+            if ($svc -ne "microservice_admin") { $selectedServices += $svc }
+        }
+    } elseif ($Service -eq "all") {
+        $selectedServices = @($ServiceOrder)
+    } else {
+        $selectedServices = @($Service)
+    }
+
+    if ($selectedServices.Count -gt 1) {
+        if ($selectedServices -contains "microservice_infra") {
+            Restart-Microservice -Name "microservice_infra" -RunMode $dispatchMode
+            $selectedServices = @($selectedServices | Where-Object { $_ -ne "microservice_infra" })
+        }
+
+        if ($selectedServices.Count -gt 1) {
+            Invoke-ParallelRestartSelection -Services $selectedServices -RunMode $dispatchMode
+        } elseif ($selectedServices.Count -eq 1) {
+            Restart-Microservice -Name $selectedServices[0] -RunMode $dispatchMode
+        }
+    } else {
+        foreach ($svc in $selectedServices) {
+            Restart-Microservice -Name $svc -RunMode $dispatchMode
+        }
+    }
 }

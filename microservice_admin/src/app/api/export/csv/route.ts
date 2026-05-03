@@ -4,62 +4,6 @@ import { TIMEFRAMES, makeTableName } from '@/lib/constants';
 
 export const runtime = 'nodejs';
 
-const DOWNLOAD_BUCKET_PREFIX = '/modelline-blobs/';
-
-function firstHeaderValue(value: string | null): string | null {
-  if (!value) return null;
-  const [first] = value.split(',');
-  return first?.trim() || null;
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  return host === 'localhost'
-    || host === '127.0.0.1'
-    || host === '0.0.0.0'
-    || host === '::1'
-    || host === '[::1]';
-}
-
-function isProxyFriendlyOrigin(url: URL): boolean {
-  if (!url.port) return true;
-  return (url.protocol === 'http:' && url.port === '80')
-    || (url.protocol === 'https:' && url.port === '443');
-}
-
-function getRequestOrigin(req: Request): URL {
-  const fallback = new URL(req.url);
-  const proto = firstHeaderValue(req.headers.get('x-forwarded-proto')) ?? fallback.protocol.replace(/:$/, '');
-  const host = firstHeaderValue(req.headers.get('x-forwarded-host'))
-    ?? firstHeaderValue(req.headers.get('host'))
-    ?? fallback.host;
-  return new URL(`${proto}://${host}`);
-}
-
-function normalizePresignedDownloadUrl(rawUrl: string, req: Request): string {
-  const downloadUrl = new URL(rawUrl);
-  const requestOrigin = getRequestOrigin(req);
-  const host = downloadUrl.hostname.toLowerCase();
-  const pathLooksLikeObject = downloadUrl.pathname.startsWith(DOWNLOAD_BUCKET_PREFIX);
-  const pointsToRawObjectStorage = host === 'minio'
-    || isLoopbackHost(host)
-    || downloadUrl.port === '9000';
-
-  if (pathLooksLikeObject && pointsToRawObjectStorage && isProxyFriendlyOrigin(requestOrigin)) {
-    downloadUrl.protocol = requestOrigin.protocol;
-    downloadUrl.host = requestOrigin.host;
-    return downloadUrl.toString();
-  }
-
-  if (host === 'minio' || (isLoopbackHost(host) && !isLoopbackHost(requestOrigin.hostname))) {
-    throw new Error(
-      'Download path points to an internal/local object-storage address. Configure a browser-reachable MinIO path or expose /modelline-blobs/* through the external proxy.',
-    );
-  }
-
-  return downloadUrl.toString();
-}
-
 /**
  * GET /api/export/csv
  *
@@ -67,18 +11,24 @@ function normalizePresignedDownloadUrl(rawUrl: string, req: Request): string {
  *
  * 1. Single table:
  *      ?table=<t>&start_ms=<n>&end_ms=<n>
- *    DataService exports CSV to MinIO via streaming pipe and returns
- *    { presigned_url }. We forward a browser-reachable URL as JSON; in
- *    proxy deployments the host is normalized to the current external
- *    origin while keeping the signed bucket path/query intact. The browser
- *    still downloads the object directly — zero file bytes flow through Admin.
+ *    DataService streams CSV → MinIO via pipe и возвращает
+ *    `{ presigned_url }`. Сам URL уже подписан на browser-facing
+ *    origin (внешний вход infra-nginx, по умолчанию
+ *    `http://localhost:8501`, путь `/modelline-blobs/*` проксируется
+ *    в MinIO). Admin-роут просто пробрасывает URL в JSON — байты
+ *    через admin не идут.
  *
  * 2. All-timeframes ZIP:
  *      ?symbol=<s>&timeframe=ALL&start_ms=<n>&end_ms=<n>
- *    DataService streams all per-timeframe CSVs into a ZIP via pipe →
- *    MinIO and returns { presigned_url }. Same pattern as mode 1.
+ *    DataService стримит per-timeframe CSV → ZIP через тот же
+ *    Pipe-паттерн → MinIO и возвращает `{ presigned_url }`. Маршрут
+ *    идентичен mode 1.
  *
- * No S3 SDK, no bytes in Admin memory, no Content-Length buffering.
+ * Никакого raw `localhost:9000` / `minio:9000` fallback'а: data-service
+ * сам конструирует URL с host'ом внешнего входа (env
+ * `PUBLIC_DOWNLOAD_BASE_URL`). Admin не нормализует, не подставляет
+ * текущий request origin и не пытается «починить» URL — это всегда
+ * ответственность data-service + infra-nginx.
  */
 export async function GET(req: Request) {
   try {
@@ -133,7 +83,7 @@ export async function GET(req: Request) {
         );
       }
 
-      return Response.json({ presigned_url: normalizePresignedDownloadUrl(reply.presigned_url, req) });
+      return Response.json({ presigned_url: reply.presigned_url });
     }
 
     // ── Mode 1: single-table CSV ───────────────────────────────────────────
@@ -160,11 +110,9 @@ export async function GET(req: Request) {
       );
     }
 
-    return Response.json({ presigned_url: normalizePresignedDownloadUrl(reply.presigned_url, req) });
+    return Response.json({ presigned_url: reply.presigned_url });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ error: message }, { status: 500 });
   }
 }
-
-

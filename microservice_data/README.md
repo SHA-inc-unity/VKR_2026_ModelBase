@@ -116,12 +116,19 @@ After success `GetPresignedUrlAsync` is called with `downloadFilename=
 "{symbol}_ALL.zip"` and the URL is returned. Peak RAM: ~64 KB pipe buffer +
 one 5 MB multipart part, independent of dataset size.
 
-For browser-facing deployments the preferred public download path is the
-external host root plus the signed bucket path (`/modelline-blobs/...`) behind
-nginx or another reverse proxy. Raw `http://localhost:9000` remains the
-standalone/dev fallback; the Admin export route can normalize legacy raw links
-to the current proxy origin for Dataset downloads, but direct browser clients
-should still configure `MINIO_PUBLIC_URL` to a browser-reachable origin.
+Browser-facing presigned URL подписывается на тот же внешний вход, что
+держит admin-панель — infra-nginx публикуется на host-порте 8501 и
+проксирует `/modelline-blobs/*` → `minio:9000` без потери query.
+Базовый origin берётся из env-переменной `PUBLIC_DOWNLOAD_BASE_URL`
+(default `http://localhost:8501`). Для server-to-server потребителей
+(`cmd.data.dataset.export_full` → microservice_analitic, который ходит
+из той же docker-сети) URL подписывается на внутренний `Endpoint`
+(`http://minio:9000`) — внешний proxy с container-side не доступен, но
+`minio:9000` резолвится внутри `modelline_net` напрямую.
+
+Старого fallback'а на `http://localhost:9000` как основного browser
+download path больше нет: внешняя топология единая, и admin не
+нормализует и не «чинит» URL post-factum.
 
 ### Streaming CSV export (single table)
 
@@ -154,10 +161,18 @@ Payload: `{ table, start_ms, end_ms }`. Replies with `{ presigned_url }`
    `ResponseContentDisposition: attachment; filename="<table>.csv"` and
    `ResponseContentType: text/csv`. The SDK signs against the internal
    `Minio.Endpoint` (`http://minio:9000`) which browsers can't resolve,
-   so the URL host is rewritten to `Minio.PublicUrl`
-   (`MINIO_PUBLIC_URL` env var, default `http://localhost:9000`). The
-   signature remains valid because MinIO doesn't bind SigV4 to the
-   `Host` header.
+   so the URL host is rewritten:
+   - **browser-facing экспорт** (`cmd.data.dataset.export`,
+     `detect_anomalies` report) — на `Minio.PublicDownloadBaseUrl`
+     (env `PUBLIC_DOWNLOAD_BASE_URL`, default `http://localhost:8501`),
+     это внешний вход infra-nginx, который проксирует
+     `/modelline-blobs/*` в MinIO без потери query;
+   - **server-to-server** (`cmd.data.dataset.export_full` → analitic)
+     — на внутренний `Minio.Endpoint`, потому что потребитель живёт в
+     той же docker-сети и легко резолвит `minio:9000`.
+
+   Подпись остаётся валидной, потому что MinIO не биндит SigV4 к
+   заголовку `Host`.
 
 MinIO objects live under `exports/{guid}.csv` and expire implicitly
 after 60 minutes (the presigned URL's TTL — no manual cleanup needed;

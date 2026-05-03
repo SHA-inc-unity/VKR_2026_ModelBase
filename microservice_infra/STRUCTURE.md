@@ -14,8 +14,9 @@
 
 | Файл | Описание |
 |------|----------|
-| `docker-compose.yml` | Запускает: Redpanda, Redpanda Console, MinIO, MinIO Console + init; profile `proxy` дополнительно поднимает `nginx` для внешнего `/admin/*` и `/modelline-blobs/*` |
-| `.env.example` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `REDPANDA_CONSOLE_PORT` |
+| `docker-compose.yml` | Запускает: Redpanda, Redpanda Console, MinIO, MinIO Console + init и **nginx** (всегда, без profile-флагов) — ingress/download endpoint backend/full-стека на host-порте 8501 (override через `NGINX_PORT`). `nginx` проксирует `/admin/*` → `admin:3000` и `/modelline-blobs/*` → `minio:9000`. |
+| `nginx/nginx.conf` | Конфиг nginx: `default_server`, `/admin/*` → admin:3000 (включая `/admin/api/events` SSE), `/modelline-blobs/*` → minio:9000 без буферизации (`proxy_buffering off`, `proxy_request_buffering off`, `proxy_read_timeout 3600s`, `client_max_body_size 0` — для многогигабайтных CSV/ZIP экспортов). В `noadmin` deployment этот nginx остаётся download ingress-ом backend-хоста, а отдельная remote admin-head не обязана ходить через локальный `/admin/*`. |
+| `.env.example` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `REDPANDA_CONSOLE_PORT`, `NGINX_PORT` (default `8501`) |
 | `README.md` | Описание, порты, правила использования |
 
 ---
@@ -30,7 +31,7 @@
 | `redpanda-janitor` | `redpandadata/redpanda` | — | 6-часовой sweep осиротевших `reply.*` топиков (только пустые, с HW=0); не трогает активные long-lived reply-inbox'ы |
 | `minio` | `minio/minio` | `9000` (API), `9001` (Console) | S3-совместимое хранилище для claim-check паттерна |
 | `minio-init` | `minio/mc` | — | One-shot контейнер: создаёт bucket `modelline-blobs` после старта MinIO |
-| `nginx` | `nginx:alpine` | `80` | Optional reverse proxy (profile `proxy`): `/admin/*` → admin, `/modelline-blobs/*` → MinIO без ломания signed path/query |
+| `nginx` | `nginx:1.27-alpine` | host `8501` → container `80` | Browser-facing ingress local/full стека и download ingress backend-host'а в split deployment: `/admin/*` → admin:3000 (если локальный admin поднят), `/modelline-blobs/*` → minio:9000 без ломания signed path/query. Поднимается всегда, без profile-флага. |
 
 ---
 
@@ -47,10 +48,11 @@
 | Сервис | Адрес |
 |--------|-------|
 | Kafka broker | `redpanda:29092` |
-| MinIO S3 API | `http://minio:9000` |
+| MinIO S3 API (для signing внутри сервисов) | `http://minio:9000` |
 | MinIO Console | `http://localhost:9001` |
 | Redpanda Console | `http://localhost:8080` |
-| Public claim-check download path | `http://sha-trade.tech/modelline-blobs/...` (при активном profile `proxy`) |
+| Browser-facing local/full-stack entry | `http://localhost:8501/admin/` |
+| Browser-facing claim-check download path | `http://localhost:8501/modelline-blobs/...` |
 
 ---
 
