@@ -37,6 +37,7 @@ export interface DatasetJobView {
   target_table?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  completed?: number;         // rows written (populated from completed event)
   // Local fields
   finished: boolean;
   last_update_ms: number;
@@ -104,6 +105,7 @@ export function applyJobCompleted(e: DatasetJobCompletedEvent): void {
     target_table: e.target_table ?? prev?.target_table ?? null,
     error_code: e.error_code ?? null,
     error_message: e.error_message ?? null,
+    completed: e.completed != null ? e.completed : prev?.completed,
     finished: true,
     last_update_ms: Date.now(),
   });
@@ -124,6 +126,39 @@ export function applyJobCompleted(e: DatasetJobCompletedEvent): void {
 /** Manually dismiss a finished job from the panel. */
 export function dismissJob(jobId: string): void {
   if (_jobs.delete(jobId)) rebuildSnapshot();
+}
+
+/**
+ * Seed the local store with a freshly-created queued job.
+ *
+ * Called immediately after JOBS_START returns a job_id so the UI can
+ * honestly distinguish "queued, scheduler not yet picked up" from
+ * "running" without waiting for the first SSE progress event. The
+ * record is later overwritten by {@link applyJobProgress} as soon as
+ * the scheduler dispatches the job.
+ */
+export function seedQueuedJob(args: {
+  jobId: string;
+  type: DatasetJobType;
+  target_table?: string | null;
+}): void {
+  const { jobId, type, target_table = null } = args;
+  if (!jobId) return;
+  if (_jobs.has(jobId)) return; // don't downgrade an already-running job
+  _jobs.set(jobId, {
+    job_id: jobId,
+    type,
+    status: 'queued',
+    progress: 0,
+    stage: null,
+    detail: null,
+    target_table,
+    error_code: null,
+    error_message: null,
+    finished: false,
+    last_update_ms: Date.now(),
+  });
+  rebuildSnapshot();
 }
 
 /**

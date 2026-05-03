@@ -1,6 +1,12 @@
 # shared — `modelline_shared`
 
-**Роль:** Общий Python-пакет для всех ML-микросервисов платформы (`microservice_data`, `microservice_analitic`, `microservice_admin`). Содержит контракты обмена сообщениями и Kafka-клиент.
+**Роль:** Общий Python-пакет для Python-частей платформы и локальных инструментов. Содержит контракты обмена сообщениями и messaging-утилиты; не является общим SDK для .NET- и Next.js-сервисов.
+
+## Документация для агентов
+
+- [STRUCTURE.md](STRUCTURE.md) — карта модулей пакета и shared-контрактов
+- [../docs/agents/services/shared.md](../docs/agents/services/shared.md) — профиль каталога для agent workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
 
 ## Установка (local dev)
 

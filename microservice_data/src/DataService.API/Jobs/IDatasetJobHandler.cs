@@ -42,13 +42,15 @@ public sealed class JobContext
             total, completed, failed, skipped, token);
         await _producer.PublishEventAsync(Topics.EvtDataDatasetJobProgress, new
         {
-            job_id    = Job.JobId,
-            type      = Job.Type,
+            job_id       = Job.JobId,
+            type         = Job.Type,
+            status       = "running",       // always running while a handler reports
+            target_table = Job.TargetTable,
             stage,
-            progress  = progress ?? Job.Progress,
+            progress     = progress ?? Job.Progress,
             detail,
             total, completed, failed, skipped,
-            ts        = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ts           = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         }, token);
     }
 

@@ -2,6 +2,12 @@
 
 > Обновляй этот файл при каждом изменении модулей, классов или ключевых функций.
 
+## Связанная документация
+
+- [README.md](README.md) — overview сервиса, Kafka-команды и операционные сценарии
+- [../docs/agents/services/microservice_analitic.md](../docs/agents/services/microservice_analitic.md) — профиль сервиса для agent workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
+
 ---
 
 ## Корень сервиса

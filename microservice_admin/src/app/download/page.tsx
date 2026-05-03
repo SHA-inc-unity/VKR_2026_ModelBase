@@ -7,7 +7,8 @@ import { kafkaCall, newCorrelationId } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
 import { useEvents } from '@/hooks/useEvents';
-import { applyJobProgress, applyJobCompleted, refreshActiveJobs } from '@/hooks/useDatasetJobs';
+import { applyJobProgress, applyJobCompleted, refreshActiveJobs, seedQueuedJob, useDatasetJobs } from '@/hooks/useDatasetJobs';
+import type { DatasetJobView } from '@/hooks/useDatasetJobs';
 import DatasetJobsPanel from '@/components/DatasetJobsPanel';
 import {
   SYMBOLS,
@@ -89,9 +90,22 @@ interface AllCoverageItem {
   date_to?: string;
 }
 
-type TfStatus = 'pending' | 'running' | 'done' | 'error';
+// 'pending'  — local placeholder before kafkaCall returns (or before queue insert)
+// 'queued'   — job persisted in DB, scheduler hasn't picked it up yet
+// 'running'  — scheduler dispatched it; first progress event arrived
+// 'done'/'error' — terminal
+type TfStatus = 'pending' | 'queued' | 'running' | 'done' | 'error';
 
-interface TfMeta { startedAt: number; endedAt?: number; rows?: number; }
+interface TfMeta {
+  startedAt: number;
+  runningAt?: number;
+  endedAt?: number;
+  rows?: number;
+  pct?: number;    // live job progress 0–100
+  stage?: string;  // current job stage label
+  detail?: string; // backend-provided detail for the current step
+  error?: string;  // error message for failed jobs
+}
 
 /**
  * Adaptive timeout: ~800 ms per 1 000 candles + 45 s base, capped at 10 min.
@@ -134,6 +148,26 @@ function parseTableName(table: string): { symbol: string; timeframe: string } | 
     symbol:    table.slice(0, i).toUpperCase(),
     timeframe: table.slice(i + 1),
   };
+}
+
+/** Map a running/finished job's state onto INITIAL_STAGES so IngestProgress
+ * shows correct live stage status for job-based ingest. */
+function mapJobToStages(prev: IngestStage[], job: DatasetJobView): IngestStage[] {
+  const stageOrder = ['prepare', 'fetch', 'upsert', 'compute_features'];
+  const curIdx = stageOrder.indexOf(job.stage ?? '');
+  return prev.map(s => {
+    const jobStageName =
+      s.id === 'fetch_klines' || s.id === 'fetch_funding' ||
+      s.id === 'fetch_oi'     || s.id === 'compute_rsi'
+        ? 'fetch' : s.id;
+    const sIdx = stageOrder.indexOf(jobStageName);
+    if (sIdx < 0)                return { ...s, status: 'pending' as const };
+    if (job.status === 'succeeded') return { ...s, status: 'done'  as const, progress: 100 };
+    if (job.status === 'failed') return { ...s, status: sIdx <= curIdx ? 'error' as const : 'pending' as const };
+    if (sIdx < curIdx)           return { ...s, status: 'done'  as const, progress: 100 };
+    if (jobStageName === job.stage) return { ...s, status: 'running' as const, progress: job.progress };
+    return { ...s, status: 'pending' as const };
+  });
 }
 
 function IngestProgress({ stages }: { stages: IngestStage[] }) {
@@ -183,33 +217,49 @@ function IngestProgress({ stages }: { stages: IngestStage[] }) {
   );
 }
 
+function humanizeJobStage(stage?: string | null): string {
+  switch (stage) {
+    case 'starting':
+      return 'Запуск job';
+    case 'prepare':
+      return 'Подготовка таблицы';
+    case 'fetch':
+      return 'Загрузка источников';
+    case 'fetch_klines':
+      return 'Загрузка свечей';
+    case 'fetch_funding':
+      return 'Загрузка funding';
+    case 'fetch_oi':
+      return 'Загрузка open interest';
+    case 'compute_rsi':
+      return 'Расчёт RSI';
+    case 'upsert':
+      return 'Запись в БД';
+    case 'compute_features':
+      return 'Пересчёт фич';
+    default:
+      return stage ? stage.replace(/_/g, ' ') : 'Ожидание статуса';
+  }
+}
+
 function AllIngestProgress({
   statuses,
   meta,
+  jobs,
+  jobIds,
 }: {
   statuses: Record<string, TfStatus>;
   meta:     Record<string, TfMeta>;
+  jobs:     DatasetJobView[];
+  jobIds:   Record<string, string>;
 }) {
-  // Force re-render every second while any TF is still running so
-  // elapsed-time counters update in real-time.
   const [, setTick] = useState(0);
-  const hasRunning = Object.values(statuses).some(s => s === 'running');
+  const hasActive = Object.values(statuses).some(s => s === 'running' || s === 'queued');
   useEffect(() => {
-    if (!hasRunning) return;
+    if (!hasActive) return;
     const id = setInterval(() => setTick(t => t + 1), 1_000);
     return () => clearInterval(id);
-  }, [hasRunning]);
-
-  const tfs        = Object.keys(statuses);
-  const total      = tfs.length;
-  const doneCount  = tfs.filter(tf => statuses[tf] === 'done').length;
-  const errCount   = tfs.filter(tf => statuses[tf] === 'error').length;
-  const runCount   = tfs.filter(tf => statuses[tf] === 'running').length;
-  const finished   = doneCount + errCount;
-
-  const donePct  = total > 0 ? (doneCount  / total) * 100 : 0;
-  const errPct   = total > 0 ? (errCount   / total) * 100 : 0;
-  const runPct   = total > 0 ? (runCount   / total) * 100 : 0;
+  }, [hasActive]);
 
   function fmtDur(ms: number): string {
     if (ms < 1_000) return '<1с';
@@ -219,90 +269,191 @@ function AllIngestProgress({
     return `${m}м${s}с`;
   }
 
+  const jobsById = new Map(jobs.map(job => [job.job_id, job]));
+  const rows = Object.keys(statuses).map(tf => {
+    const jobId = jobIds[tf];
+    const job = jobId ? jobsById.get(jobId) : undefined;
+    const m = meta[tf];
+    return { tf, status: statuses[tf], meta: m, job, jobId };
+  });
+
+  const runningRows = rows
+    .filter(row => row.status === 'running')
+    .sort((a, b) => (a.meta?.runningAt ?? a.meta?.startedAt ?? 0) - (b.meta?.runningAt ?? b.meta?.startedAt ?? 0));
+  const queuedRows = rows
+    .filter(row => row.status === 'queued')
+    .sort((a, b) => (a.meta?.startedAt ?? 0) - (b.meta?.startedAt ?? 0));
+  const doneRows = rows.filter(row => row.status === 'done');
+  const errorRows = rows.filter(row => row.status === 'error');
+  const recentRows = [...doneRows, ...errorRows]
+    .sort((a, b) => (b.meta?.endedAt ?? 0) - (a.meta?.endedAt ?? 0))
+    .slice(0, 6);
+
+  const stalledMs = queuedRows.length > 0 && runningRows.length === 0
+    ? Date.now() - Math.min(...queuedRows.map(row => row.meta?.startedAt ?? Date.now()))
+    : null;
+  const isStalled = stalledMs != null && stalledMs >= 15_000;
+
   return (
-    <div className="pt-2 space-y-2">
-      {/* Segmented progress bar */}
-      <div className="space-y-1">
-        <div className="relative h-2 w-full overflow-hidden rounded-full bg-muted">
-          {/* error segment (left) */}
-          <div
-            className="absolute left-0 top-0 h-full bg-destructive/80 transition-all duration-500"
-            style={{ width: `${errPct}%` }}
-          />
-          {/* done segment */}
-          <div
-            className="absolute top-0 h-full bg-primary transition-all duration-500"
-            style={{ left: `${errPct}%`, width: `${donePct}%` }}
-          />
-          {/* running shimmer */}
-          {hasRunning && (
-            <div
-              className="absolute top-0 h-full animate-pulse bg-primary/40 transition-all duration-500"
-              style={{ left: `${errPct + donePct}%`, width: `${runPct}%` }}
-            />
-          )}
+    <div className="pt-2 space-y-3">
+      <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-4">
+        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
+          <div className="text-muted-foreground">Execution slots</div>
+          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{runningRows.length} / 2</div>
         </div>
-        <div className="flex justify-between text-[10px] text-muted-foreground tabular-nums">
-          <span>
-            {runCount > 0 && `${runCount} загружается…`}
-          </span>
-          <span>
-            {finished} / {total} таймфреймов
-            {errCount > 0 && (
-              <span className="ml-1 text-destructive">({errCount} ошибок)</span>
-            )}
-          </span>
+        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
+          <div className="text-muted-foreground">Queue</div>
+          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{queuedRows.length}</div>
+        </div>
+        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
+          <div className="text-muted-foreground">Done</div>
+          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{doneRows.length}</div>
+        </div>
+        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
+          <div className="text-muted-foreground">Errors</div>
+          <div className="mt-0.5 font-semibold tabular-nums text-destructive">{errorRows.length}</div>
         </div>
       </div>
 
-      {/* Per-TF list */}
-      <div className="flex flex-col gap-1">
-        {tfs.map(tf => {
-          const st = statuses[tf];
-          const m  = meta[tf];
-          const elapsed = m
-            ? (m.endedAt ?? Date.now()) - m.startedAt
-            : undefined;
-          return (
-            <div key={tf} className="flex items-center gap-2">
-              <div className="flex-shrink-0 w-3.5 h-3.5 flex items-center justify-center">
-                {st === 'pending' && <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/30" />}
-                {st === 'running' && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />}
-                {st === 'done' && (m?.rows ?? 1) > 0 && <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />}
-                {st === 'done' && m?.rows === 0        && <AlertTriangle className="w-3.5 h-3.5 text-yellow-500" />}
-                {st === 'error'   && <XCircle          className="w-3.5 h-3.5 text-destructive" />}
+      {isStalled && (
+        <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-[11px] text-yellow-200">
+          Очередь есть, но ни один execution slot не активен уже {fmtDur(stalledMs ?? 0)}. Это похоже на stalled-state между queue и scheduler.
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <div className="text-[11px] font-medium text-foreground">Execution slots</div>
+        <div className="grid gap-2">
+          {[0, 1].map(slotIdx => {
+            const row = runningRows[slotIdx];
+            if (!row) {
+              return (
+                <div key={slotIdx} className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Slot {slotIdx + 1}</span>
+                    <span className="text-[10px] text-muted-foreground">idle</span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    {queuedRows.length > 0 ? 'Ожидает следующую queued job' : 'Нет активных ingest jobs'}
+                  </div>
+                </div>
+              );
+            }
+
+            const stage = humanizeJobStage(row.meta?.stage ?? row.job?.stage);
+            const detail = row.job?.detail ?? row.meta?.detail ?? 'Job исполняется в microservice_data';
+            const pct = row.job?.progress ?? row.meta?.pct ?? 0;
+            const elapsed = Date.now() - (row.meta?.runningAt ?? row.meta?.startedAt ?? Date.now());
+
+            return (
+              <div key={row.tf} className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Slot {slotIdx + 1}</span>
+                      <span className="text-xs font-mono text-foreground">{row.tf}</span>
+                      <span className="text-[10px] text-muted-foreground">{row.jobId ? `job ${row.jobId.slice(0, 8)}` : 'job'}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] font-medium text-foreground">{stage}</div>
+                    <div className="text-[10px] text-muted-foreground truncate">{detail}</div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="text-xs font-semibold tabular-nums text-primary">{pct}%</div>
+                    <div className="text-[10px] tabular-nums text-muted-foreground">{fmtDur(elapsed)}</div>
+                  </div>
+                </div>
+                <Progress value={pct} className="h-1" />
               </div>
-              <span className={cn(
-                'text-xs font-mono w-9 shrink-0',
-                st === 'pending' && 'text-muted-foreground',
-                st === 'running' && 'text-foreground',
-                st === 'done' && (m?.rows ?? 1) > 0 && 'text-foreground',
-                st === 'done' && m?.rows === 0 && 'text-yellow-500',
-                st === 'error'   && 'text-destructive',
-              )}>
-                {tf}
-              </span>
-              <div className="flex flex-1 items-center gap-2 min-w-0">
-                {elapsed !== undefined && (
-                  <span className="text-[10px] text-muted-foreground tabular-nums">
-                    {fmtDur(elapsed)}
-                  </span>
-                )}
-                {m?.rows !== undefined && (
-                  <span className={cn(
-                    'text-[10px] tabular-nums',
-                    m.rows === 0 ? 'text-yellow-500' : 'text-muted-foreground',
-                  )}>
-                    {m.rows.toLocaleString()} строк
-                  </span>
-                )}
-              </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
+
+      {queuedRows.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="font-medium text-foreground">Queue</span>
+            <span className="tabular-nums text-muted-foreground">{queuedRows.length} jobs</span>
+          </div>
+          <div className="rounded-md border border-border bg-muted/20 px-3 py-2.5">
+            <div className="flex flex-col gap-1.5">
+              {queuedRows.slice(0, 6).map(row => {
+                const waitMs = Date.now() - (row.meta?.startedAt ?? Date.now());
+                return (
+                  <div key={row.tf} className="flex items-center justify-between gap-2 text-[11px]">
+                    <div className="min-w-0 flex items-center gap-2">
+                      <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/60 bg-muted-foreground/20" />
+                      <span className="font-mono text-foreground">{row.tf}</span>
+                      <span className="truncate text-muted-foreground">ждёт планировщика</span>
+                    </div>
+                    <span className="shrink-0 tabular-nums text-muted-foreground">{fmtDur(waitMs)}</span>
+                  </div>
+                );
+              })}
+              {queuedRows.length > 6 && (
+                <div className="text-[10px] text-muted-foreground">+{queuedRows.length - 6} ещё в очереди</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {recentRows.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-[11px] font-medium text-foreground">Recent results</div>
+          <div className="rounded-md border border-border bg-muted/20 px-3 py-2.5">
+            <div className="flex flex-col gap-1.5">
+              {recentRows.map(row => {
+                const elapsed = row.meta?.endedAt != null
+                  ? row.meta.endedAt - (row.meta.runningAt ?? row.meta.startedAt)
+                  : undefined;
+                const isError = row.status === 'error';
+                const completedRows = row.meta?.rows ?? 0;
+                return (
+                  <div key={row.tf} className="flex items-start justify-between gap-3 text-[11px]">
+                    <div className="min-w-0 flex items-start gap-2">
+                      {isError
+                        ? <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+                        : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={cn('font-mono', isError ? 'text-destructive' : 'text-foreground')}>{row.tf}</span>
+                          {row.meta?.rows !== undefined && !isError && (
+                            <span className="tabular-nums text-muted-foreground">
+                              {completedRows > 0 ? `${completedRows.toLocaleString()} новых строк` : 'без новых строк'}
+                            </span>
+                          )}
+                        </div>
+                        <div className={cn('truncate text-[10px]', isError ? 'text-destructive/80' : 'text-muted-foreground')}>
+                          {isError ? (row.meta?.error ?? 'Job failed') : (completedRows > 0 ? 'Job завершена' : 'Дозагрузка не потребовалась')}
+                        </div>
+                      </div>
+                    </div>
+                    {elapsed !== undefined && (
+                      <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">{fmtDur(elapsed)}</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!hasActive && recentRows.length === 0 && (
+        <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2.5 text-[11px] text-muted-foreground">
+          Ingest jobs ещё не стартовали для выбранного диапазона.
+        </div>
+      )}
     </div>
   );
+}
+
+function formatIngestSuccessToast(rows?: number | null): string {
+  const completedRows = rows ?? 0;
+  return completedRows > 0
+    ? `Ingest завершён: ${completedRows.toLocaleString()} новых строк`
+    : 'Ingest завершён: новых строк не потребовалось';
 }
 
 function formatErrorHint(msg: string): string {
@@ -360,6 +511,11 @@ export default function DatasetPage() {
   const [allCoverages, setAllCoverages] = useState<AllCoverageItem[] | null>(null);
   const [allIngestStatuses, setAllIngestStatuses] = useState<Record<string, TfStatus> | null>(null);
   const [allIngestMeta,    setAllIngestMeta]    = useState<Record<string, TfMeta>>({});
+  // Maps tf → job_id for the current ALL-mode jobs-based ingest.
+  const [allIngestJobIds, setAllIngestJobIds] = useState<Record<string, string>>({});
+  const allIngestJobIdsRef = useRef<Record<string, string>>({});
+  // Job ID for single-TF job-based ingest.
+  const [ingestJobId, setIngestJobId] = useState<string | null>(null);
   const [loadingExport,  setLoadingExport]  = useState(false);
 
   // Ingest progress (staged, driven by EVT_DATA_INGEST_PROGRESS events).
@@ -369,6 +525,11 @@ export default function DatasetPage() {
 
   // Quality audit + repair (per-table, opens on row click).
   const [selectedTable,  setSelectedTable]  = useState<string | null>(null);
+
+  // Live job list (drives AllIngestProgress updates and single-TF ingest display).
+  const allJobs = useDatasetJobs();
+  // Keep ref in sync so effects can read latest allIngestJobIds without deps.
+  allIngestJobIdsRef.current = allIngestJobIds;
   const [qualityReport,  setQualityReport]  = useState<QualityReport | null>(null);
   const [loadingQuality, setLoadingQuality] = useState(false);
   const [repairStages,   setRepairStages]   = useState<RepairStage[] | null>(null);
@@ -451,6 +612,167 @@ export default function DatasetPage() {
     }, 1000);
     return () => clearInterval(id);
   }, [qualityProgress?.finished, qualityProgress?.slots]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Lock-free coverage refresh used by the job-sync effect (after ingest
+  // jobs finish) and by the pre-ingest integrity gate. Mirrors the network
+  // logic of `handleCheckCoverage` but does NOT take `operationLockRef`,
+  // so it composes safely while another operation is in progress.
+  const refreshCoverageState = async (): Promise<void> => {
+    try {
+      if (timeframe === 'ALL') {
+        const results = await Promise.all(
+          TIMEFRAMES.map(async tf => {
+            try {
+              const table = makeTableName(symbol, tf);
+              const cv = await kafkaCall<TableCoverage>(
+                Topics.CMD_DATA_DATASET_COVERAGE,
+                { table },
+              );
+              return {
+                tf,
+                rows:         cv?.rows ?? 0,
+                coverage_pct: getCoveragePct(table, cv) ?? 0,
+                date_from:    formatDateFromMs(cv?.min_ts_ms),
+                date_to:      formatDateFromMs(cv?.max_ts_ms),
+              } satisfies AllCoverageItem;
+            } catch {
+              return { tf, rows: 0, coverage_pct: 0 } satisfies AllCoverageItem;
+            }
+          }),
+        );
+        setAllCoverages(results);
+        void cacheWrite(allCoverageCacheKey(symbol), results, CACHE_COVERAGE_TTL);
+      } else {
+        const table   = makeTableName(symbol, timeframe);
+        const startMs = new Date(dateFrom).getTime();
+        const endMs   = new Date(dateTo + 'T23:59:59').getTime();
+        const cv = await kafkaCall<TableCoverage>(
+          Topics.CMD_DATA_DATASET_COVERAGE,
+          { table },
+        );
+        const stepMs = TF_STEP_MS[timeframe];
+        const expected = stepMs && endMs > startMs
+          ? Math.max(0, Math.floor((endMs - startMs) / stepMs) + 1)
+          : 0;
+        const rows = cv?.rows ?? 0;
+        const coveragePct = getCoveragePct(table, cv) ?? 0;
+        const result: CoverageResult = {
+          table_name:   table,
+          rows,
+          expected,
+          coverage_pct: coveragePct,
+          gaps: Math.max(0, expected - rows),
+        };
+        setCoverage(result);
+        void cacheWrite(coverageCacheKey(symbol, timeframe), result, CACHE_COVERAGE_TTL);
+      }
+    } catch {
+      // Best-effort: failures here are non-fatal — the user can click
+      // "Проверить покрытие" manually if numbers look off.
+    }
+  };
+
+  // ── Job sync: map live job events to per-TF status/meta and single-TF stages ──
+  useEffect(() => {
+    // ALL-mode: update per-TF statuses from job events.
+    const ids = Object.entries(allIngestJobIdsRef.current);
+    if (ids.length > 0) {
+      for (const [tf, jobId] of ids) {
+        const job = allJobs.find(j => j.job_id === jobId);
+        if (!job) continue;
+        if (job.finished) {
+          const newStatus: TfStatus = job.status === 'succeeded' ? 'done' : 'error';
+          setAllIngestStatuses(prev =>
+            !prev || prev[tf] === newStatus ? prev : { ...prev, [tf]: newStatus },
+          );
+          setAllIngestMeta(prev => {
+            const existing = prev[tf];
+            if (existing?.endedAt !== undefined) return prev;
+            return {
+              ...prev,
+              [tf]: {
+                ...(existing ?? { startedAt: Date.now() }),
+                endedAt: Date.now(),
+                rows:  job.status === 'succeeded' ? (job.completed ?? 0) : existing?.rows,
+                pct:   job.status === 'succeeded' ? 100 : existing?.pct,
+                stage: job.stage ?? existing?.stage,
+                detail: job.detail ?? existing?.detail,
+                error: job.status !== 'succeeded' ? (job.error_message ?? 'failed') : undefined,
+              },
+            };
+          });
+        } else if (job.status === 'running') {
+          // Honest transition: queued → running on first scheduler dispatch.
+          setAllIngestStatuses(prev =>
+            !prev || prev[tf] === 'running' ? prev : { ...prev, [tf]: 'running' },
+          );
+          setAllIngestMeta(prev => {
+            const m = prev[tf];
+            if (
+              m?.pct === job.progress &&
+              m?.stage === (job.stage ?? undefined) &&
+              m?.detail === (job.detail ?? undefined) &&
+              m?.runningAt !== undefined
+            ) return prev;
+            return {
+              ...prev,
+              [tf]: {
+                ...(m ?? { startedAt: Date.now() }),
+                runningAt: m?.runningAt ?? Date.now(),
+                pct: job.progress,
+                stage: job.stage ?? undefined,
+                detail: job.detail ?? undefined,
+              },
+            };
+          });
+        } else if (job.status === 'queued') {
+          // Job exists in DB queue but scheduler hasn't picked it up yet.
+          setAllIngestStatuses(prev =>
+            !prev || prev[tf] === 'queued' ? prev : { ...prev, [tf]: 'queued' },
+          );
+        }
+      }
+      // When all jobs terminal, refresh coverage and clear job IDs.
+      const allTerminal = ids.every(([, jid]) => {
+        const j = allJobs.find(x => x.job_id === jid);
+        return j?.finished === true;
+      });
+      if (allTerminal) {
+        setAllIngestJobIds({});
+        setLoadingIngest(false);
+        operationLockRef.current = false;
+        void handleListTables();
+        // Refresh actual coverage so the right-hand panel reflects DB state
+        // immediately, without requiring the user to click "Проверить покрытие".
+        void refreshCoverageState();
+      }
+    }
+
+    // Single-TF mode: update ingestStages from job progress.
+    if (ingestJobId) {
+      const job = allJobs.find(j => j.job_id === ingestJobId);
+      if (job) {
+        if (job.finished) {
+          setLoadingIngest(false);
+          operationLockRef.current = false;
+          if (job.status === 'succeeded') {
+            toast(formatIngestSuccessToast(job.completed), 'success');
+            void handleListTables();
+            void refreshCoverageState();
+          } else {
+            toast(job.error_message ?? 'Ingest failed', 'error');
+          }
+          setIngestJobId(null);
+        } else if (job.status === 'running') {
+          // Initialise the staged progress strip only once the scheduler
+          // has actually dispatched the job. This avoids the misleading
+          // "all stages pending while job sits in queue" UI.
+          setIngestStages(prev => mapJobToStages(prev ?? INITIAL_STAGES, job));
+        }
+        // queued: leave ingestStages = null so the UI shows "queued" placeholder.
+      }
+    }
+  }, [allJobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleListTables = async () => {
     if (operationLockRef.current) return;
@@ -599,135 +921,153 @@ export default function DatasetPage() {
     if (operationLockRef.current) return;
     operationLockRef.current = true;
     setLoadingIngest(true);
+    let keepIngestBusy = false;
     const t0 = Date.now();
     try {
+      // Mandatory pre-ingest integrity step: refresh actual coverage
+      // numbers BEFORE creating any jobs so the user can see the real
+      // state (and so we never blow away an existing healthy display
+      // with a fake "0 rows" skeleton). Failures are non-fatal.
+      await refreshCoverageState();
+
       if (timeframe === 'ALL') {
         const tfs = [...TIMEFRAMES] as string[];
 
-        // Initialize per-TF status dictionary.
+        // Initialize per-TF status dictionary. 'pending' = local pre-Kafka
+        // placeholder; flips to 'queued' on JOBS_START reply, then
+        // 'running' once the scheduler dispatches the job (see job-sync
+        // useEffect). Existing coverage data is intentionally preserved.
         const initialStatuses: Record<string, TfStatus> = {};
         for (const tf of tfs) initialStatuses[tf] = 'pending';
         setAllIngestStatuses(initialStatuses);
         setAllIngestMeta({});
-
-        // Seed allCoverages skeleton so the right-hand Coverage table renders
-        // immediately; each successful ingest replaces one row in place.
-        setCoverage(null);
-        setAllCoverages(tfs.map(tf => ({
-          tf,
-          rows: 0,
-          coverage_pct: 0,
-          date_from: undefined,
-          date_to: undefined,
-        })));
-
+        setAllIngestJobIds({});
         ingestCidRef.current = null;
         setIngestStages(null);
-        let totalRows = 0;
-        let successes = 0;
+
         const startMs = new Date(dateFrom).getTime();
         const endMs   = new Date(dateTo + 'T23:59:59').getTime();
+        const newJobIds: Record<string, string> = {};
 
-        const CONCURRENCY = 2;
-        for (let i = 0; i < tfs.length; i += CONCURRENCY) {
-          const batch = tfs.slice(i, i + CONCURRENCY);
-
-          // Mark every TF in this batch as running before launching.
-          setAllIngestStatuses(prev => {
-            const next = { ...(prev ?? {}) };
-            for (const tf of batch) next[tf] = 'running';
-            return next;
-          });
-          // Record startedAt for each TF in this batch.
-          const batchStartMs = Date.now();
-          setAllIngestMeta(prev => {
-            const next = { ...prev };
-            for (const tf of batch) next[tf] = { startedAt: batchStartMs };
-            return next;
-          });
-
-          const results = await Promise.allSettled(
-            batch.map(tf =>
-              kafkaCall<{ rows_ingested: number; message?: string }>(
-                Topics.CMD_DATA_DATASET_INGEST,
-                { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs },
-                { timeoutMs: calcIngestTimeout(TF_STEP_MS[tf] ?? 60_000, startMs, endMs) },
-              ).then(async res => {
-                const rows = res.rows_ingested ?? 0;
-                totalRows += rows;
-                successes++;
-                setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'done' }));
-                setAllIngestMeta(prev => ({
-                  ...prev,
-                  [tf]: { ...(prev[tf] ?? { startedAt: batchStartMs }), endedAt: Date.now(), rows },
-                }));
-
-                // Refresh just this row of the Coverage table.
-                try {
-                  const table = makeTableName(symbol, tf);
-                  const cv = await kafkaCall<TableCoverage>(
-                    Topics.CMD_DATA_DATASET_COVERAGE,
-                    { table },
-                  );
-                  const fresh = {
-                    rows:         cv?.rows ?? 0,
-                    coverage_pct: getCoveragePct(table, cv) ?? 0,
-                    date_from:    formatDateFromMs(cv?.min_ts_ms),
-                    date_to:      formatDateFromMs(cv?.max_ts_ms),
-                  };
-                  setAllCoverages(prev =>
-                    prev?.map(r => (r.tf === tf ? { ...r, ...fresh } : r)) ?? null,
-                  );
-                } catch {
-                  // Non-fatal — leave skeleton row as-is.
-                }
-              }),
-            ),
-          );
-
-          // Handle per-TF failures independently so one error doesn't abort the batch.
-          for (let j = 0; j < batch.length; j++) {
-            const result = results[j];
-            if (result.status === 'rejected') {
-              const tf  = batch[j];
-              const msg = result.reason instanceof Error ? result.reason.message : String(result.reason);
-              toast(`${tf}: ${msg}`, 'info');
+        for (const tf of tfs) {
+          try {
+            // 5s is plenty: the data-service replies synchronously after a
+            // single INSERT. A longer wait would only mask backend bugs.
+            const res = await kafkaCall<{
+              job_id?: string;
+              status?: string;
+              deduped?: boolean;
+              error?: string;
+              code?: string;
+            }>(
+              Topics.CMD_DATA_DATASET_JOBS_START,
+              {
+                type: 'ingest',
+                params: { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs },
+                target_symbol: symbol, target_timeframe: tf,
+                target_start_ms: startMs, target_end_ms: endMs,
+                created_by: 'admin_ui',
+              },
+              { timeoutMs: 5_000 },
+            );
+            // Backend returns { error, code } on validation / schema / DB
+            // errors. Treat that as a real failure for THIS TF (no fake
+            // "running" status) so ALL-mode honestly reflects what was
+            // actually started.
+            if (res.error || !res.job_id) {
+              const msg = res.error ?? 'no job_id in reply';
               setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
-              setAllIngestMeta(prev => ({
-                ...prev,
-                [tf]: { ...(prev[tf] ?? { startedAt: batchStartMs }), endedAt: Date.now() },
-              }));
+              setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now(), error: msg } }));
+              toast(`${tf}: не удалось запустить job — ${msg}`, 'info');
+              continue;
             }
+            newJobIds[tf] = res.job_id;
+            // Honest status: queued, NOT running. The scheduler hasn't
+            // necessarily picked the job up yet; the UI flips to
+            // 'running' only when the first progress event arrives.
+            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'queued' }));
+            setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now() } }));
+            seedQueuedJob({
+              jobId: res.job_id,
+              type: 'ingest',
+              target_table: makeTableName(symbol, tf),
+            });
+            if (res.deduped) toast(`${tf}: уже загружается (job deduped)`, 'info');
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
+            setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now(), error: msg } }));
+            toast(`${tf}: не удалось запустить job — ${msg}`, 'info');
           }
         }
 
-        const msg = `Ingested ${totalRows.toLocaleString()} rows across ${successes} timeframes`;
-        toast(msg, 'success');
-        addEntry({ action: 'Download', params: { symbol, timeframe: 'ALL', dateFrom, dateTo }, result: msg, durationMs: Date.now() - t0 });
-        handleListTables();
+        allIngestJobIdsRef.current = newJobIds;
+        setAllIngestJobIds(newJobIds);
+        keepIngestBusy = Object.keys(newJobIds).length > 0;
+        addEntry({
+          action: 'Download',
+          params: { symbol, timeframe: 'ALL', dateFrom, dateTo },
+          result: `Started ${Object.keys(newJobIds).length} ingest jobs`,
+          durationMs: Date.now() - t0,
+        });
+        // Coverage refresh and unlock happen in the job-sync useEffect when all jobs finish.
       } else {
-        const cid = newCorrelationId();
-        ingestCidRef.current = cid;
-        setIngestStages(INITIAL_STAGES);
         const _sMs = new Date(dateFrom).getTime();
         const _eMs = new Date(dateTo + 'T23:59:59').getTime();
-        const res = await kafkaCall<{ rows_ingested: number; message?: string }>(
-          Topics.CMD_DATA_DATASET_INGEST,
-          { symbol, timeframe, start_ms: _sMs, end_ms: _eMs },
-          { timeoutMs: calcIngestTimeout(TF_STEP_MS[timeframe] ?? 60_000, _sMs, _eMs), correlationId: cid },
+        // Don't seed INITIAL_STAGES yet — wait until job actually
+        // transitions to 'running' so we don't lie about progress.
+        setIngestStages(null);
+        const res = await kafkaCall<{
+          job_id?: string;
+          status?: string;
+          deduped?: boolean;
+          error?: string;
+          code?: string;
+        }>(
+          Topics.CMD_DATA_DATASET_JOBS_START,
+          {
+            type: 'ingest',
+            params: { symbol, timeframe, start_ms: _sMs, end_ms: _eMs },
+            target_symbol: symbol, target_timeframe: timeframe,
+            target_start_ms: _sMs, target_end_ms: _eMs,
+            created_by: 'admin_ui',
+          },
+          { timeoutMs: 5_000 },
         );
-        const msg = res.message ?? `Ingested ${res.rows_ingested ?? 0} rows`;
-        toast(msg, 'success');
-        addEntry({ action: 'Download', params: { symbol, timeframe, dateFrom, dateTo }, result: msg, durationMs: Date.now() - t0 });
-        handleListTables();
+        // Surface backend error/code instead of pretending the job started.
+        if (res.error || !res.job_id) {
+          throw new Error(res.error ?? 'no job_id in reply');
+        }
+        setIngestJobId(res.job_id);
+        seedQueuedJob({
+          jobId: res.job_id,
+          type: 'ingest',
+          target_table: makeTableName(symbol, timeframe),
+        });
+        keepIngestBusy = true;
+        if (res.deduped) {
+          toast(`Уже загружается (job ${res.job_id.slice(0, 8)}…) — deduped`, 'info');
+        } else {
+          toast(`Job в очереди (${res.job_id.slice(0, 8)}…), ожидает планировщика`, 'success');
+        }
+        addEntry({
+          action: 'Download',
+          params: { symbol, timeframe, dateFrom, dateTo },
+          result: `Job ${res.job_id.slice(0, 8)} started`,
+          durationMs: Date.now() - t0,
+        });
+        // Keep loadingIngest=true — job-sync useEffect clears it when job finishes.
+        return;
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast(msg, 'error');
       addEntry({ action: 'Download', params: { symbol, timeframe, dateFrom, dateTo }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
     } finally {
-      operationLockRef.current = false;
-      setLoadingIngest(false);
+      if (!keepIngestBusy) {
+        operationLockRef.current = false;
+        setLoadingIngest(false);
+      }
     }
   };
 
@@ -799,6 +1139,43 @@ export default function DatasetPage() {
     }
   };
 
+  const explainExportDownloadPath = (downloadUrl: string): string | null => {
+    if (typeof window === 'undefined') return null;
+
+    const isLoopbackHost = (hostname: string): boolean => {
+      const host = hostname.toLowerCase();
+      return host === 'localhost'
+        || host === '127.0.0.1'
+        || host === '0.0.0.0'
+        || host === '::1'
+        || host === '[::1]';
+    };
+
+    let target: URL;
+    try {
+      target = new URL(downloadUrl, window.location.href);
+    } catch {
+      return 'Сервер вернул некорректный download path';
+    }
+
+    const pageHost = window.location.hostname.toLowerCase();
+    const targetHost = target.hostname.toLowerCase();
+
+    if (targetHost === 'minio') {
+      return 'Download path указывает на внутренний host "minio". Нужен внешний путь /modelline-blobs/* через nginx или корректный MINIO_PUBLIC_URL.';
+    }
+
+    if (isLoopbackHost(targetHost) && !isLoopbackHost(pageHost)) {
+      return 'Download path указывает на локальный object-storage адрес. Для browser download нужен внешний маршрут /modelline-blobs/* или browser-reachable MINIO_PUBLIC_URL.';
+    }
+
+    if (target.port === '9000' && !isLoopbackHost(pageHost)) {
+      return 'Download path всё ещё использует сырой object-storage port 9000. Для внешнего браузера нужен проксируемый путь /modelline-blobs/* или внешний MINIO_PUBLIC_URL.';
+    }
+
+    return null;
+  };
+
   const handleExportCsv = async () => {
     if (operationLockRef.current) return;
     operationLockRef.current = true;
@@ -838,10 +1215,14 @@ export default function DatasetPage() {
       const { presigned_url } = await res.json() as { presigned_url?: string };
       if (!presigned_url) throw new Error('Сервер не вернул presigned_url');
 
-      // Browser downloads directly from MinIO — native progress in download panel.
+  const downloadPathIssue = explainExportDownloadPath(presigned_url);
+  if (downloadPathIssue) throw new Error(downloadPathIssue);
+
+  // Browser downloads the already prepared object directly from the returned URL.
       const a    = document.createElement('a');
       a.href     = presigned_url;
       a.download = filename;
+  a.rel      = 'noopener noreferrer';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -876,6 +1257,8 @@ export default function DatasetPage() {
         return null;
       }
       setQualityReport(res);
+      // Sync displayed coverage when the user runs an integrity check.
+      void refreshCoverageState();
       return res;
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error');
@@ -943,6 +1326,8 @@ export default function DatasetPage() {
       if (fresh) {
         setAllQualityResults(prev => (prev && table in prev) ? { ...prev, [table]: fresh } : prev);
       }
+      // Sync displayed coverage after a successful repair.
+      void refreshCoverageState();
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -1230,7 +1615,12 @@ export default function DatasetPage() {
               </Button>
             </div>
             {timeframe === 'ALL' && allIngestStatuses !== null && (
-              <AllIngestProgress statuses={allIngestStatuses} meta={allIngestMeta} />
+              <AllIngestProgress
+                statuses={allIngestStatuses}
+                meta={allIngestMeta}
+                jobs={allJobs}
+                jobIds={allIngestJobIds}
+              />
             )}
             {timeframe !== 'ALL' && ingestStages !== null && <IngestProgress stages={ingestStages} />}
             {qualityProgress !== null && (() => {

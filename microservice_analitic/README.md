@@ -4,6 +4,12 @@
 
 > **Архитектура:** Сервис работает только внутри контейнеров. Данные получает от `microservice_data` через Kafka (`cmd.data.dataset.*`). Команды управления обучением принимает через `cmd.analytics.*`. Прямого подключения к PostgreSQL нет — БД принадлежит `microservice_data`. UI: `microservice_admin` (Next.js).
 
+## Документация для агентов
+
+- [STRUCTURE.md](STRUCTURE.md) — карта backend-модулей, dataset/anomaly/model pipeline и API
+- [../docs/agents/services/microservice_analitic.md](../docs/agents/services/microservice_analitic.md) — профиль сервиса для agent workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
+
 ### Kafka-обработчики (`cmd.analytics.*`)
 
 `backend/data_client.py` поднимает `KafkaClient` сервиса `analitic` и подписывается на:

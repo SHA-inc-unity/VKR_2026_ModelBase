@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using DataService.API.Database;
+using Npgsql;
 
 namespace DataService.API.Kafka;
 
@@ -15,11 +16,22 @@ public sealed partial class KafkaConsumerService
 {
     private async Task<object> HandleJobsStartAsync(JsonElement payload, CancellationToken ct)
     {
+        // Fast precheck: if the schema is not yet ensured (DB was unreachable
+        // at startup, or service is still warming up), reply immediately with
+        // a typed error code instead of letting the caller hit a generic
+        // 10-second Kafka timeout.
+        if (!_jobsRepo.SchemaReady)
+            return new
+            {
+                error = "dataset jobs schema not ready — DB may be unreachable",
+                code  = "schema_not_ready",
+            };
+
         var type = TryGetString(payload, "type");
         if (string.IsNullOrWhiteSpace(type))
-            return new { error = "missing required field: type" };
+            return new { error = "missing required field: type", code = "bad_request" };
         if (!DatasetJobType.All.Contains(type))
-            return new { error = $"unknown job type: {type}" };
+            return new { error = $"unknown job type: {type}", code = "bad_request" };
 
         // The params subobject is opaque to Phase A — we only persist it
         // and use a stable hash for dedup. Job-type-specific schemas are
@@ -32,20 +44,47 @@ public sealed partial class KafkaConsumerService
             ? paramsElement.GetRawText()
             : "{}";
 
+        // For ingest jobs we ALWAYS know the target table from
+        // (target_symbol, target_timeframe) — derive it here so the
+        // scheduler can take a per-table lock and run ingests for
+        // different symbols/timeframes in parallel. Without this every
+        // ingest would share the same global "external_io::*" lock and
+        // serialize end-to-end.
+        var rawTargetTable    = TryGetString(payload, "target_table");
+        var rawTargetSymbol   = TryGetString(payload, "target_symbol");
+        var rawTargetTimeframe = TryGetString(payload, "target_timeframe");
+        string? effectiveTargetTable = rawTargetTable;
+        if (string.IsNullOrWhiteSpace(effectiveTargetTable)
+            && type == DatasetJobType.Ingest
+            && !string.IsNullOrWhiteSpace(rawTargetSymbol)
+            && !string.IsNullOrWhiteSpace(rawTargetTimeframe))
+        {
+            try
+            {
+                effectiveTargetTable = Dataset.DatasetCore.MakeTableName(
+                    rawTargetSymbol!, rawTargetTimeframe!);
+            }
+            catch (ArgumentException)
+            {
+                // Invalid symbol/timeframe — fall through to params-validation
+                // path which produces a typed bad_request reply.
+            }
+        }
+
         var paramsHash = ComputeParamsHash(
             type,
-            TryGetString(payload, "target_table"),
-            TryGetString(payload, "target_symbol"),
-            TryGetString(payload, "target_timeframe"),
+            effectiveTargetTable,
+            rawTargetSymbol,
+            rawTargetTimeframe,
             TryGetInt64(payload, "target_start_ms"),
             TryGetInt64(payload, "target_end_ms"),
             paramsJson);
 
         var req = new DatasetJobStartRequest(
             Type:            type,
-            TargetTable:     TryGetString(payload, "target_table"),
-            TargetSymbol:    TryGetString(payload, "target_symbol"),
-            TargetTimeframe: TryGetString(payload, "target_timeframe"),
+            TargetTable:     effectiveTargetTable,
+            TargetSymbol:    rawTargetSymbol,
+            TargetTimeframe: rawTargetTimeframe,
             TargetStartMs:   TryGetInt64(payload, "target_start_ms"),
             TargetEndMs:     TryGetInt64(payload, "target_end_ms"),
             ParamsJson:      paramsJson,
@@ -65,7 +104,41 @@ public sealed partial class KafkaConsumerService
         }
         catch (ArgumentException ax)
         {
-            return new { error = ax.Message };
+            return new { error = ax.Message, code = "bad_request" };
+        }
+        catch (InvalidOperationException iox)
+        {
+            // Schema-not-ready or "just-inserted job not found" race.
+            _log.LogError(iox, "JobsStart rejected (invalid state)");
+            return new { error = iox.Message, code = "invalid_state" };
+        }
+        catch (PostgresException px)
+        {
+            // Any other DB-level failure (constraint violation, undefined
+            // column, etc.). Reply explicitly so the caller sees the cause
+            // instead of a generic Kafka timeout.
+            _log.LogError(px,
+                "JobsStart DB error: SQLSTATE={SqlState} {Message}",
+                px.SqlState, px.MessageText);
+            return new
+            {
+                error = $"db error: {px.MessageText}",
+                code  = $"pg_{px.SqlState}",
+            };
+        }
+        catch (NpgsqlException nx)
+        {
+            _log.LogError(nx, "JobsStart connection-level DB failure");
+            return new
+            {
+                error = $"db unavailable: {nx.Message}",
+                code  = "db_unavailable",
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.LogError(ex, "JobsStart unexpected failure");
+            return new { error = ex.Message, code = "internal_error" };
         }
     }
 

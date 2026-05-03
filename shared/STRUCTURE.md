@@ -2,6 +2,12 @@
 
 > Обновляй этот файл при добавлении новых схем, топиков или утилит.
 
+## Связанная документация
+
+- [README.md](README.md) — обзор роли пакета и правил его использования
+- [../docs/agents/services/shared.md](../docs/agents/services/shared.md) — профиль каталога для agent workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
+
 ---
 
 ## Корень

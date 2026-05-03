@@ -6,14 +6,28 @@ namespace DataService.API.Dataset;
 public static class DatasetConstants
 {
     public const string BybitBaseUrl = "https://api.bybit.com";
-    public const int RequestTimeoutSeconds = 20;
-    public const int MaxRetries = 4;
+    /// <summary>Timeout for a single HTTP GET request to Bybit. Raised from 20s to 90s
+    /// so large page batches do not time out on slow uplinks.</summary>
+    public const int RequestTimeoutSeconds = 90;
+    /// <summary>Max retry attempts per Bybit HTTP call. Raised from 4 to 8 to
+    /// survive transient network hiccups and brief rate-limit storms.</summary>
+    public const int MaxRetries = 8;
     public const int PageLimitKline = 1000;
     public const int PageLimitFunding = 200;
     public const int PageLimitOpenInterest = 200;
     public const int UpsertBatchSize = 50_000;
-    public const int MaxParallelApiWorkers = 20;
+    /// <summary>Default parallel page-fetch windows per ingest call. Reduced from 20
+    /// to 8 to leave room for multiple concurrent ingest jobs on shared rate limit.</summary>
+    public const int MaxParallelApiWorkers = 8;
+    /// <summary>Max parallel windows for heavy timeframes (1m, 3m). Very low to
+    /// avoid exhausting the shared 96 r/s Bybit budget on a single large fetch.</summary>
+    public const int MaxParallelApiWorkers1m = 2;
     public const int DefaultWarmupCandles = 24;
+
+    /// <summary>Timeframes that produce very large page counts per full-range fetch
+    /// and therefore need reduced parallelism and serialized ingest scheduling.</summary>
+    public static readonly IReadOnlySet<string> HeavyTimeframes =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "1m", "3m" };
 
     /// <summary>timeframe key → (bybit_interval, step_ms)</summary>
     public static readonly IReadOnlyDictionary<string, (string Interval, long StepMs)> Timeframes =

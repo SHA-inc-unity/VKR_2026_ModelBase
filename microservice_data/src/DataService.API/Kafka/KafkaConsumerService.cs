@@ -114,6 +114,13 @@ public sealed partial class KafkaConsumerService : BackgroundService
         _log.LogInformation("KafkaConsumerService started, topics: {Topics}",
             string.Join(", ", Topics.AllConsumed));
 
+        // BackgroundService.StartAsync invokes ExecuteAsync synchronously until
+        // the first incomplete await. Without an early yield a successful
+        // subscribe drops straight into the blocking Consume() loop and holds
+        // up host startup, which delays HTTP health/readiness and other hosted
+        // services such as DatasetJobRunner.
+        await Task.Yield();
+
         // ── Resilient subscribe: retry until Redpanda is reachable ──
         await SubscribeWithRetryAsync(stoppingToken);
 
@@ -550,11 +557,9 @@ public sealed partial class KafkaConsumerService : BackgroundService
         // MinIO, and hand back a claim-check — Admin fetches and streams
         // the one archive back to the browser.
         //
-        // The ZIP itself is built in memory (ZipArchiveMode.Create needs a
-        // writable stream; seekable MemoryStream is the simplest match).
-        // For the individual CSVs we stream directly from PostgreSQL (COPY
-        // TO STDOUT) into each ZIP entry — so the only thing we buffer is
-        // the compressed ZIP output, not the raw CSV text.
+        // The ZIP archive itself is also streamed: ZipArchive writes directly
+        // into a pipe-backed writer stream while MinIO multipart-upload reads
+        // from the pipe concurrently. No MemoryStream and no full ZIP buffer.
         if (p.ValueKind == JsonValueKind.Object
             && p.TryGetProperty("tables", out var tablesEl)
             && tablesEl.ValueKind == JsonValueKind.Array)

@@ -22,6 +22,11 @@ public sealed class DatasetJobsRepository
     private readonly PostgresConnectionFactory _pg;
     private readonly ILogger<DatasetJobsRepository> _log;
 
+    // Set to true by EnsureSchemaAsync once the tables are confirmed to exist.
+    // StartAsync checks this so callers get a clear failure message if the DB
+    // was unreachable at startup rather than a cryptic "relation does not exist".
+    private volatile bool _schemaReady;
+
     public DatasetJobsRepository(PostgresConnectionFactory pg, ILogger<DatasetJobsRepository> log)
     {
         _pg  = pg;
@@ -104,6 +109,13 @@ public sealed class DatasetJobsRepository
         """;
 
     /// <summary>
+    /// True once <see cref="EnsureSchemaAsync"/> has completed. Lets Kafka
+    /// handlers reply fast with an explicit error instead of letting the
+    /// caller hit a generic timeout when the DB was unreachable at startup.
+    /// </summary>
+    public bool SchemaReady => _schemaReady;
+
+    /// <summary>
     /// Creates all jobs-tracking tables idempotently. Safe to call on every
     /// service startup.
     /// </summary>
@@ -111,6 +123,7 @@ public sealed class DatasetJobsRepository
     {
         await using var conn = await _pg.OpenAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(CreateSchemaSql, cancellationToken: ct));
+        _schemaReady = true;
         _log.LogInformation("dataset_jobs schema ensured");
     }
 
@@ -125,6 +138,11 @@ public sealed class DatasetJobsRepository
     public async Task<(DatasetJobRecord Job, bool Deduped)> StartAsync(
         DatasetJobStartRequest req, CancellationToken ct = default)
     {
+        if (!_schemaReady)
+            throw new InvalidOperationException(
+                "Dataset jobs schema is not ready — the service may still be starting up " +
+                "or the database was unreachable at startup. Check the /ready health endpoint.");
+
         if (string.IsNullOrWhiteSpace(req.Type))
             throw new ArgumentException("Job type is required", nameof(req));
         if (!DatasetJobType.All.Contains(req.Type))
@@ -135,6 +153,16 @@ public sealed class DatasetJobsRepository
         var conflictClass = DatasetJobType.ConflictClassOf(req.Type);
         var jobId = Guid.NewGuid();
 
+        // NOTE: dedup uses ON CONFLICT *index inference* — we name the
+        // (params_hash) column AND repeat the partial-index predicate so
+        // PostgreSQL matches the partial unique index
+        // uq_dataset_jobs_active_params. The "ON CONFLICT ON CONSTRAINT
+        // <name>" form does NOT work here because partial unique indexes
+        // are indexes, not constraints: that older form throws
+        // 42P10 "there is no unique or exclusion constraint matching the
+        // ON CONFLICT specification" at runtime.
+        // Both clauses (column list + WHERE) MUST match the index in
+        // EnsureSchemaAsync exactly, otherwise inference fails the same way.
         const string insertSql = """
             INSERT INTO dataset_jobs
                 (job_id, type, conflict_class, target_table, target_symbol,
@@ -143,7 +171,8 @@ public sealed class DatasetJobsRepository
             VALUES (@JobId, @Type, @ConflictClass, @TargetTable, @TargetSymbol,
                     @TargetTimeframe, @TargetStartMs, @TargetEndMs,
                     @ParamsJson::jsonb, @ParamsHash, 'queued', 0, @CreatedBy)
-            ON CONFLICT ON CONSTRAINT uq_dataset_jobs_active_params DO NOTHING
+            ON CONFLICT (params_hash) WHERE status IN ('queued', 'running')
+            DO NOTHING
             RETURNING job_id;
             """;
 

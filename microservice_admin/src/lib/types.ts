@@ -139,6 +139,8 @@ export interface DatasetJobCompletedEvent {
   type: DatasetJobType;
   status: DatasetJobStatus; // succeeded | failed | canceled | skipped
   target_table?: string | null;
+  target_timeframe?: string | null;
+  completed?: number | null;  // rows written (ingest jobs)
   error_code?: string | null;
   error_message?: string | null;
   finished_at?: string;

@@ -13,6 +13,12 @@
 Создаёт docker-сеть **`modelline_net`**, к которой подключаются остальные
 сервисы (`microservice_data`, `microservice_admin`, `microservice_analitic`).
 
+## Документация для агентов
+
+- [STRUCTURE.md](STRUCTURE.md) — карта инфраструктурных компонентов и compose-слоя
+- [../docs/agents/services/microservice_infra.md](../docs/agents/services/microservice_infra.md) — профиль сервиса для agent workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
+
 ## Nginx — маршрутизация домена
 
 Файл конфигурации: `nginx/nginx.conf`
@@ -23,6 +29,7 @@
 | `sha-trade.tech/admin`       | 301 → `/admin/`            |
 | `sha-trade.tech/admin/*`     | `http://admin:3000`        |
 | `sha-trade.tech/admin/api/events` | `http://admin:3000` (SSE, без буферизации) |
+| `sha-trade.tech/modelline-blobs/*` | `http://minio:9000` (signed object downloads, path/query сохраняются как есть) |
 
 **Требования для работы домена:**
 1. DNS A-запись `sha-trade.tech` → публичный IP сервера

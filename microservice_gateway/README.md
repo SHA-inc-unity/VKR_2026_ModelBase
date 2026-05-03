@@ -10,6 +10,14 @@ request/reply on a per-instance `reply.gateway.{instanceId}` inbox).
 
 ---
 
+## Agent Documentation
+
+- [STRUCTURE.md](STRUCTURE.md) — file/module map of the gateway
+- [../docs/agents/services/microservice_gateway.md](../docs/agents/services/microservice_gateway.md) — service profile for docs-first work
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — shared repository workflow for agents
+
+---
+
 ## Architecture
 
 ```

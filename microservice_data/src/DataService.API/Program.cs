@@ -121,20 +121,11 @@ try
         },
     });
 
-    // Phase A: ensure dataset_jobs / subtasks / stages tables exist before
-    // the Kafka consumer starts taking jobs.* requests. Idempotent.
-    using (var scope = app.Services.CreateScope())
-    {
-        var jobsRepo = scope.ServiceProvider.GetRequiredService<DatasetJobsRepository>();
-        try
-        {
-            await jobsRepo.EnsureSchemaAsync();
-        }
-        catch (Exception schemaEx)
-        {
-            Log.Error(schemaEx, "Failed to ensure dataset_jobs schema; jobs.* topics will fail until DB is reachable");
-        }
-    }
+    // Do NOT block app.Run() on jobs schema bootstrap. DatasetJobRunner owns
+    // a retry loop for EnsureSchemaAsync, while jobs.start replies with
+    // { error, code: "schema_not_ready" } until the schema is available.
+    // This keeps /health and /ready responsive during container startup even
+    // when Postgres is still warming up.
 
     app.Run();
 }

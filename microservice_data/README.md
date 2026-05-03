@@ -6,6 +6,12 @@
 **Порт:** `8100`  
 **Зависимости:** `microservice_infra` должен быть запущен первым (создаёт `modelline_net`, Redpanda, MinIO)
 
+## Документация для агентов
+
+- [STRUCTURE.md](STRUCTURE.md) — карта модулей, Kafka handlers, jobs и инфраструктурных компонентов
+- [../docs/agents/services/microservice_data.md](../docs/agents/services/microservice_data.md) — профиль сервиса для agent workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
+
 ## Kafka interface
 
 | Topic                                  | Direction | Type      | Description                                          |
@@ -109,6 +115,13 @@ a streaming multipart upload. Both tasks run concurrently via `Task.WhenAll`.
 After success `GetPresignedUrlAsync` is called with `downloadFilename=
 "{symbol}_ALL.zip"` and the URL is returned. Peak RAM: ~64 KB pipe buffer +
 one 5 MB multipart part, independent of dataset size.
+
+For browser-facing deployments the preferred public download path is the
+external host root plus the signed bucket path (`/modelline-blobs/...`) behind
+nginx or another reverse proxy. Raw `http://localhost:9000` remains the
+standalone/dev fallback; the Admin export route can normalize legacy raw links
+to the current proxy origin for Dataset downloads, but direct browser clients
+should still configure `MINIO_PUBLIC_URL` to a browser-reachable origin.
 
 ### Streaming CSV export (single table)
 
@@ -233,6 +246,114 @@ Anomaly detection fans out into ~10 parallel SQL queries internally; the
 heavy-ops cap of 4 keeps the worst case at ~40 simultaneous connections —
 well under Npgsql's default pool size of 100 — so a burst of anomaly
 requests never blocks `coverage` / `health` queries.
+
+### Background job scheduler (DatasetJobRunner)
+
+Long-running ingest and future ML tasks run as `dataset_jobs` rows picked
+up by `DatasetJobRunner` (a hosted `BackgroundService`). The scheduler
+enforces two additional concurrency levels on top of the Kafka-layer caps:
+
+**Non-blocking startup path**: service startup no longer waits for the
+Kafka consumer to enter its blocking `Consume()` loop or for
+`EnsureSchemaAsync()` to finish before `app.Run()`. `/health`, `/ready`
+and sibling hosted services come up normally even while Kafka/Postgres are
+still warming up. `DatasetJobRunner` owns the schema bootstrap retry loop
+in background; until it succeeds callers get `{ error, code:
+"schema_not_ready" }` instead of an opaque Kafka timeout.
+
+| Constraint | Value | Purpose |
+|---|---|---|
+| Max concurrent ingest jobs | 2 | Prevents Bybit rate-limit saturation across jobs |
+| Heavy-TF ingest slot | 1 | At most one `1m`/`3m` ingest runs at a time |
+
+**Per-timeframe API parallelism** inside a single ingest job:
+
+| Timeframe | `maxParallel` | Reason |
+|---|---|---|
+| `1m`, `3m` | 2 | These TFs have ~100× more pages per day; higher concurrency hits rate limits |
+| All others | 8 | Standard page counts fit well within the 96 r/s token bucket |
+
+**HTTP retry policy** (`BybitApiClient.GetJsonAsync`):
+- Up to **8 retries** (was 4).
+- HTTP 429 → waits `max(Retry-After, 5)` seconds.
+- Bybit `retCode 10006` (rate-limited) → 5–10 s random back-off.
+- Bybit `retCode 10018` (IP-banned) → 30 s wait.
+- HTTP 5xx → exponential back-off (2^n s, capped at 60 s).
+- Transient errors (`HttpRequestException`, `TaskCanceledException` with inner `TimeoutException`, `SocketException`, `IOException` wrapping `SocketException`) are all retried.
+
+**HTTP timeout**: `RequestTimeoutSeconds = 90` (was 20). This prevents
+false failures on large 1m windows where a single page request can take
+20–60 s during peak load.
+
+**Schema guard**: `DatasetJobsRepository.StartAsync` will throw if
+`EnsureSchemaAsync` did not complete successfully, preventing the runner
+from dispatching jobs to non-existent tables.
+
+**Startup recovery for broken queued jobs**: once the schema is ready, the
+runner soft-fails only structurally invalid queued rows (currently the old
+ingest shape with missing `target_table` / `target_symbol` /
+`target_timeframe`). User data is untouched; only the broken queue rows are
+translated to terminal `failed` with `error_code='invalid_queued_job'` so
+they stop blocking dedup / scheduling and can be retried cleanly.
+
+**FIFO queue picking**: the runner now acquires work through
+`PickQueuedAsync()` (`ORDER BY created_at`) instead of scanning active jobs
+in reverse chronological order, so older queued jobs are not starved by a
+steady stream of newer inserts.
+
+**`target_table` derivation for ingest jobs** (`HandleJobsStartAsync`):
+ingest jobs *must* carry a non-null `target_table` so the per-table
+`JobLockManager` key (`external_io::<table>`) is unique per (symbol, TF).
+Admin clients only send `target_symbol` + `target_timeframe`, so when the
+incoming `cmd.data.dataset.jobs.start` payload omits `target_table` and
+`type == "ingest"`, the handler fills it in via
+`DatasetCore.MakeTableName(symbol, timeframe)` **before** computing
+`params_hash`. Without this fix all ALL-mode TFs would collapse onto a
+single global lock key (`external_io::*`) and run strictly sequentially —
+the symptom was UI-visible "jobs stuck in queued" because only one of
+seven ingests held the lock and the rest waited indefinitely from the
+user's perspective.
+
+**Active-job dedup (single source of truth)**. Two callers must agree
+on the uniqueness rule for active jobs, otherwise inserts fail at runtime
+and the Kafka caller sees only a generic timeout:
+
+- *Schema* (`EnsureSchemaAsync`):
+  ```sql
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_dataset_jobs_active_params
+      ON dataset_jobs (params_hash)
+      WHERE status IN ('queued', 'running');
+  ```
+- *Insert* (`StartAsync`) uses **index inference** with the same column
+  list and predicate:
+  ```sql
+  ON CONFLICT (params_hash) WHERE status IN ('queued', 'running')
+  DO NOTHING
+  ```
+  The `ON CONFLICT ON CONSTRAINT <name>` form does **not** work on
+  partial unique indexes (Postgres treats them as indexes, not
+  constraints, and raises `42P10`). Always use index inference here.
+  Both clauses are idempotent on a clean DB and on an existing DB that
+  was already provisioned by an earlier service version.
+
+**Explicit error replies on `cmd.data.dataset.jobs.start`**. The handler
+never lets an exception escape the dispatcher (where it would be logged
+without producing a Kafka reply, leaving callers to wait out a 10 s
+timeout). It always returns one of:
+
+| Shape | When |
+|---|---|
+| `{ job_id, status, deduped, job }` | Success or dedup hit |
+| `{ error, code: "schema_not_ready" }` | DB unreachable at startup |
+| `{ error, code: "bad_request" }` | Missing/invalid `type` or arguments |
+| `{ error, code: "invalid_state" }` | Unexpected `InvalidOperationException` |
+| `{ error, code: "db_unavailable" }` | Connection-level DB failure (`NpgsqlException`) |
+| `{ error, code: "pg_<SQLSTATE>" }` | Other Postgres failure |
+| `{ error, code: "internal_error" }` | Anything else |
+
+The admin UI checks for `error`/missing `job_id` and marks that
+timeframe as `error` with the backend-provided message — `ALL` mode now
+honestly reflects which jobs were actually created.
 
 Anomaly responses are **summary-first**: the inline `sample` is capped at
 200 rows. Whenever the total exceeds the cap, the full report is parked in

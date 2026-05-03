@@ -112,6 +112,39 @@ public sealed class DatasetJobsMutator
         return await conn.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
 
+    /// <summary>
+    /// Soft-fail queued jobs that are structurally unsafe to schedule after a
+    /// restart. This intentionally targets only obviously broken rows created
+    /// by older buggy writers, so valid queued work is preserved and will run.
+    /// </summary>
+    public async Task<int> FailInvalidQueuedAsync(CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE dataset_jobs SET
+                status='failed',
+                finished_at=now(),
+                updated_at=now(),
+                error_code='invalid_queued_job',
+                error_message=CASE
+                    WHEN type='ingest' AND target_table IS NULL THEN
+                        'Queued ingest job is missing target_table after startup recovery; please retry.'
+                    ELSE
+                        'Queued job is structurally invalid after startup recovery; please retry.'
+                END
+            WHERE status='queued'
+              AND (
+                    params_hash = ''
+                 OR (type='ingest' AND (
+                        target_table IS NULL
+                     OR target_symbol IS NULL
+                     OR target_timeframe IS NULL
+                 ))
+              )
+            """;
+        await using var conn = await _pg.OpenAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
     // ── Subtasks ─────────────────────────────────────────────────────────
 
     public async Task<Guid> AddSubtaskAsync(

@@ -2,6 +2,12 @@
 
 Общий менеджер для запуска, остановки и обновления микросервисов ModelLine.
 
+## Документация для агентов
+
+- [STRUCTURE.md](STRUCTURE.md) — карта файлов, скриптов и режимов launcher-а
+- [../docs/agents/services/microservicestarter.md](../docs/agents/services/microservicestarter.md) — профиль каталога для agent workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
+
 ## Реестр сервисов
 
 `services.conf` — текстовый файл, по одному сервису на строку:
@@ -10,7 +16,12 @@
 ```
 
 Текущие сервисы:
+- `microservice_infra` — общая инфраструктура платформы
+- `microservice_data` — сервис данных и dataset jobs
+- `microservice_admin` — admin UI
 - `microservice_analitic` — аналитика и ML-модели
+- `microservice_account` — сервис аккаунтов и авторизации
+- `microservice_gateway` — mobile BFF gateway
 
 ## Быстрый старт
 

@@ -8,6 +8,14 @@ endpoint — other ModelLine services talk to it via `cmd.account.*` topics.
 
 ---
 
+## Agent Documentation
+
+- [STRUCTURE.md](STRUCTURE.md) — file/module map of the service
+- [../docs/agents/services/microservice_account.md](../docs/agents/services/microservice_account.md) — service profile for the docs-first workflow
+- [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — shared agent workflow for the repository
+
+---
+
 ## Stack
 
 | Layer | Technology |

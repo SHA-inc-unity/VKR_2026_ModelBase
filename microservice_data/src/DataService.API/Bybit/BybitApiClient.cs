@@ -29,10 +29,16 @@ public sealed class BybitApiClient
     /// GET the given URL with retry, returning the parsed JSON document.
     /// Caller must dispose the returned JsonDocument.
     ///
-    /// Phase D: requests are rate-limited via <see cref="BybitRateLimiter"/>
-    /// (default 96 r/s); HTTP 429 / 5xx trigger exponential backoff with
-    /// jitter; non-zero <c>retCode</c> in the JSON body raises
-    /// <see cref="BybitApiException"/> without retrying.
+    /// Retry policy (Phase D, hardened):
+    /// - Rate-limited via <see cref="BybitRateLimiter"/> (96 r/s token bucket).
+    /// - HTTP 429 and 5xx → transient; exponential backoff, min 3 s on 429.
+    /// - Bybit retCode 10006 (rate limit) and 10018 (IP ban) → transient with
+    ///   longer pause (5–10 s and 30 s respectively); all other non-zero retCodes
+    ///   → permanent failure, throw <see cref="BybitApiException"/> immediately.
+    /// - Network-level transient errors (SocketException, timeout-Cancel,
+    ///   HttpRequestException) → exponential back-off with jitter.
+    /// - Non-transient exceptions (user CancellationToken, auth errors, bad params)
+    ///   → propagate immediately without retry.
     /// </summary>
     public async Task<JsonDocument> GetJsonAsync(string url, CancellationToken ct = default)
     {
@@ -44,32 +50,61 @@ public sealed class BybitApiClient
             try
             {
                 response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+
+                // ── HTTP-level transient errors ───────────────────────────
                 if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
                 {
-                    response.EnsureSuccessStatusCode();
+                    var httpCode = (int)response.StatusCode;
+                    double waitSec = httpCode == 429
+                        ? Math.Max((response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(5)).TotalSeconds, 5)
+                        : Math.Pow(2, attempt) + Random.Shared.NextDouble() * 0.5;
+                    last = new HttpRequestException($"HTTP {httpCode}");
+                    _log.LogWarning("HTTP {Code} on GET {Url} (attempt {A}/{Max}); backing off {W:F1}s",
+                        httpCode, url, attempt + 1, DatasetConstants.MaxRetries, waitSec);
+                    response.Dispose(); response = null;
+                    await Task.Delay(TimeSpan.FromSeconds(waitSec), ct);
+                    continue;
                 }
+
                 response.EnsureSuccessStatusCode();
                 var doc = await JsonDocument.ParseAsync(
                     await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+
+                // ── Bybit API-level errors in JSON body ───────────────────
                 if (doc.RootElement.TryGetProperty("retCode", out var rc)
                     && rc.ValueKind == JsonValueKind.Number
                     && rc.GetInt32() != 0)
                 {
-                    var msg = doc.RootElement.TryGetProperty("retMsg", out var m) ? m.GetString() ?? "" : "";
                     var code = rc.GetInt32();
+                    var msg  = doc.RootElement.TryGetProperty("retMsg", out var m) ? m.GetString() ?? "" : "";
                     doc.Dispose();
+
+                    // Bybit rate-limit codes — treat as transient
+                    if (code == 10006 || code == 10018)
+                    {
+                        var waitSec = code == 10006 ? 5 + Random.Shared.Next(0, 5) : 30;
+                        last = new BybitApiException(code, msg);
+                        _log.LogWarning("Bybit retCode {Code} ({Msg}) on GET {Url} (attempt {A}/{Max}); waiting {W}s",
+                            code, msg, url, attempt + 1, DatasetConstants.MaxRetries, waitSec);
+                        await Task.Delay(TimeSpan.FromSeconds(waitSec), ct);
+                        continue;
+                    }
+
+                    // All other non-zero retCodes are permanent failures
                     throw new BybitApiException(code, msg);
                 }
+
                 return doc;
             }
             catch (BybitApiException) { throw; }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
+            catch (Exception ex) when (IsTransient(ex))
             {
                 last = ex;
-                _log.LogWarning(ex, "GET {Url} failed (attempt {A}/{Max})", url, attempt + 1, DatasetConstants.MaxRetries);
-                var jitterMs = Random.Shared.Next(0, 250);
-                var backoff = TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 1000 + jitterMs);
+                _log.LogWarning(ex, "Transient network error on GET {Url} (attempt {A}/{Max})",
+                    url, attempt + 1, DatasetConstants.MaxRetries);
+                var jitterMs = Random.Shared.Next(0, 500);
+                var backoff  = TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 1000 + jitterMs);
                 await Task.Delay(backoff, ct);
             }
             finally
@@ -79,6 +114,16 @@ public sealed class BybitApiClient
         }
         throw new HttpRequestException($"GET {url} failed after {DatasetConstants.MaxRetries} attempts", last);
     }
+
+    /// <summary>Returns true for network-level errors that are worth retrying.</summary>
+    private static bool IsTransient(Exception ex) => ex switch
+    {
+        HttpRequestException                                              => true,
+        TaskCanceledException { InnerException: TimeoutException }       => true,
+        System.Net.Sockets.SocketException                               => true,
+        IOException { InnerException: System.Net.Sockets.SocketException } => true,
+        _                                                                 => false,
+    };
 
     /// <summary>
     /// Fetch instrument launch time and funding interval for a symbol.

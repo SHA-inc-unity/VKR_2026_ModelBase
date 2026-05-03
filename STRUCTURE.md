@@ -34,6 +34,8 @@
 
 **Правило:** межсервисная коммуникация внутри ML-платформы — только Kafka. HTTP между сервисами запрещён. `account` и `gateway` — отдельный независимый стек (REST + JWT).
 
+`microservice_admin` остаётся полностью отделённым UI/операторским сервисом: он не исполняет jobs внутри себя, а только отправляет команды и отображает состояние jobs владельцев-микросервисов.
+
 ---
 
 ## Корень репозитория
@@ -42,6 +44,10 @@
 |---|---|
 | `README.md` | Главный README — быстрый старт, команды, описание сервисов |
 | `STRUCTURE.md` | Этот файл — карта репозитория и архитектура |
+| `AGENTS.md` | Глобальные правила агентной работы: читать Markdown до кода, обновлять Markdown после кода |
+| `promt_agent.md` | Краткий рабочий дневник агента: читать до работы, обновлять после работы |
+| `docs/agents/` | Центральная Markdown-структура для агентной разработки: workflow, карта документов, сервисные профили, change log |
+| `.github/instructions/` | File Instructions для агентного workflow внутри репозитория |
 | `.gitignore` | Git-правила: Python, .NET, Docker, IDE, OS, ML-артефакты |
 | `microservicestarter/` | Единый менеджер запуска всех сервисов |
 | `microservice_infra/` | Shared инфраструктура: Redpanda + MinIO |
@@ -51,6 +57,35 @@
 | `microservice_account/` | Auth-сервис: JWT, аккаунты (C#/.NET 8) |
 | `microservice_gateway/` | Mobile BFF Gateway (C#/.NET 8) |
 | `shared/` | Общий Python-пакет `modelline_shared` (Kafka client, schemas) |
+
+---
+
+## Агентная документация
+
+| Файл / Папка | Описание |
+|---|---|
+| `AGENTS.md` | Единая точка входа для любого агента перед чтением или изменением кода |
+| `promt_agent.md` | Краткий рабочий дневник с актуальным рабочим контекстом агента |
+| `docs/agents/README.md` | Индекс агентных Markdown-опор |
+| `docs/agents/WORKFLOW.md` | Обязательный pre-code и post-code workflow |
+| `docs/agents/DOCS_MAP.md` | Источники истины по Markdown-документам репозитория |
+| `docs/agents/CHANGE_LOG.md` | Журнал изменений, полезных для следующих агентных сессий |
+| `docs/agents/services/*.md` | Краткие сервисные профили: что читать до кода и что обновлять после кода |
+
+---
+
+## Карта документации сервисов
+
+| Сервис | Основные документы |
+|---|---|
+| `microservice_infra` | `microservice_infra/README.md` + `microservice_infra/STRUCTURE.md` + `docs/agents/services/microservice_infra.md` |
+| `microservice_data` | `microservice_data/README.md` + `microservice_data/STRUCTURE.md` + `docs/agents/services/microservice_data.md` |
+| `microservice_admin` | `microservice_admin/README.md` + `microservice_admin/STRUCTURE.md` + `docs/agents/services/microservice_admin.md` |
+| `microservice_analitic` | `microservice_analitic/README.md` + `microservice_analitic/STRUCTURE.md` + `docs/agents/services/microservice_analitic.md` |
+| `microservice_account` | `microservice_account/README.md` + `microservice_account/STRUCTURE.md` + `docs/agents/services/microservice_account.md` |
+| `microservice_gateway` | `microservice_gateway/README.md` + `microservice_gateway/STRUCTURE.md` + `docs/agents/services/microservice_gateway.md` |
+| `microservicestarter` | `microservicestarter/README.md` + `microservicestarter/STRUCTURE.md` + `docs/agents/services/microservicestarter.md` |
+| `shared` | `shared/README.md` + `shared/STRUCTURE.md` + `docs/agents/services/shared.md` |
 
 ---
 

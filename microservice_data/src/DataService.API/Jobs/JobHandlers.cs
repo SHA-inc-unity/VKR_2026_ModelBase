@@ -93,11 +93,18 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         const long fundingMs = 28_800_000L;
 
         // ── fetch (klines + funding + OI in parallel) ──────────
+        // Use a lower page-parallelism for heavy timeframes (1m, 3m) to avoid
+        // exhausting the shared Bybit rate-limit budget when multiple ingest
+        // jobs run concurrently.
+        var maxParallel = DatasetConstants.HeavyTimeframes.Contains(key)
+            ? DatasetConstants.MaxParallelApiWorkers1m
+            : DatasetConstants.MaxParallelApiWorkers;
+
         var stageFetch = await ctx.StartStageAsync("fetch");
         await ctx.ReportAsync("fetch_klines", 5, $"missing={missing.Count}, fetching market data", total: missing.Count);
 
         var klineT = _bybit.FetchKlinesAsync(
-            symbol.ToUpperInvariant(), interval, fetchStart, e, stepMs, 0, ctx.CancellationToken,
+            symbol.ToUpperInvariant(), interval, fetchStart, e, stepMs, maxParallel, ctx.CancellationToken,
             onPageDone: (done, total) =>
             {
                 if (total > 0 && done % 5 == 0)
