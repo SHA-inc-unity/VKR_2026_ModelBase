@@ -67,6 +67,7 @@ secrets.json
 # ── Docker ───────────────────────────────────────────────────────────────────
 # docker-compose overrides with local secrets (if used)
 docker-compose.override.yml
+.runtime-data/
 
 # ── ML artefacts (large binaries, regeneratable) ─────────────────────────────
 models/

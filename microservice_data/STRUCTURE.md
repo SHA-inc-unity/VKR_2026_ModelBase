@@ -55,7 +55,7 @@ skipped` (`skipped` — когда работы нет, например, нет
 | ---- | -------- |
 | `DataService.sln` | Solution-файл .NET |
 | `Dockerfile` | Multi-stage сборка: `build` → `publish` → `runtime` (ASP.NET 8) |
-| `docker-compose.yml` | Сервисы: `postgres` (порт 5433 host), `data` (порт 8100). Подключается к `modelline_net` (external). Env `PUBLIC_DOWNLOAD_BASE_URL` (default `http://localhost:8501`) — browser-facing origin для signed download path `/modelline-blobs/*`; совпадает с внешним входом infra-nginx, поэтому браузер качает CSV/ZIP с того же origin, что и admin-панель. Внутренний `MINIO_ENDPOINT=http://minio:9000` сохраняется и используется как SDK ServiceURL и для server-to-server presigned URL'ов (`cmd.data.dataset.export_full` → analitic). |
+| `docker-compose.yml` | Сервисы: `postgres` (internal only), `data` (порт 8100). Подключается к `modelline_net` (external). PostgreSQL хранит данные в repo-local bind mount `../.runtime-data/microservice_data/postgres`. Env `PUBLIC_DOWNLOAD_BASE_URL` (default `http://localhost:8501`) — browser-facing origin для signed download path `/modelline-blobs/*`; совпадает с внешним входом infra-nginx, поэтому браузер качает CSV/ZIP с того же origin, что и admin-панель. Внутренний `MINIO_ENDPOINT=http://minio:9000` сохраняется и используется как SDK ServiceURL и для server-to-server presigned URL'ов (`cmd.data.dataset.export_full` → analitic). |
 | `global.json` | Привязка SDK; `"rollForward": "latestMajor"` |
 | `.env.example` | `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGPORT`, `DATA_API_PORT`, `KAFKA_BOOTSTRAP_SERVERS`, `MINIO_*`, `PUBLIC_DOWNLOAD_BASE_URL` |
 

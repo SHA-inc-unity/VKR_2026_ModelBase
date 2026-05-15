@@ -18,7 +18,7 @@
 | ---- | -------- |
 | `AccountService.sln` | Solution-файл .NET |
 | `Dockerfile` | Контейнеризация API-сервиса |
-| `docker-compose.yml` | Локальный стек сервиса: API, PostgreSQL, Redis profile |
+| `docker-compose.yml` | Локальный стек сервиса: API, PostgreSQL, Redis profile. PostgreSQL хранит данные в repo-local bind mount `../.runtime-data/microservice_account/postgres` |
 | `global.json` | Привязка .NET SDK |
 | `README.md` | Описание сервиса, HTTP и Kafka-контракты |
 | `STRUCTURE.md` | Этот файл |

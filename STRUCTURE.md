@@ -27,8 +27,8 @@
    │                     │  │                      │  │  modelline_net)    │
    └─────────────────────┘  └──────────────────────┘  └────────────────────┘
 
-   microservice_account (.NET 8, :5010)  ─── REST (JWT auth)
-   microservice_gateway (.NET 8, :5020)  ─── Mobile BFF (HTTP routing)
+      microservice_account (.NET 8, host:7510 -> container:5000)  ─── REST (JWT auth)
+      microservice_gateway (.NET 8, host:7520 -> container:5020)  ─── Mobile BFF (HTTP routing)
 
        Local/full stack:
              Nginx (в infra, host:8501 → :80)
@@ -54,6 +54,7 @@
 | `STRUCTURE.md` | Этот файл — карта репозитория и архитектура |
 | `AGENTS.md` | Глобальные правила агентной работы: читать Markdown до кода, обновлять Markdown после кода |
 | `promt_agent.md` | Краткий рабочий дневник агента: читать до работы, обновлять после работы |
+| `.runtime-data/` | Локальные bind-mounted данные runtime для `microservice_account` и `microservice_data` (создаётся автоматически, в git не хранится) |
 | `docs/agents/` | Центральная Markdown-структура для агентной разработки: workflow, карта документов, сервисные профили, change log |
 | `.github/instructions/` | File Instructions для агентного workflow внутри репозитория |
 | `.gitignore` | Git-правила: Python, .NET, Docker, IDE, OS, ML-артефакты |
@@ -207,7 +208,7 @@
 ## microservice_account/
 
 **Стек:** C#, .NET 8, ASP.NET Core, PostgreSQL, Redis (опционально), JWT, BCrypt  
-**Порт:** `5010` → внутри контейнера `5000`  
+**Порт:** `7510` → внутри контейнера `5000`  
 **Архитектура:** Clean Architecture (Domain → Application → Infrastructure → API)
 
 ### Корень сервиса microservice_account
@@ -216,7 +217,7 @@
 | ---- | -------- |
 | `AccountService.sln` | Solution-файл .NET |
 | `Dockerfile` | Одноэтапная сборка с `dotnet publish` |
-| `docker-compose.yml` | Сервисы: `account-api`, `postgres`, `redis` (profile `with-redis`) |
+| `docker-compose.yml` | Сервисы: `account-api`, `postgres`, `redis` (profile `with-redis`). PostgreSQL хранит данные в repo-local bind mount `../.runtime-data/microservice_account/postgres` |
 | `.env.example` | `POSTGRES_*`, `DATABASE_URL`, `JWT_*`, `BCRYPT_WORK_FACTOR`, `REDIS_URL`, `INTERNAL_API_KEY` |
 | `global.json` | Привязка SDK; `"rollForward": "latestMajor"` — поддерживает SDK 10 |
 | `README.md` | Документация сервиса, эндпоинты, переменные окружения |

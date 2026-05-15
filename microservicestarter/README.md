@@ -57,6 +57,17 @@
 
 Подробная документация и таблица режимов — в корневом [README.md](../README.md).
 
+## Repo-local DB data
+
+Для `microservice_account` и `microservice_data` PostgreSQL по умолчанию
+хранит данные в каталоге репозитория, а не в Docker named volume:
+
+- `../.runtime-data/microservice_account/postgres`
+- `../.runtime-data/microservice_data/postgres`
+
+Режим `clean` у `stop.ps1` / `stop.sh` для этих сервисов удаляет и Docker
+volumes, и соответствующие каталоги внутри `.runtime-data/`.
+
 ## Режимы restart.ps1
 
 | Режим | Команда | Поведение |

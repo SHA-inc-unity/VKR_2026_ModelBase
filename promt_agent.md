@@ -50,6 +50,7 @@
 
 ### 2026-05-15
 
+- Для локального Docker runtime PostgreSQL у `microservice_account` и `microservice_data` переведён с named volumes на repo-local bind mounts: `.runtime-data/microservice_account/postgres` и `.runtime-data/microservice_data/postgres`. Launcher `stop ... clean` расширен так, чтобы для этих сервисов удалять и bind-mounted каталоги, сохраняя прежнюю семантику «полный сброс БД».
 - Для backend-only deployment скорректированы default host ports Docker Compose: `microservice_account` публикуется на `7510`, `microservice_gateway` — на `7520`. Внутренние container ports сохранены (`5000` и `5020`), а README/API docs синхронизированы под новую внешнюю схему.
 - `microservice_gateway`: реализован полный market HTTP API. Добавлена папка `Market/` с 16 production-файлами: `TimeframeMap`, `CandleCountGrid`, `ServiceResult<T>`, `MarketSettings`, `IMarketCacheService` + `RedisMarketCacheService`, `IBybitSymbolProvider` + `BybitSymbolProvider`, `IMarketConfigService` + `MarketConfigService`, `IChartService` + `ChartService`, `MarketIngestService`, `MarketController`, DTOs. Endpoints: `GET /api/v1/market/config` и `GET /api/v1/market/chart`. Redis-кэш с stampede protection, fire-and-forget Kafka ingest.
 - Исправлены дублирования из предыдущих сессий: дублирующий блок fake-классов в `GatewayTestWebAppFactory.cs`, дублирующие секции `Redis`/`Market` в `appsettings.json`.

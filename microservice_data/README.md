@@ -6,6 +6,10 @@
 **Порт:** `8100`  
 **Зависимости:** `microservice_infra` должен быть запущен первым (создаёт `modelline_net`, Redpanda, MinIO)
 
+**Локальное хранение БД:** PostgreSQL data dir смонтирован в repo-local каталог
+`../.runtime-data/microservice_data/postgres`. При запуске через
+`microservicestarter` режим `stop ... clean` удаляет и этот каталог.
+
 ## Документация для агентов
 
 - [STRUCTURE.md](STRUCTURE.md) — карта модулей, Kafka handlers, jobs и инфраструктурных компонентов

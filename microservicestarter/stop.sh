@@ -36,6 +36,24 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     SERVICE_PATHS["$svc_name"]="$svc_path"
 done < "$CONF"
 
+get_bind_mount_data_paths() {
+    case "$1" in
+        microservice_account) printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/postgres" ;;
+        microservice_data) printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_data/postgres" ;;
+    esac
+}
+
+remove_bind_mount_data_paths() {
+    local name="$1"
+    while IFS= read -r data_path; do
+        [[ -z "$data_path" ]] && continue
+        if [[ -e "$data_path" ]]; then
+            rm -rf "$data_path"
+            success "[$name] Удалён каталог данных: $data_path"
+        fi
+    done < <(get_bind_mount_data_paths "$name")
+}
+
 stop_service() {
     local name="$1"
     local mode="${2:-stop}"
@@ -49,10 +67,11 @@ stop_service() {
 
     case "$mode" in
         clean)
-            warn "[$name] ВНИМАНИЕ: будут удалены все volumes (БД, модели)!"
+            warn "[$name] ВНИМАНИЕ: будут удалены volumes и repo-local data (БД, модели)!"
             read -rp "Подтвердите (yes/no): " CONFIRM
             [[ "$CONFIRM" == "yes" ]] || { echo "Отменено."; popd > /dev/null; return; }
             docker compose --profile scheduler down --volumes --remove-orphans
+            remove_bind_mount_data_paths "$name"
             success "[$name] Остановлен, volumes удалены."
             ;;
         prune)

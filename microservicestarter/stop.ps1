@@ -40,6 +40,15 @@ Get-Content $ConfFile | ForEach-Object {
     if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1]; $script:ServiceOrder += $parts[0] }
 }
 
+function Get-BindMountDataPaths {
+    param([string]$Name)
+    switch ($Name) {
+        "microservice_account" { return @((Join-Path $RepoRoot ".runtime-data\microservice_account\postgres")) }
+        "microservice_data"    { return @((Join-Path $RepoRoot ".runtime-data\microservice_data\postgres")) }
+        default                 { return @() }
+    }
+}
+
 function Stop-Microservice {
     param([string]$Name, [string]$RunMode)
     if (-not $ServicePaths.ContainsKey($Name)) { Write-Fail "Сервис '$Name' не найден в services.conf" }
@@ -51,10 +60,16 @@ function Stop-Microservice {
 
     switch ($RunMode) {
         "clean" {
-            Write-Warn "[$Name] ВНИМАНИЕ: будут удалены все volumes (БД, модели)!"
+            Write-Warn "[$Name] ВНИМАНИЕ: будут удалены volumes и repo-local data (БД, модели)!"
             $confirm = Read-Host "Подтвердите (yes/no)"
             if ($confirm -ne "yes") { Write-Host "Отменено."; Pop-Location; return }
             docker compose --profile scheduler down --volumes --remove-orphans
+            foreach ($dataPath in (Get-BindMountDataPaths -Name $Name)) {
+                if (Test-Path $dataPath) {
+                    Remove-Item $dataPath -Recurse -Force
+                    Write-Ok "[$Name] Удалён каталог данных: $dataPath"
+                }
+            }
             Write-Ok "[$Name] Остановлен, volumes удалены."
         }
         "prune" {

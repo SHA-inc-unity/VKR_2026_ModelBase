@@ -43,7 +43,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - type: bind
+        source: ../.runtime-data/microservice_account/postgres
+        target: /var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-account_service}"]
       interval: 10s
@@ -70,7 +72,6 @@ services:
       - account_net
 
 volumes:
-  postgres_data:
   redis_data:
 
 networks:

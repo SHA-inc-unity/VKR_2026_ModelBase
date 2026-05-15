@@ -19,7 +19,9 @@ services:
       POSTGRES_USER: ${PGUSER:-postgres}
       POSTGRES_PASSWORD: ${PGPASSWORD:-postgres}
     volumes:
-      - data_postgres_data:/var/lib/postgresql/data
+      - type: bind
+        source: ../.runtime-data/microservice_data/postgres
+        target: /var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres} -d ${PGDATABASE:-crypt_date}"]
       interval: 10s
@@ -60,9 +62,6 @@ services:
     networks:
       - data_internal_net   # postgres access
       - modelline_net       # Kafka + MinIO access
-
-volumes:
-  data_postgres_data:
 
 networks:
   # Internal-only network: only postgres and data containers join it.

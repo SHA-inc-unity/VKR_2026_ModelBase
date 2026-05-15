@@ -10,6 +10,8 @@
 
 ### 2026-05-15
 
+- `microservice_account` + `microservice_data` + `microservicestarter`: локальное хранение PostgreSQL переведено с Docker named volumes на repo-local bind mounts. Теперь `account` пишет в `.runtime-data/microservice_account/postgres`, а `data` — в `.runtime-data/microservice_data/postgres`. Одновременно `stop ... clean` в launcher-е расширен: для этих сервисов он удаляет и bind-mounted каталоги, чтобы семантика «сбросить БД» сохранилась.
+
 - `microservice_account` + `microservice_gateway`: для Docker Compose изменены default host ports backend-only схемы. `account` теперь публикуется как `${ACCOUNT_API_PORT:-7510}:5000`, `gateway` — как `${GATEWAY_API_PORT:-7520}:5020`. Сервисные README и frontend API reference синхронизированы под новые внешние порты; внутренние container ports не менялись.
 
 - `microservice_gateway`: добавлен отдельный `API.md` как frontend-oriented HTTP contract reference. В одном месте собраны base URL, auth model, общие соглашения JSON/header/time formats, error contract, degraded/pending semantics, детальные описания endpoint-ов (`bootstrap`, `account/me`, `dashboard`, `market/config`, `market/chart`, `news`, `notifications`, `health`) и примеры wire-format ответов. Одновременно README/STRUCTURE и agent-doc route обновлены так, чтобы `API.md` стал обязательной опорой перед изменением gateway API.

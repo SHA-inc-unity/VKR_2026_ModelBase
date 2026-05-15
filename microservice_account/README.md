@@ -125,6 +125,11 @@ docker compose up -d
 docker compose --profile with-redis up -d
 ```
 
+Локальные данные PostgreSQL хранятся в repo-local каталоге
+`../.runtime-data/microservice_account/postgres`, а не в Docker named volume.
+Если запускать через `microservicestarter`, команда `stop ... clean` удаляет
+и этот каталог тоже.
+
 ### 4. Run locally (without Docker)
 
 ```bash
