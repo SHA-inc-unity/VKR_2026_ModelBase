@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =============================================================================
 # microservicestarter — start.sh
 #
@@ -85,6 +85,35 @@ get_service_directory() {
     echo "$svc_dir"
 }
 
+get_bind_mount_data_paths() {
+    case "$1" in
+        microservice_account)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/postgres"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/redis"
+            ;;
+        microservice_data)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_data/postgres"
+            ;;
+        microservice_analitic)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_analitic/redis"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_analitic/models"
+            ;;
+        microservice_infra)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_infra/redpanda"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_infra/minio"
+            ;;
+    esac
+}
+
+prepare_bind_mount_data_paths() {
+    local name="$1"
+    while IFS= read -r data_path; do
+        [[ -z "$data_path" ]] && continue
+        mkdir -p "$data_path"
+        chmod -R a+rwX "$data_path" 2>/dev/null || true
+    done < <(get_bind_mount_data_paths "$name")
+}
+
 prepare_start_selection() {
     local name svc_dir
     for name in "$@"; do
@@ -104,7 +133,7 @@ run_parallel_start_selection() {
     local -a names=()
     local svc
     for svc in "${services[@]}"; do
-        "$SCRIPT_DIR/start.sh" "$svc" "$mode" &
+        bash "$SCRIPT_DIR/start.sh" "$svc" "$mode" &
         pids+=("$!")
         names+=("$svc")
     done
@@ -136,6 +165,7 @@ start_service() {
     pushd "$svc_dir" > /dev/null
 
     initialize_env "$name" "$svc_dir"
+    prepare_bind_mount_data_paths "$name"
 
     # Сборка base-образа только если compose-файл содержит сервис 'base'
     if grep -qE '^  base:' docker-compose.yml 2>/dev/null; then

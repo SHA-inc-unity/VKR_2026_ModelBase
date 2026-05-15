@@ -238,6 +238,10 @@ Runtime-данные stateful Docker-сервисов по умолчанию х
 `microservicestarter stop ... clean` для этих сервисов удаляет и Docker
 volumes, и соответствующие каталоги внутри `.runtime-data/`.
 
+На Linux launcher (`start.sh` / `restart.sh`) дополнительно сам создаёт эти
+каталоги перед `docker compose up` и нормализует права записи для bind mounts,
+чтобы stateful контейнеры корректно стартовали на свежем сервере.
+
 ---
 
 ## Добавление нового микросервиса

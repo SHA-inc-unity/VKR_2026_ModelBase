@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =============================================================================
 # microservicestarter — restart.sh
 #
@@ -52,6 +52,35 @@ get_service_directory() {
     echo "$svc_dir"
 }
 
+get_bind_mount_data_paths() {
+    case "$1" in
+        microservice_account)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/postgres"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/redis"
+            ;;
+        microservice_data)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_data/postgres"
+            ;;
+        microservice_analitic)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_analitic/redis"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_analitic/models"
+            ;;
+        microservice_infra)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_infra/redpanda"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_infra/minio"
+            ;;
+    esac
+}
+
+prepare_bind_mount_data_paths() {
+    local name="$1"
+    while IFS= read -r data_path; do
+        [[ -z "$data_path" ]] && continue
+        mkdir -p "$data_path"
+        chmod -R a+rwX "$data_path" 2>/dev/null || true
+    done < <(get_bind_mount_data_paths "$name")
+}
+
 # ── git pull (выполняется один раз на весь репозиторий) ────────────────────
 git_pull_done=0
 do_git_pull() {
@@ -83,7 +112,7 @@ run_parallel_restart_selection() {
     local -a names=()
     local svc
     for svc in "${services[@]}"; do
-        MODELLINE_SKIP_GIT_PULL=1 "$SCRIPT_DIR/restart.sh" "$svc" "$mode" &
+        MODELLINE_SKIP_GIT_PULL=1 bash "$SCRIPT_DIR/restart.sh" "$svc" "$mode" &
         pids+=("$!")
         names+=("$svc")
     done
@@ -110,6 +139,7 @@ restart_service() {
 
     info "[$name] Перезапуск (mode=$mode)..."
     pushd "$svc_dir" > /dev/null
+    prepare_bind_mount_data_paths "$name"
 
     local base_tag="${name}-base:latest"
     local compose_content

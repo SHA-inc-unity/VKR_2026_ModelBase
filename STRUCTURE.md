@@ -107,9 +107,9 @@
 | Файл | Описание |
 | ---- | -------- |
 | `services.conf` | Реестр сервисов: `имя  относительный_путь` (по одному на строку) |
-| `start.ps1` / `start.sh` | Запуск сервисов. При первом запуске создаёт `.env` и запрашивает пароль PostgreSQL. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `scheduler`, `build`, `logs`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах сначала синхронно стартует `microservice_infra`, затем остальные сервисы уходят в параллельный fan-out. |
+| `start.ps1` / `start.sh` | Запуск сервисов. При первом запуске создаёт `.env` и запрашивает пароль PostgreSQL. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `scheduler`, `build`, `logs`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах сначала синхронно стартует `microservice_infra`, затем остальные сервисы уходят в параллельный fan-out. Linux-версия перед стартом создаёт `.runtime-data` bind-mount каталоги и нормализует права записи. |
 | `stop.ps1` / `stop.sh` | Остановка контейнеров. Режимы: `stop` (default), `clean` (удалить volumes и repo-local runtime data), `prune` (удалить образы). |
-| `restart.ps1` / `restart.sh` | `git pull` + пересборка + перезапуск. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `deps`, `api`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах делает один `git pull`, затем синхронно поднимает `microservice_infra` и fan-out перезапускает остальные сервисы параллельно. После сборки удаляет dangling-образы. |
+| `restart.ps1` / `restart.sh` | `git pull` + пересборка + перезапуск. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `deps`, `api`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах делает один `git pull`, затем синхронно поднимает `microservice_infra` и fan-out перезапускает остальные сервисы параллельно. После сборки удаляет dangling-образы. Linux-версия перед стартом создаёт `.runtime-data` bind-mount каталоги и нормализует права записи. |
 | `update.ps1` / `update.sh` | Только `git pull` без рестарта контейнеров. |
 | `status.ps1` / `status.sh` | Показывает `docker compose ps` для каждого сервиса. |
 

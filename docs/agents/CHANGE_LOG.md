@@ -10,6 +10,8 @@
 
 ### 2026-05-15
 
+- `microservicestarter`: Linux launcher hardened for repo-local runtime storage. `start.sh` and `restart.sh` now pre-create `.runtime-data` bind-mount directories and relax write permissions before `docker compose up`, so non-root containers like `redpanda` can start on a fresh Linux server. Parallel child restarts/starts now invoke `bash .../start.sh` and `bash .../restart.sh` explicitly instead of relying on executable shebang handling.
+
 - `microservice_infra` + `microservice_analitic` + `microservice_account` + `microservicestarter`: оставшиеся stateful Docker volumes переведены на repo-local bind mounts в `.runtime-data/`. Теперь Redpanda пишет в `.runtime-data/microservice_infra/redpanda`, MinIO — в `.runtime-data/microservice_infra/minio`, `microservice_analitic` хранит Redis и models в `.runtime-data/microservice_analitic/{redis,models}`, а profile `with-redis` у `microservice_account` использует `.runtime-data/microservice_account/redis`. `stop ... clean` в launcher-е расширен под эти каталоги, чтобы полный сброс по-прежнему удалял и volumes, и repo-local runtime data.
 
 - `microservice_account` + `microservice_data` + `microservicestarter`: локальное хранение PostgreSQL переведено с Docker named volumes на repo-local bind mounts. Теперь `account` пишет в `.runtime-data/microservice_account/postgres`, а `data` — в `.runtime-data/microservice_data/postgres`. Одновременно `stop ... clean` в launcher-е расширен: для этих сервисов он удаляет и bind-mounted каталоги, чтобы семантика «сбросить БД» сохранилась.
