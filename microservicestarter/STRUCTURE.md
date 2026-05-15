@@ -18,7 +18,7 @@
 | ---- | -------- |
 | `services.conf` | Реестр сервисов, который читают все launcher-скрипты |
 | `start.sh` / `start.ps1` | Запуск всех или выбранных сервисов. Поддерживают `core`, `noadmin`, `onlyadmin`, `full`, `scheduler`, `build`, `logs`. Для multi-service запуска сначала поднимают `microservice_infra`, затем fan-out запускают остальные сервисы параллельно. |
-| `stop.sh` / `stop.ps1` | Остановка сервисов, clean/prune режимы. `clean` для `microservice_account` и `microservice_data` удаляет не только Docker volumes, но и repo-local PostgreSQL каталоги в `../.runtime-data/` |
+| `stop.sh` / `stop.ps1` | Остановка сервисов, clean/prune режимы. `clean` для stateful сервисов удаляет не только Docker volumes, но и repo-local runtime-каталоги в `../.runtime-data/` (`microservice_infra`, `microservice_account`, `microservice_data`, `microservice_analitic`) |
 | `restart.sh` / `restart.ps1` | `git pull` + пересборка + перезапуск. Поддерживают `core`, `noadmin`, `onlyadmin`, `full`, `deps`, `api`. Для multi-service режима сначала синхронно обновляют/поднимают `microservice_infra`, потом перезапускают остальные сервисы параллельно; `git pull` выполняется один раз до fan-out. |
 | `update.sh` / `update.ps1` | Только `git pull`, без рестарта контейнеров |
 | `status.sh` / `status.ps1` | Сводка по состоянию compose-стеков |
@@ -49,5 +49,5 @@
 - изменение split-deployment режимов `noadmin` и `onlyadmin`
 - изменение аргументов PowerShell или shell-версий скриптов
 - изменение договорённостей по `.env`, Docker Compose и lifecycle launcher-а
-- изменение того, где хранятся repo-local данные PostgreSQL и как `clean` их удаляет
+- изменение того, где хранятся repo-local runtime-данные сервисов и как `clean` их удаляет
 - изменение того, какие host-порты публикуются обычным `start` и split-режимами (`local/full` — `8501` от infra-nginx; `onlyadmin` — `8501` от `admin-online` на отдельном хосте)

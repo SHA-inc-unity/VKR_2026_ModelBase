@@ -47,7 +47,9 @@ services:
       - "9092:9092"
       - "9644:9644"
     volumes:
-      - redpanda_data:/var/lib/redpanda/data
+      - type: bind
+        source: ../.runtime-data/microservice_infra/redpanda
+        target: /var/lib/redpanda/data
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 10s
@@ -155,7 +157,9 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio_data:/data
+      - type: bind
+        source: ../.runtime-data/microservice_infra/minio
+        target: /data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -208,10 +212,6 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
       - modelline_net
-
-volumes:
-  redpanda_data:
-  minio_data:
 
 networks:
   modelline_net:

@@ -38,8 +38,21 @@ done < "$CONF"
 
 get_bind_mount_data_paths() {
     case "$1" in
-        microservice_account) printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/postgres" ;;
-        microservice_data) printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_data/postgres" ;;
+        microservice_account)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/postgres"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/redis"
+            ;;
+        microservice_data)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_data/postgres"
+            ;;
+        microservice_analitic)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_analitic/redis"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_analitic/models"
+            ;;
+        microservice_infra)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_infra/redpanda"
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_infra/minio"
+            ;;
     esac
 }
 
@@ -67,7 +80,7 @@ stop_service() {
 
     case "$mode" in
         clean)
-            warn "[$name] ВНИМАНИЕ: будут удалены volumes и repo-local data (БД, модели)!"
+            warn "[$name] ВНИМАНИЕ: будут удалены volumes и repo-local runtime data!"
             read -rp "Подтвердите (yes/no): " CONFIRM
             [[ "$CONFIRM" == "yes" ]] || { echo "Отменено."; popd > /dev/null; return; }
             docker compose --profile scheduler down --volumes --remove-orphans

@@ -240,6 +240,16 @@ chmod +x microservicestarter/start.sh microservicestarter/stop.sh microservicest
 | `clean`  | Остановить + **удалить volumes** (БД и модели!)         |
 | `prune`  | Остановить + удалить образы (освобождает место на диске)|
 
+## Repo-local runtime data
+
+Docker runtime-данные аналитики хранятся внутри репозитория:
+
+- `../.runtime-data/microservice_analitic/redis`
+- `../.runtime-data/microservice_analitic/models`
+
+`.runtime-data/` исключён из git, а `microservicestarter stop ... clean`
+удаляет и эти каталоги вместе с Docker volumes сервиса.
+
 ---
 
 ## Scheduler — автоматическое переобучение

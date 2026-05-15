@@ -54,7 +54,7 @@
 | `STRUCTURE.md` | Этот файл — карта репозитория и архитектура |
 | `AGENTS.md` | Глобальные правила агентной работы: читать Markdown до кода, обновлять Markdown после кода |
 | `promt_agent.md` | Краткий рабочий дневник агента: читать до работы, обновлять после работы |
-| `.runtime-data/` | Локальные bind-mounted данные runtime для `microservice_account` и `microservice_data` (создаётся автоматически, в git не хранится) |
+| `.runtime-data/` | Локальные bind-mounted runtime-данные stateful сервисов (`microservice_infra`, `microservice_account`, `microservice_data`, `microservice_analitic`) — создаётся автоматически, в git не хранится |
 | `docs/agents/` | Центральная Markdown-структура для агентной разработки: workflow, карта документов, сервисные профили, change log |
 | `.github/instructions/` | File Instructions для агентного workflow внутри репозитория |
 | `.gitignore` | Git-правила: Python, .NET, Docker, IDE, OS, ML-артефакты |
@@ -108,7 +108,7 @@
 | ---- | -------- |
 | `services.conf` | Реестр сервисов: `имя  относительный_путь` (по одному на строку) |
 | `start.ps1` / `start.sh` | Запуск сервисов. При первом запуске создаёт `.env` и запрашивает пароль PostgreSQL. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `scheduler`, `build`, `logs`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах сначала синхронно стартует `microservice_infra`, затем остальные сервисы уходят в параллельный fan-out. |
-| `stop.ps1` / `stop.sh` | Остановка контейнеров. Режимы: `stop` (default), `clean` (удалить volumes), `prune` (удалить образы). |
+| `stop.ps1` / `stop.sh` | Остановка контейнеров. Режимы: `stop` (default), `clean` (удалить volumes и repo-local runtime data), `prune` (удалить образы). |
 | `restart.ps1` / `restart.sh` | `git pull` + пересборка + перезапуск. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `deps`, `api`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах делает один `git pull`, затем синхронно поднимает `microservice_infra` и fan-out перезапускает остальные сервисы параллельно. После сборки удаляет dangling-образы. |
 | `update.ps1` / `update.sh` | Только `git pull` без рестарта контейнеров. |
 | `status.ps1` / `status.sh` | Показывает `docker compose ps` для каждого сервиса. |
@@ -141,7 +141,7 @@
 
 | Файл | Описание |
 | ---- | -------- |
-| `docker-compose.yml` | Определяет сервисы `base` (profile `build-base`), `api`, `scheduler` (profile `scheduler`), `postgres`, `redis` (profile `with-redis`) |
+| `docker-compose.yml` | Определяет сервисы `base` (profile `build-base`), `api`, `scheduler` (profile `scheduler`), `postgres`, `redis` (profile `with-redis`). Docker runtime-данные сервиса хранятся в repo-local bind mounts `.runtime-data/microservice_analitic/{models,redis}` |
 | `Dockerfile.base` | Базовый образ Python с зависимостями (requirements.txt) |
 | `Dockerfile.api` | FastAPI-сервер; FROM base |
 | `.env.example` | Шаблон конфига: `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `API_HOST/PORT`, `SCHEDULER_*` |
@@ -217,7 +217,7 @@
 | ---- | -------- |
 | `AccountService.sln` | Solution-файл .NET |
 | `Dockerfile` | Одноэтапная сборка с `dotnet publish` |
-| `docker-compose.yml` | Сервисы: `account-api`, `postgres`, `redis` (profile `with-redis`). PostgreSQL хранит данные в repo-local bind mount `../.runtime-data/microservice_account/postgres` |
+| `docker-compose.yml` | Сервисы: `account-api`, `postgres`, `redis` (profile `with-redis`). PostgreSQL хранит данные в repo-local bind mount `../.runtime-data/microservice_account/postgres`, а Redis profile — в `../.runtime-data/microservice_account/redis` |
 | `.env.example` | `POSTGRES_*`, `DATABASE_URL`, `JWT_*`, `BCRYPT_WORK_FACTOR`, `REDIS_URL`, `INTERNAL_API_KEY` |
 | `global.json` | Привязка SDK; `"rollForward": "latestMajor"` — поддерживает SDK 10 |
 | `README.md` | Документация сервиса, эндпоинты, переменные окружения |

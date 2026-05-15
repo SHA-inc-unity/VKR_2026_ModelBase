@@ -15,7 +15,9 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - type: bind
+        source: ../.runtime-data/microservice_analitic/redis
+        target: /data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -37,7 +39,9 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
-      - models_data:/app/models
+      - type: bind
+        source: ../.runtime-data/microservice_analitic/models
+        target: /app/models
       - ./logs:/app/logs
     depends_on:
       redis:
@@ -57,7 +61,9 @@ services:
       SCHEDULER_AUTOSTART: "false"
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
     volumes:
-      - models_data:/app/models
+      - type: bind
+        source: ../.runtime-data/microservice_analitic/models
+        target: /app/models
     depends_on:
       redis:
         condition: service_healthy
@@ -83,11 +89,6 @@ services:
   #     - mlflow_data:/mlflow
   #   networks:
   #     - modelline_net
-
-volumes:
-  redis_data:
-  models_data:
-  # mlflow_data:
 
 networks:
   modelline_net:

@@ -10,6 +10,8 @@
 
 ### 2026-05-15
 
+- `microservice_infra` + `microservice_analitic` + `microservice_account` + `microservicestarter`: оставшиеся stateful Docker volumes переведены на repo-local bind mounts в `.runtime-data/`. Теперь Redpanda пишет в `.runtime-data/microservice_infra/redpanda`, MinIO — в `.runtime-data/microservice_infra/minio`, `microservice_analitic` хранит Redis и models в `.runtime-data/microservice_analitic/{redis,models}`, а profile `with-redis` у `microservice_account` использует `.runtime-data/microservice_account/redis`. `stop ... clean` в launcher-е расширен под эти каталоги, чтобы полный сброс по-прежнему удалял и volumes, и repo-local runtime data.
+
 - `microservice_account` + `microservice_data` + `microservicestarter`: локальное хранение PostgreSQL переведено с Docker named volumes на repo-local bind mounts. Теперь `account` пишет в `.runtime-data/microservice_account/postgres`, а `data` — в `.runtime-data/microservice_data/postgres`. Одновременно `stop ... clean` в launcher-е расширен: для этих сервисов он удаляет и bind-mounted каталоги, чтобы семантика «сбросить БД» сохранилась.
 
 - `microservice_account` + `microservice_gateway`: для Docker Compose изменены default host ports backend-only схемы. `account` теперь публикуется как `${ACCOUNT_API_PORT:-7510}:5000`, `gateway` — как `${GATEWAY_API_PORT:-7520}:5020`. Сервисные README и frontend API reference синхронизированы под новые внешние порты; внутренние container ports не менялись.

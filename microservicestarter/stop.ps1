@@ -43,9 +43,30 @@ Get-Content $ConfFile | ForEach-Object {
 function Get-BindMountDataPaths {
     param([string]$Name)
     switch ($Name) {
-        "microservice_account" { return @((Join-Path $RepoRoot ".runtime-data\microservice_account\postgres")) }
-        "microservice_data"    { return @((Join-Path $RepoRoot ".runtime-data\microservice_data\postgres")) }
-        default                 { return @() }
+        "microservice_account" {
+            return @(
+                (Join-Path $RepoRoot ".runtime-data\microservice_account\postgres"),
+                (Join-Path $RepoRoot ".runtime-data\microservice_account\redis")
+            )
+        }
+        "microservice_data" {
+            return @(
+                (Join-Path $RepoRoot ".runtime-data\microservice_data\postgres")
+            )
+        }
+        "microservice_analitic" {
+            return @(
+                (Join-Path $RepoRoot ".runtime-data\microservice_analitic\redis"),
+                (Join-Path $RepoRoot ".runtime-data\microservice_analitic\models")
+            )
+        }
+        "microservice_infra" {
+            return @(
+                (Join-Path $RepoRoot ".runtime-data\microservice_infra\redpanda"),
+                (Join-Path $RepoRoot ".runtime-data\microservice_infra\minio")
+            )
+        }
+        default { return @() }
     }
 }
 
@@ -60,7 +81,7 @@ function Stop-Microservice {
 
     switch ($RunMode) {
         "clean" {
-            Write-Warn "[$Name] ВНИМАНИЕ: будут удалены volumes и repo-local data (БД, модели)!"
+            Write-Warn "[$Name] ВНИМАНИЕ: будут удалены volumes и repo-local runtime data!"
             $confirm = Read-Host "Подтвердите (yes/no)"
             if ($confirm -ne "yes") { Write-Host "Отменено."; Pop-Location; return }
             docker compose --profile scheduler down --volumes --remove-orphans

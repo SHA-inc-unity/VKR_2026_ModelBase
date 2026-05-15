@@ -65,6 +65,17 @@ Nginx поднимается всегда вместе с остальной inf
 profile'ов или интерактивных prompt'ов: новая внешняя топология должна
 стартовать штатным `docker compose up -d`.
 
+## Repo-local runtime data
+
+Данные stateful-компонентов infra теперь хранятся не в Docker named
+volumes, а в каталоге репозитория:
+
+- `../.runtime-data/microservice_infra/redpanda`
+- `../.runtime-data/microservice_infra/minio`
+
+Каталог `.runtime-data/` исключён из git. Если запускать через
+`microservicestarter`, команда `stop ... clean` удаляет и эти каталоги.
+
 ## Endpoints (внутри сети)
 
 - `KAFKA_BOOTSTRAP_SERVERS=redpanda:29092`

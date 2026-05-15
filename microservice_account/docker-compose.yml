@@ -60,7 +60,9 @@ services:
     restart: unless-stopped
     command: redis-server --appendonly yes
     volumes:
-      - redis_data:/data
+      - type: bind
+        source: ../.runtime-data/microservice_account/redis
+        target: /data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -70,9 +72,6 @@ services:
       - with-redis
     networks:
       - account_net
-
-volumes:
-  redis_data:
 
 networks:
   account_net:

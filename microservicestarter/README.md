@@ -57,13 +57,18 @@
 
 Подробная документация и таблица режимов — в корневом [README.md](../README.md).
 
-## Repo-local DB data
+## Repo-local runtime data
 
-Для `microservice_account` и `microservice_data` PostgreSQL по умолчанию
-хранит данные в каталоге репозитория, а не в Docker named volume:
+Stateful Docker-сервисы по умолчанию хранят runtime-данные в каталоге
+репозитория, а не в Docker named volumes:
 
+- `../.runtime-data/microservice_infra/redpanda`
+- `../.runtime-data/microservice_infra/minio`
 - `../.runtime-data/microservice_account/postgres`
+- `../.runtime-data/microservice_account/redis`
 - `../.runtime-data/microservice_data/postgres`
+- `../.runtime-data/microservice_analitic/redis`
+- `../.runtime-data/microservice_analitic/models`
 
 Режим `clean` у `stop.ps1` / `stop.sh` для этих сервисов удаляет и Docker
 volumes, и соответствующие каталоги внутри `.runtime-data/`.
