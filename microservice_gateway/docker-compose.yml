@@ -6,7 +6,7 @@ services:
     image: exchange-app/gateway-service:local
     container_name: exchange-gateway
     ports:
-      - "5020:5020"
+      - "${GATEWAY_API_PORT:-7520}:5020"
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:5020

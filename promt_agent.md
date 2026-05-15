@@ -12,6 +12,8 @@
 
 ### 2026-05-03
 
+- Закрыт полный workspace sweep по VS Code Problems: основные повторяющиеся причины были в Markdown-слое — compact separator rows без пробелов, смешение aligned/compact table styles, пропущенный language у fenced code block, отсутствие blank line вокруг heading/list/fence, лишние `|` внутри табличной ячейки и отсутствие завершающего newline в EOF.
+- `microservice_admin/Dockerfile` финально переведён на `cgr.dev/chainguard/node:latest` (build) + `cgr.dev/chainguard/node:latest-slim` (runtime): Alpine и `node:22-bookworm-slim` не убирали VS Code vulnerability warning, а этот вариант warning снял.
 - Дополнительно перепроверен Markdown вокруг launcher-а: в `microservicestarter/README.md` исправлены неверные PowerShell-примеры `restart.ps1`, где mode был показан как позиционный аргумент вместо явного `-Mode`; параллельный режим описан как общее multi-service поведение, что совпадает с реальными `start.ps1` / `restart.ps1`.
 - Синхронизированы `AGENTS.md`, `docs/agents/*`, корневые документы и `microservice_admin` docs под два правила: обязательный дневник агента и запрет на исполнение jobs внутри admin.
 - Перепроверены правила составления промтов в памяти: один общий промт, абстрактный, без файлов/строк/классов, с оценкой объёма перед ним и с обязательным финалом про обновление README/STRUCTURE.
@@ -41,3 +43,15 @@
 - После первого внедрения parallel fan-out найден runtime-дефект только в PowerShell-host: `Start-Process(...).ExitCode` возвращал пустое значение даже когда дочерние launcher-процессы успешно завершали `docker compose`, из-за чего parent ложно объявлял ошибку.
 - `microservicestarter/start.ps1` и `restart.ps1` исправлены через явный handoff результата в temp `ResultFile` (`OK` / `FAIL`) между child и parent. После фикса оба живых прогона на Windows подтверждены: `./restart.ps1` и `./start.ps1` проходят до конца по parallel path.
 - Launcher `microservicestarter` ускорен для multi-service режимов: `start`/`restart` сначала синхронно поднимают `microservice_infra`, затем fan-out запускают остальные сервисы параллельно отдельными дочерними процессами. Для `restart` `git pull` по-прежнему один на весь репозиторий; для `start` интерактивная первичная `.env`-инициализация остаётся последовательной до параллельного запуска.
+
+### 2026-05-16
+
+- `microservice_gateway`: закрыт весь блок ChartService + ChartRequestQueue. Исправлен ingest lock (снимается и при ошибке), window-scoped coverage, отдельная обработка `claim_check` large-payload сценария в DataServiceClient. Добавлены `ChartRequestQueue` (coalescing + CT-isolation), 4 queue-поля в `MarketSettings`, 4 deploy-скрипта, интеграционные тесты (3 теста). Все 117/117 тестов проходят. Docs синхронизированы.
+
+### 2026-05-15
+
+- Для backend-only deployment скорректированы default host ports Docker Compose: `microservice_account` публикуется на `7510`, `microservice_gateway` — на `7520`. Внутренние container ports сохранены (`5000` и `5020`), а README/API docs синхронизированы под новую внешнюю схему.
+- `microservice_gateway`: реализован полный market HTTP API. Добавлена папка `Market/` с 16 production-файлами: `TimeframeMap`, `CandleCountGrid`, `ServiceResult<T>`, `MarketSettings`, `IMarketCacheService` + `RedisMarketCacheService`, `IBybitSymbolProvider` + `BybitSymbolProvider`, `IMarketConfigService` + `MarketConfigService`, `IChartService` + `ChartService`, `MarketIngestService`, `MarketController`, DTOs. Endpoints: `GET /api/v1/market/config` и `GET /api/v1/market/chart`. Redis-кэш с stampede protection, fire-and-forget Kafka ingest.
+- Исправлены дублирования из предыдущих сессий: дублирующий блок fake-классов в `GatewayTestWebAppFactory.cs`, дублирующие секции `Redis`/`Market` в `appsettings.json`.
+- Итог: 108/108 тестов проходят (72 unit + 28 integration + 4 smoke + 4 contract). Docs синхронизированы.
+- Для frontend-команды добавлен отдельный `microservice_gateway/API.md`: формализованы вход/выход, auth requirements, error contract, degraded/pending semantics и практические правила интеграции. README/STRUCTURE и agent-doc route обновлены так, чтобы API-спека стала обязательной опорой перед изменением gateway HTTP-контрактов.

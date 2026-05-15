@@ -34,4 +34,12 @@ public sealed record ErrorResponse
         Detail = "An unexpected error occurred.",
         CorrelationId = correlationId
     };
+
+    public static ErrorResponse BadRequest(string detail, string? correlationId = null) => new()
+    {
+        Status = 400,
+        Title = "Bad Request",
+        Detail = detail,
+        CorrelationId = correlationId,
+    };
 }

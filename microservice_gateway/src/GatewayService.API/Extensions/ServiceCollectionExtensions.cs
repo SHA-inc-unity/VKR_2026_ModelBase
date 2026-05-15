@@ -8,6 +8,7 @@ using GatewayService.API.Clients.News;
 using GatewayService.API.Clients.Notifications;
 using GatewayService.API.Clients.Portfolio;
 using GatewayService.API.Kafka;
+using GatewayService.API.Market;
 using GatewayService.API.Settings;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -32,10 +33,39 @@ public static class ServiceCollectionExtensions
             configuration.GetSection(ResilienceSettings.SectionName));
         services.Configure<KafkaSettings>(
             configuration.GetSection(KafkaSettings.SectionName));
+        services.Configure<MarketSettings>(
+            configuration.GetSection(MarketSettings.SectionName));
 
         // Kafka request/reply — singleton + hosted service for the consume loop
         services.AddSingleton<KafkaRequestClient>();
         services.AddHostedService(sp => sp.GetRequiredService<KafkaRequestClient>());
+
+        // Redis distributed cache (falls back to in-memory when Redis section is absent)
+        var redisConfig = configuration["Redis:Configuration"];
+        if (!string.IsNullOrWhiteSpace(redisConfig))
+        {
+            services.AddStackExchangeRedisCache(opts => opts.Configuration = redisConfig);
+        }
+        else
+        {
+            services.AddDistributedMemoryCache();
+        }
+
+        // Market API — Bybit HTTP client
+        services.AddHttpClient(nameof(BybitSymbolProvider))
+                .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(15));
+
+        // Market API — services
+        // All market services are singletons: they delegate to singleton Redis/Kafka,
+        // and IHttpClientFactory (used by BybitSymbolProvider) is singleton-safe.
+        services.AddSingleton<IBybitSymbolProvider, BybitSymbolProvider>();
+        services.AddSingleton<IMarketCacheService, MarketCacheService>();
+        services.AddSingleton<IDataServiceClient, DataServiceClient>();
+        services.AddSingleton<IMarketConfigService, MarketConfigService>();
+        // ChartService registered as concrete type so ChartRequestQueue can inject it.
+        services.AddSingleton<ChartService>();
+        // ChartRequestQueue is the IChartService — provides coalescing + concurrency limits.
+        services.AddSingleton<IChartService, ChartRequestQueue>();
 
         // Account client — Kafka-backed (no HttpClient)
         services.AddScoped<IAccountServiceClient, AccountServiceClient>();

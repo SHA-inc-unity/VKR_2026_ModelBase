@@ -14,33 +14,33 @@
 
 ## Kafka interface
 
-| Topic                                  | Direction | Type      | Description                                          |
-|----------------------------------------|-----------|-----------|------------------------------------------------------|
-| `cmd.data.health`                      | in        | req/reply | Liveness + version                                   |
-| `cmd.data.db.ping`                     | in        | req/reply | PostgreSQL connectivity check                        |
-| `cmd.data.dataset.list_tables`         | in        | req/reply | List dataset tables. **Enriched response**: `{ tables: [{ table_name, rows, coverage_pct, date_from, date_to }] }` — emitted in a single round-trip so admin clients no longer fan out per-table coverage calls. |
-| `cmd.data.dataset.coverage`            | in        | req/reply | `{exists, rows, min_ts_ms, max_ts_ms}`               |
-| `cmd.data.dataset.timestamps`          | in        | req/reply | All timestamps (ms) in `[start_ms, end_ms]`          |
-| `cmd.data.dataset.find_missing`        | in        | req/reply | Missing timestamps (ms) for a stepped grid           |
-| `cmd.data.dataset.rows`                | in        | req/reply | Row slice (projects `timestamp_ms`)                  |
-| `cmd.data.dataset.export`              | in        | req/reply | CSV export: streaming per-table (→ presigned URL) or bundled multi-table ZIP (→ presigned URL) |
-| `cmd.data.dataset.export_full`         | in        | req/reply | **Composite "load this dataset" command** for downstream services. Payload `{symbol, timeframe, max_rows?}` → server resolves the table name, validates existence + row-count cap, and streams the full table to MinIO in one round-trip. Response `{table_name, row_count, presigned_url}` or `{error: "table_not_found" \| "empty_table" \| "row_count_exceeds_limit", …}`. Replaces the make_table → coverage → export sequence used by microservice_analitic. |
-| `cmd.data.dataset.table_schema`        | in        | req/reply | Column names + types                                 |
-| `cmd.data.dataset.normalize_timeframe` | in        | req/reply | Resolve timeframe alias                              |
-| `cmd.data.dataset.make_table_name`     | in        | req/reply | Build canonical `{symbol}_{timeframe}`               |
-| `cmd.data.dataset.instrument_details`  | in        | req/reply | Bybit instrument launch + first-funding timestamps   |
-| `cmd.data.dataset.constants`           | in        | req/reply | Supported timeframes + page limits                   |
-| `cmd.data.dataset.ingest`              | in        | req/reply | **Fetch Bybit → RSI → upsert** in the given window   |
-| `cmd.data.dataset.delete_rows`         | in        | req/reply | Delete rows by range or TRUNCATE whole table         |
-| `cmd.data.dataset.column_stats`        | in        | req/reply | df.info()-style per-column stats (non-null/min/max/mean/std) — значения приводятся в `float8`. Опциональные поля: `columns` (string[]) — запросить только эти колонки; `count_only` (bool) — пропустить MIN/MAX/AVG/STDDEV (только COUNT — многократно быстрее на больших таблицах) |
-| `cmd.data.dataset.column_histogram`    | in        | req/reply | Distribution histogram for a single numeric column   |
-| `cmd.data.dataset.browse`             | in        | req/reply | Paginated raw-row browse (`page`, `page_size` 1–500, `order` asc/desc). Returns `{ table, page, page_size, total_rows, total_rows_estimate, total_rows_known, rows[] }`. **`total_rows` is the source of truth** — callers must pin it on the first page; `total_rows_estimate` is informational only and must not drive pagination math (no jumping page-counts when the planner estimate drifts). |
-| `cmd.data.dataset.detect_anomalies`   | in        | req/reply | Detect 10 anomaly classes in parallel. **Summary-first response.** Always returns `{ table, total, critical, warning, by_type, sample[≤200], page, page_size, has_more, rows?, report_url? }`. `sample` is a critical-first slice. To page over the full chronological list pass `{ page, page_size }` (`page_size` clamped to 1–5000) → `rows` carries the slice. When `total > 200` the full report is uploaded to MinIO and a 60-min presigned URL is returned in `report_url` — the report is **streamed** straight to MinIO via `Utf8JsonWriter` over a `System.IO.Pipelines` writer (no `JsonSerializer.Serialize(rows.ToArray())` materialisation), so peak RAM stays at one pipe buffer + one S3 part regardless of how many anomalies were detected. UI is expected to keep summary + sample inline and offer the full report as a download. |
-| `cmd.data.dataset.clean.preview`      | in        | req/reply | Counts only (no mutation). Returns `{ table, counts: { drop_duplicates, fix_ohlc, fill_zero_streaks, delete_by_timestamps, fill_gaps } }` |
-| `cmd.data.dataset.clean.apply`        | in        | req/reply | Mutates DB. Requires `confirm: true`. Holds `pg_advisory_lock` keyed by table name. Writes `dataset_audit_log(id, table_name, operation, params JSONB, rows_affected, applied_at)`. Returns `{ table, audit_id, rows_affected, total }` |
-| `cmd.data.dataset.upsert_ohlcv`        | in        | req/reply | Insert/update the six OHLCV-raw columns (open/high/low/close/volume/turnover) keyed by `timestamp_utc`. All other columns (funding_rate, open_interest, rsi, derived features) are preserved on conflict. Phase-4 candle-source-of-truth: every row must carry a complete O/H/L/C tuple sourced from the same kline; rows with partial OHLC or with prices that violate `low ≤ min(open, close) ≤ max(open, close) ≤ high` are rejected. Payload: `{ table, symbol, exchange, timeframe, rows:[{ts_ms, open, high, low, close, volume, turnover}] }`. Returns `{ rows_affected, rows_rejected, rejection_reasons }`. |
-| `cmd.data.dataset.compute_features`    | in        | req/reply | Idempotent SQL pass: `ALTER TABLE … ADD COLUMN IF NOT EXISTS` + `UPDATE` via window functions over raw OHLC/OI/RSI → 27 feature columns. Payload `{ table }` → `{ status, table, rows_updated }`. Ботх SQL commands run with `commandTimeout: 0` (no Npgsql timeout) — the windowed UPDATE over 1m tables (>2.5 M rows) routinely exceeds the default 30 s limit. |
-| `events.data.ingest.progress`          | out       | event     | Staged ingest progress (fire-and-forget, no reply)   |
+| Topic | Direction | Type | Description |
+| ----- | --------- | ---- | ----------- |
+| `cmd.data.health` | in | req/reply | Liveness + version |
+| `cmd.data.db.ping` | in | req/reply | PostgreSQL connectivity check |
+| `cmd.data.dataset.list_tables` | in | req/reply | List dataset tables. **Enriched response**: `{ tables: [{ table_name, rows, coverage_pct, date_from, date_to }] }` — emitted in a single round-trip so admin clients no longer fan out per-table coverage calls. |
+| `cmd.data.dataset.coverage` | in | req/reply | `{exists, rows, min_ts_ms, max_ts_ms}` |
+| `cmd.data.dataset.timestamps` | in | req/reply | All timestamps (ms) in `[start_ms, end_ms]` |
+| `cmd.data.dataset.find_missing` | in | req/reply | Missing timestamps (ms) for a stepped grid |
+| `cmd.data.dataset.rows` | in | req/reply | Row slice (projects `timestamp_ms`) |
+| `cmd.data.dataset.export` | in | req/reply | CSV export: streaming per-table (→ presigned URL) or bundled multi-table ZIP (→ presigned URL) |
+| `cmd.data.dataset.export_full` | in | req/reply | **Composite "load this dataset" command** for downstream services. Payload `{symbol, timeframe, max_rows?}` → server resolves the table name, validates existence + row-count cap, and streams the full table to MinIO in one round-trip. Response `{table_name, row_count, presigned_url}` or `{error: "table_not_found" \| "empty_table" \| "row_count_exceeds_limit", …}`. Replaces the make_table → coverage → export sequence used by microservice_analitic. |
+| `cmd.data.dataset.table_schema` | in | req/reply | Column names + types |
+| `cmd.data.dataset.normalize_timeframe` | in | req/reply | Resolve timeframe alias |
+| `cmd.data.dataset.make_table_name` | in | req/reply | Build canonical `{symbol}_{timeframe}` |
+| `cmd.data.dataset.instrument_details` | in | req/reply | Bybit instrument launch + first-funding timestamps |
+| `cmd.data.dataset.constants` | in | req/reply | Supported timeframes + page limits |
+| `cmd.data.dataset.ingest` | in | req/reply | **Fetch Bybit → RSI → upsert** in the given window |
+| `cmd.data.dataset.delete_rows` | in | req/reply | Delete rows by range or TRUNCATE whole table |
+| `cmd.data.dataset.column_stats` | in | req/reply | df.info()-style per-column stats (non-null/min/max/mean/std) — значения приводятся в `float8`. Опциональные поля: `columns` (string[]) — запросить только эти колонки; `count_only` (bool) — пропустить MIN/MAX/AVG/STDDEV (только COUNT — многократно быстрее на больших таблицах) |
+| `cmd.data.dataset.column_histogram` | in | req/reply | Distribution histogram for a single numeric column |
+| `cmd.data.dataset.browse` | in | req/reply | Paginated raw-row browse (`page`, `page_size` 1–500, `order` asc/desc). Returns `{ table, page, page_size, total_rows, total_rows_estimate, total_rows_known, rows[] }`. **`total_rows` is the source of truth** — callers must pin it on the first page; `total_rows_estimate` is informational only and must not drive pagination math (no jumping page-counts when the planner estimate drifts). |
+| `cmd.data.dataset.detect_anomalies` | in | req/reply | Detect 10 anomaly classes in parallel. **Summary-first response.** Always returns `{ table, total, critical, warning, by_type, sample[≤200], page, page_size, has_more, rows?, report_url? }`. `sample` is a critical-first slice. To page over the full chronological list pass `{ page, page_size }` (`page_size` clamped to 1–5000) → `rows` carries the slice. When `total > 200` the full report is uploaded to MinIO and a 60-min presigned URL is returned in `report_url` — the report is **streamed** straight to MinIO via `Utf8JsonWriter` over a `System.IO.Pipelines` writer (no `JsonSerializer.Serialize(rows.ToArray())` materialisation), so peak RAM stays at one pipe buffer + one S3 part regardless of how many anomalies were detected. UI is expected to keep summary + sample inline and offer the full report as a download. |
+| `cmd.data.dataset.clean.preview` | in | req/reply | Counts only (no mutation). Returns `{ table, counts: { drop_duplicates, fix_ohlc, fill_zero_streaks, delete_by_timestamps, fill_gaps } }` |
+| `cmd.data.dataset.clean.apply` | in | req/reply | Mutates DB. Requires `confirm: true`. Holds `pg_advisory_lock` keyed by table name. Writes `dataset_audit_log(id, table_name, operation, params JSONB, rows_affected, applied_at)`. Returns `{ table, audit_id, rows_affected, total }` |
+| `cmd.data.dataset.upsert_ohlcv` | in | req/reply | Insert/update the six OHLCV-raw columns (open/high/low/close/volume/turnover) keyed by `timestamp_utc`. All other columns (funding_rate, open_interest, rsi, derived features) are preserved on conflict. Phase-4 candle-source-of-truth: every row must carry a complete O/H/L/C tuple sourced from the same kline; rows with partial OHLC or with prices that violate `low ≤ min(open, close) ≤ max(open, close) ≤ high` are rejected. Payload: `{ table, symbol, exchange, timeframe, rows:[{ts_ms, open, high, low, close, volume, turnover}] }`. Returns `{ rows_affected, rows_rejected, rejection_reasons }`. |
+| `cmd.data.dataset.compute_features` | in | req/reply | Idempotent SQL pass: `ALTER TABLE … ADD COLUMN IF NOT EXISTS` + `UPDATE` via window functions over raw OHLC/OI/RSI → 27 feature columns. Payload `{ table }` → `{ status, table, rows_updated }`. Ботх SQL commands run with `commandTimeout: 0` (no Npgsql timeout) — the windowed UPDATE over 1m tables (>2.5 M rows) routinely exceeds the default 30 s limit. |
+| `events.data.ingest.progress` | out | event | Staged ingest progress (fire-and-forget, no reply) |
 
 ### Ingest pipeline (`cmd.data.dataset.ingest`)
 
@@ -248,9 +248,9 @@ The Kafka consume loop bounds concurrency at two tiers so that heavy SQL
 operations cannot starve light ones that share the same PostgreSQL pool:
 
 | Tier | Limit | Topics |
-|------|-------|--------|
+| ---- | ----- | ------ |
 | Outer (all handlers) | 32 in-flight | every `cmd.data.*` topic |
-| Inner (heavy ops)    | 4 in-flight  | `dataset.export`, `dataset.ingest`, `dataset.detect_anomalies`, `dataset.clean.preview`, `dataset.clean.apply`, `dataset.compute_features`, `dataset.import_csv`, `dataset.upsert_ohlcv`, `dataset.column_stats`, `dataset.column_histogram` |
+| Inner (heavy ops) | 4 in-flight | `dataset.export`, `dataset.ingest`, `dataset.detect_anomalies`, `dataset.clean.preview`, `dataset.clean.apply`, `dataset.compute_features`, `dataset.import_csv`, `dataset.upsert_ohlcv`, `dataset.column_stats`, `dataset.column_histogram` |
 
 Light commands (`health`, `db.ping`, `list_tables`, `coverage`,
 `timestamps`, `find_missing`, `rows`, `browse`, `table_schema`,
@@ -277,18 +277,19 @@ in background; until it succeeds callers get `{ error, code:
 "schema_not_ready" }` instead of an opaque Kafka timeout.
 
 | Constraint | Value | Purpose |
-|---|---|---|
+| ---------- | ----- | ------- |
 | Max concurrent ingest jobs | 2 | Prevents Bybit rate-limit saturation across jobs |
 | Heavy-TF ingest slot | 1 | At most one `1m`/`3m` ingest runs at a time |
 
 **Per-timeframe API parallelism** inside a single ingest job:
 
 | Timeframe | `maxParallel` | Reason |
-|---|---|---|
+| --------- | ------------- | ------ |
 | `1m`, `3m` | 2 | These TFs have ~100× more pages per day; higher concurrency hits rate limits |
 | All others | 8 | Standard page counts fit well within the 96 r/s token bucket |
 
 **HTTP retry policy** (`BybitApiClient.GetJsonAsync`):
+
 - Up to **8 retries** (was 4).
 - HTTP 429 → waits `max(Retry-After, 5)` seconds.
 - Bybit `retCode 10006` (rate-limited) → 5–10 s random back-off.
@@ -334,17 +335,21 @@ on the uniqueness rule for active jobs, otherwise inserts fail at runtime
 and the Kafka caller sees only a generic timeout:
 
 - *Schema* (`EnsureSchemaAsync`):
-  ```sql
+
+   ```sql
   CREATE UNIQUE INDEX IF NOT EXISTS uq_dataset_jobs_active_params
       ON dataset_jobs (params_hash)
       WHERE status IN ('queued', 'running');
   ```
+
 - *Insert* (`StartAsync`) uses **index inference** with the same column
   list and predicate:
-  ```sql
+
+   ```sql
   ON CONFLICT (params_hash) WHERE status IN ('queued', 'running')
   DO NOTHING
   ```
+
   The `ON CONFLICT ON CONSTRAINT <name>` form does **not** work on
   partial unique indexes (Postgres treats them as indexes, not
   constraints, and raises `42P10`). Always use index inference here.
@@ -357,7 +362,7 @@ without producing a Kafka reply, leaving callers to wait out a 10 s
 timeout). It always returns one of:
 
 | Shape | When |
-|---|---|
+| ----- | ---- |
 | `{ job_id, status, deduped, job }` | Success or dedup hit |
 | `{ error, code: "schema_not_ready" }` | DB unreachable at startup |
 | `{ error, code: "bad_request" }` | Missing/invalid `type` or arguments |
@@ -417,7 +422,7 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 ### Сырые колонки (13 штук — источник: Bybit REST API)
 
 | Колонка | Тип | Описание |
-|---------|-----|----------|
+| ------- | --- | -------- |
 | `timestamp_utc` | `TIMESTAMPTZ PK` | Время открытия свечи (UTC) |
 | `symbol` | `VARCHAR` | Торговая пара, напр. `BTCUSDT` |
 | `exchange` | `VARCHAR` | Биржа-источник, напр. `bybit` |
@@ -439,7 +444,7 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 Вычисляются командой `cmd.data.dataset.compute_features`. Тип `DOUBLE PRECISION`, nullable (NULL только в первых `warmup`-свечах окна).
 
 | Группа | Колонки | Описание |
-|--------|---------|----------|
+| ------ | ------- | -------- |
 | Returns | `return_1`, `return_6`, `return_24` | Процентное изменение цены за 1/6/24 свечи |
 | Log returns | `log_return_1`, `log_return_6`, `log_return_24` | Логарифмический return |
 | Rolling price stats | `price_roll6_mean/std/min/max` | Скользящие статистики за окно 6 свечей |
@@ -464,7 +469,7 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 ### Рейтинг по объёму деривативов (2025–2026)
 
 | # | Биржа | Тип | Позиция на рынке |
-|---|-------|-----|-----------------|
+| - | ----- | --- | ---------------- |
 | 1 | **Binance** | CEX, spot + futures | Крупнейшая биржа, ~$50–70B суточный объём фьючерсов |
 | 2 | **OKX** | CEX, spot + futures | Вторая по деривативам, сильная в Азии, ~$15–25B |
 | 3 | **Bybit** | CEX, spot + futures | **Текущий источник данных**, ~$10–15B, сильная в деривативах |
@@ -474,7 +479,7 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 ### Сравнительная таблица: доступность данных через REST API
 
 | Данные | Bybit v5 | Binance Futures | OKX v5 | Coinbase Adv. | Kraken |
-|--------|----------|-----------------|--------|---------------|--------|
+| ------ | -------- | --------------- | ------ | ------------- | ------ |
 | **OHLCV kline** | ✅ `/market/kline` | ✅ `/fapi/v1/klines` | ✅ `/market/candles` | ✅ (300 свечей/запрос) | ✅ (720 последних только) |
 | **Open** | ✅ item[1] | ✅ | ✅ | ✅ | ✅ |
 | **High** | ✅ item[2] | ✅ | ✅ | ✅ | ✅ |
@@ -497,7 +502,7 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 ### Что мы сейчас собираем от Bybit и что пропускаем
 
 | Данные | Статус | Эндпоинт | Примечание |
-|--------|--------|----------|------------|
+| ------ | ------ | -------- | ---------- |
 | `close_price` (close) | ✅ Собирается | `/v5/market/kline` item[4] | Торговая цена закрытия (исторически `index_price`) |
 | `open`, `high`, `low` | ✅ Собирается | `/v5/market/kline` item[1-3] | Полный OHLCV |
 | `volume`, `turnover` | ✅ Собирается | `/v5/market/kline` item[5-6] | Объём торговли |
@@ -509,9 +514,9 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 ### Feature-колонки которые можно вычислить при добавлении OHLCV
 
 | Feature | Формула | Требует |
-|---------|---------|---------|
+| ------- | ------- | ------- |
 | `atr_N` | `rolling_avg(high − low, N)` | high, low |
-| `candle_body` | `|close − open| / close` | open |
+| `candle_body` | `abs(close - open) / close` | open |
 | `upper_wick` | `(high − max(open, close)) / close` | open, high |
 | `lower_wick` | `(min(open, close) − low) / close` | open, low |
 | `volume_roll6/24_mean` | `rolling_avg(volume, N)` | volume |
@@ -530,7 +535,7 @@ Prerequisite: `microservice_infra` running (Redpanda + MinIO).
 > 🚧 **Реализация не запланирована на текущем этапе.** Раздел — для будущего планирования.
 
 | Данные | Bybit WS топик | Описание | Ценность для ML |
-|--------|---------------|----------|-----------------|
+| ------ | -------------- | -------- | --------------- |
 | **Стакан заявок L2** | `orderbook.{depth}.{symbol}` | N уровней bid/ask с объёмами. Snapshot при подключении + инкрементальные delta | Order flow imbalance, bid-ask spread, ликвидность |
 | **Лента сделок (tape)** | `publicTrade.{symbol}` | Каждая сделка: цена, объём, сторона (buy/sell), timestamp. Нет агрегации | CVD (Cumulative Volume Delta), delta volume, absorption |
 | **Ликвидации** | `allLiquidation.{symbol}` | Принудительные ликвидации: цена, сторона, размер. Важный маркер каскадных движений | Детектор стресс-событий, liquidity grab |

@@ -13,7 +13,7 @@
 ## Корень сервиса
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `Dockerfile.base` | Базовый образ (Python + requirements). FROM python:3.12-slim |
 | `Dockerfile.api` | FastAPI-сервер; `FROM base` |
 | `docker-compose.yml` | Сервисы: `base` (profile `build-base`), `api`, `scheduler` (profile `scheduler`), `redis`. Сеть: `modelline_net` (внешняя) |
@@ -27,7 +27,7 @@
 Точка входа FastAPI. Все эндпоинты здесь.
 
 | Файл | Ключевые объекты | Описание |
-|------|-----------------|----------|
+| ---- | ---------------- | -------- |
 | `app.py` | `app` (FastAPI), `_lifespan()` | Создание приложения, CORS, подключение роутеров. Автозапуск `Scheduler` если `SCHEDULER_AUTOSTART=true`. Эндпоинты: `GET /health`, `GET /registry`, `DELETE /registry/{version_id}`, `GET /predictions/{prefix}`, `GET /metrics/{prefix}`, `POST /retrain`, `GET /scheduler/status` |
 | `schemas.py` | `HealthResponse`, `RegistryEntry`, `RegistryResponse`, `PredictionPoint`, `PredictionsResponse`, `RetrainRequest`, `RetrainResponse`, `MetricsSummaryResponse`, `SchedulerJobInfo`, `SchedulerStatusResponse` | Pydantic-схемы запросов и ответов |
 | `run.py` | — | Точка входа uvicorn |
@@ -39,7 +39,7 @@
 Загрузка, хранение и feature engineering рыночных данных.
 
 | Файл | Ключевые объекты | Описание |
-|------|-----------------|----------|
+| ---- | ---------------- | -------- |
 | `api.py` | `DatasetApi` | HTTP-клиент к Bybit API: исторические свечи, open interest |
 | `constants.py` | `TIMEFRAMES`, `RAW_TABLE_SCHEMA`, `FEATURE_TABLE_SCHEMA` | Таймфреймы, символы, лимиты страниц. `RAW_TABLE_SCHEMA` — 13 сырых колонок (вкл. OHLCV). `FEATURE_TABLE_SCHEMA` — 37 feature-колонок (вкл. atr, candle shape, volume features, rsi_slope). |
 | `core.py` | `DatasetCore` | Загрузка, валидация, сохранение данных в PostgreSQL |
@@ -61,7 +61,7 @@
 Обучение, оценка и хранение CatBoost-моделей.
 
 | Файл | Ключевые объекты | Описание |
-|------|-----------------|----------|
+| ---- | ---------------- | -------- |
 | `config.py` | `ModelConfig`, `TrainConfig`, `GridSearchConfig`, `MODELS_DIR` | Конфиги (Pydantic BaseSettings). `MODELS_DIR` — путь к папке `models/` |
 | `train.py` | `ModelTrainer` | Обучение CatBoost: train/test split, fit, grid search, сохранение сессии (`.cbm` + `.json`) |
 | `metrics.py` | `ModelMetrics`, `calc_metrics()` | MAE, RMSE, sign-accuracy, persistence-baseline, direction-accuracy |
@@ -76,7 +76,7 @@
 ## backend/
 
 | Файл | Ключевые объекты | Описание |
-|------|-----------------|----------|
+| ---- | ---------------- | -------- |
 | `scheduler.py` | `Scheduler`, `setup_scheduler()` | APScheduler-задачи: автообновление датасета, переобучение по cron. Данные через `data_client` (Kafka) |
 | `utils.py` | `get_logger()`, `format_duration()` | Логирование, форматирование времени, вспомогательные утилиты |
 | `data_client.py` | `get_rows()`, `get_timestamps()`, `find_missing()`, `get_coverage()` (возвращает `{rows, min_ts_ms, max_ts_ms}` или `None`), `get_schema()`, `make_table_name()`, `ingest()`, `db_ping()`; handlers `_handle_health`, `_handle_model_list` (отдает `{"models": load_registry(...)}` для админ-дэшборда), `_handle_dataset_load`, `_handle_dataset_unload`, `_handle_dataset_status`, `_handle_dbscan`, `_handle_quality_check`, `_handle_load_ohlcv`, `_handle_recompute_features` | Синхронный Kafka-клиент для доступа к данным через microservice_data; сам обслуживает `cmd.analytics.health` + `cmd.analytics.model.list` + 4 топика управления сессией датасета (`cmd.analitic.dataset.{load,unload,status}`, `cmd.analitic.anomaly.dbscan`) + 3 топика аудита/исправления качества (`cmd.analitic.dataset.{quality_check, load_ohlcv, recompute_features}`). `_handle_quality_check` лениво импортирует `backend.dataset.quality.audit_dataset` и пробрасывает в неё `request=lambda topic, p: client.request(topic, p, timeout=45.0)` — явный таймаут 45 с предотвращает каскадный таймаут (внешний handler ограничен 60 с на стороне фронта). `_handle_load_ohlcv` / `_handle_recompute_features` лениво импортируют `backend.dataset.repair` и передают `request=lambda topic, p, **kw: client.request(topic, p, **kw)` (прозрачная передача `timeout=`) и `publish=lambda topic, env: client.send(topic, env)` — последний используется для эмита `events.analitic.dataset.repair.progress`. `_handle_dataset_load` запрашивает `cmd.data.dataset.export` (presigned URL → MinIO ZIP), стримит в tmp CSV (`httpx.AsyncClient(http2=True)` 1 MB-чанками), магически детектит ZIP по сигнатуре `PK\x03\x04` и распаковывает, затем `pandas.read_csv(chunksize=50_000)` → cast float64→float32 → `pyarrow.ParquetWriter(snappy)` append per chunk на диск (`SESSION_DIR`). `_handle_dbscan` читает только нужные колонки через `pd.read_parquet(columns=…)`, систематически сэмплит до `max_sample_rows`, `StandardScaler` + `DBSCAN.fit_predict`, чистит память `del df, sample; gc.collect()`. |
@@ -88,7 +88,7 @@
 Постоянная dataset-сессия + multivariate anomaly detection.
 
 | Файл | Ключевые объекты | Описание |
-|------|-----------------|----------|
+| ---- | ---------------- | -------- |
 | `__init__.py` | re-export `DatasetSession`, `get_session`, `MAX_SESSION_ROWS` | Точка входа подпакета |
 | `session.py` | `_Meta` (dataclass), `DatasetSession` (singleton), `get_session()`, `reset_session_dir()`, `MAX_SESSION_ROWS=5_000_000`, `SESSION_DIR=Path(env MODELLINE_SESSION_DIR or "/tmp/modelline_sessions")` | Потокобезопасная (`threading.Lock`) сессия датасета. `set(symbol, timeframe, table_name, parquet_path, row_count, memory_mb_on_disk)` — атомарно меняет meta, удаляет старый Parquet. `clear()` — unlink + `gc.collect()`. `get_metadata()` отдаёт dict без `parquet_path`. `is_loaded_for(symbol, timeframe)` — проверка совпадения. `_silent_unlink` глотает `OSError`. |
 | `isolation_forest.py` | `handle_isolation_forest(envelope)`, `DEFAULT_COLUMNS`, `DEFAULT_CONTAM=0.01`, `DEFAULT_TREES=100`, `DEFAULT_MAX_ROWS=50_000`, `_coerce_float`, `_coerce_int` | Tree-based outlier detector (`sklearn.ensemble.IsolationForest`, `n_jobs=-1`, `random_state=42`). Параметры: `contamination` (`[1e-4, 0.5]`), `n_estimators` (`[20, 500]`), `max_sample_rows` (`[1000, 1_000_000]`). Систематический сэмплинг (`df.iloc[::step]`) сохраняет временной порядок. Eager-cleanup `del df, sample; gc.collect()`. Регистрируется в `data_client._ensure_client()` под `cmd.analitic.anomaly.isolation_forest`. |
@@ -105,7 +105,7 @@
 ## tests/
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `conftest.py` | Фикстуры pytest: мок-конфиги, мок-БД |
 | `test_api_mocked.py` | Тесты FastAPI-эндпоинтов (httpx AsyncClient, моки) |
 | `test_cache.py` | Тесты `ModelCache` |
@@ -145,7 +145,7 @@
 ### Исходящие запросы → microservice_data (`cmd.data.dataset.*`)
 
 | Топик | Описание |
-|-------|-----------|
+| ----- | -------- |
 | `cmd.data.dataset.rows` | Получить строки в диапазоне |
 | `cmd.data.dataset.timestamps` | Получить временные метки |
 | `cmd.data.dataset.find_missing` | Найти пропущенные метки |
@@ -159,7 +159,7 @@
 ### Входящие команды (`cmd.analytics.*`)
 
 | Топик | Тип | Описание |
-|-------|-----|----------|
+| ----- | --- | -------- |
 | `cmd.analytics.health` | req/reply | Liveness |
 | `cmd.analytics.train.start` | req/reply | Запуск обучения |
 | `cmd.analytics.train.status` | req/reply | Статус обучения |

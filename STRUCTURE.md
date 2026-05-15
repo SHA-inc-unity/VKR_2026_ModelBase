@@ -8,7 +8,7 @@
 
 ## Архитектура платформы
 
-```
+```text
                         ┌──────────────────────────────────────┐
                         │         microservice_infra           │
                         │  Redpanda (Kafka) :9092              │
@@ -49,7 +49,7 @@
 ## Корень репозитория
 
 | Файл / Папка | Описание |
-|---|---|
+| --- | --- |
 | `README.md` | Главный README — быстрый старт, команды, описание сервисов |
 | `STRUCTURE.md` | Этот файл — карта репозитория и архитектура |
 | `AGENTS.md` | Глобальные правила агентной работы: читать Markdown до кода, обновлять Markdown после кода |
@@ -71,7 +71,7 @@
 ## Агентная документация
 
 | Файл / Папка | Описание |
-|---|---|
+| --- | --- |
 | `AGENTS.md` | Единая точка входа для любого агента перед чтением или изменением кода |
 | `promt_agent.md` | Краткий рабочий дневник с актуальным рабочим контекстом агента |
 | `docs/agents/README.md` | Индекс агентных Markdown-опор |
@@ -85,7 +85,7 @@
 ## Карта документации сервисов
 
 | Сервис | Основные документы |
-|---|---|
+| ------ | ------------------ |
 | `microservice_infra` | `microservice_infra/README.md` + `microservice_infra/STRUCTURE.md` + `docs/agents/services/microservice_infra.md` |
 | `microservice_data` | `microservice_data/README.md` + `microservice_data/STRUCTURE.md` + `docs/agents/services/microservice_data.md` |
 | `microservice_admin` | `microservice_admin/README.md` + `microservice_admin/STRUCTURE.md` + `docs/agents/services/microservice_admin.md` |
@@ -104,7 +104,7 @@
 Централизованные скрипты управления всеми микросервисами. Реестр сервисов — `services.conf`.
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `services.conf` | Реестр сервисов: `имя  относительный_путь` (по одному на строку) |
 | `start.ps1` / `start.sh` | Запуск сервисов. При первом запуске создаёт `.env` и запрашивает пароль PostgreSQL. Поддерживает `core`, `noadmin`, `onlyadmin`, `full`, `scheduler`, `build`, `logs`. При `onlyadmin` поднимает отдельную online-head admin-ноду. В multi-service режимах сначала синхронно стартует `microservice_infra`, затем остальные сервисы уходят в параллельный fan-out. |
 | `stop.ps1` / `stop.sh` | Остановка контейнеров. Режимы: `stop` (default), `clean` (удалить volumes), `prune` (удалить образы). |
@@ -115,7 +115,7 @@
 ### Режимы запуска / перезапуска
 
 | Режим | Описание |
-|---|---|
+| ----- | -------- |
 | `core` | Основной стек (по умолчанию) |
 | `noadmin` | Весь backend-стек без `microservice_admin` |
 | `onlyadmin` | Только `microservice_admin` в online-режиме |
@@ -136,10 +136,10 @@
 **Порты:** API `8000`  
 **Docker:** multi-stage (`Dockerfile.base` → `Dockerfile.api`)
 
-### Корень сервиса
+### Корень сервиса microservice_analitic
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `docker-compose.yml` | Определяет сервисы `base` (profile `build-base`), `api`, `scheduler` (profile `scheduler`), `postgres`, `redis` (profile `with-redis`) |
 | `Dockerfile.base` | Базовый образ Python с зависимостями (requirements.txt) |
 | `Dockerfile.api` | FastAPI-сервер; FROM base |
@@ -152,7 +152,7 @@
 ### backend/api/
 
 | Файл | Ключевые объекты | Описание |
-|---|---|---|
+| ---- | ---------------- | -------- |
 | `app.py` | `app` (FastAPI) | Создание FastAPI-приложения, подключение роутеров, CORS, lifespan |
 | `run.py` | — | Точка входа uvicorn (`uvicorn backend.api.app:app`) |
 | `schemas.py` | `TrainRequest`, `PredictRequest`, `DatasetStatusResponse`, `ModelInfoResponse`, … | Pydantic-схемы для запросов и ответов API |
@@ -160,7 +160,7 @@
 ### backend/dataset/
 
 | Файл | Ключевые объекты | Описание |
-|---|---|---|
+| ---- | ---------------- | -------- |
 | `api.py` | `DatasetApi` | HTTP-клиент к Bybit API для загрузки исторических свечей |
 | `constants.py` | `TIMEFRAMES`, `DEFAULT_SYMBOL`, … | Константы: допустимые таймфреймы, символы, лимиты |
 | `core.py` | `DatasetCore` | Загрузка, валидация и сохранение датасета в PostgreSQL |
@@ -171,7 +171,7 @@
 ### backend/model/
 
 | Файл | Ключевые объекты | Описание |
-|---|---|---|
+| ---- | ---------------- | -------- |
 | `cache.py` | `ModelCache` | In-memory кеш обученных моделей и их метаданных |
 | `config.py` | `ModelConfig`, `TrainConfig`, `GridSearchConfig` | Конфиги модели и гиперпараметров (Pydantic BaseSettings) |
 | `loader.py` | `ModelLoader` | Загрузка / сохранение `.cbm`-файлов CatBoost с диска |
@@ -183,7 +183,7 @@
 ### backend/
 
 | Файл | Ключевые объекты | Описание |
-|---|---|---|
+| ---- | ---------------- | -------- |
 | `scheduler.py` | `Scheduler`, `setup_scheduler()` | APScheduler-задачи: автообновление датасета, переобучение |
 | `utils.py` | `get_logger()`, `format_duration()`, … | Вспомогательные утилиты: логирование, форматирование |
 
@@ -194,7 +194,7 @@
 ### tests/ (microservice_analitic)
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `conftest.py` | Фикстуры pytest: мок-конфиги, мок-БД |
 | `test_cache.py` | Тесты `ModelCache` |
 | `test_metrics.py` | Тесты расчёта метрик |
@@ -210,10 +210,10 @@
 **Порт:** `5010` → внутри контейнера `5000`  
 **Архитектура:** Clean Architecture (Domain → Application → Infrastructure → API)
 
-### Корень сервиса
+### Корень сервиса microservice_account
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `AccountService.sln` | Solution-файл .NET |
 | `Dockerfile` | Одноэтапная сборка с `dotnet publish` |
 | `docker-compose.yml` | Сервисы: `account-api`, `postgres`, `redis` (profile `with-redis`) |
@@ -226,7 +226,7 @@
 Чистая доменная модель без зависимостей на фреймворки.
 
 | Файл / Папка | Описание |
-|---|---|
+| ------------- | -------- |
 | `Entities/User.cs` | Сущность пользователя: `Id`, `Email`, `PasswordHash`, `IsActive`, навигационные свойства |
 | `Entities/Role.cs` | Сущность роли: `Id`, `Name` |
 | `Entities/UserRole.cs` | Связь M:M пользователей и ролей |
@@ -240,7 +240,7 @@
 Бизнес-логика, интерфейсы, DTO. Не зависит от Infrastructure.
 
 | Файл / Папка | Описание |
-|---|---|
+| ------------- | -------- |
 | `Services/AccountAppService.cs` | Главный сервис: регистрация, вход, выход, смена пароля, refresh |
 | `Services/PasswordService.cs` | BCrypt-хеширование и верификация паролей |
 | `Services/TokenService.cs` | Генерация и валидация JWT access- и refresh-токенов |
@@ -257,7 +257,7 @@
 Реализации интерфейсов: EF Core, Redis, PostgreSQL.
 
 | Файл / Папка | Описание |
-|---|---|
+| ------------- | -------- |
 | `Data/AccountDbContext.cs` | EF Core DbContext: DbSet-ы, конфигурации |
 | `Data/Configurations/` | `IEntityTypeConfiguration<T>` для каждой сущности (индексы, FK, ограничения) |
 | `Repositories/UserRepository.cs` | EF Core реализация `IUserRepository` |
@@ -270,7 +270,7 @@
 ### src/AccountService.API/
 
 | Файл / Папка | Описание |
-|---|---|
+| ------------- | -------- |
 | `Program.cs` | Точка входа: регистрация DI, middleware pipeline, EF migrations |
 | `Controllers/AccountController.cs` | Публичные эндпоинты: `POST /api/account/register`, `/login`, `/refresh`, `/logout`, `/profile` |
 | `Controllers/InternalController.cs` | Внутренние эндпоинты (для gateway): `/api/internal/validate-token`, `/api/internal/user/{id}` |
@@ -282,7 +282,7 @@
 ### tests/ (microservice_account)
 
 | Папка | Описание |
-|---|---|
+| ----- | -------- |
 | `AccountService.UnitTests/` | Юнит-тесты сервисов и валидаторов (xUnit, Moq) |
 | `AccountService.IntegrationTests/` | Интеграционные тесты с реальной БД (Testcontainers) |
 | `AccountService.ContractTests/` | Контрактные тесты API (PactNet) |
@@ -295,10 +295,10 @@
 **Порт:** `5020`  
 **Роль:** Mobile BFF — маршрутизация запросов от мобильного клиента к downstream-сервисам. Агрегирует данные из нескольких источников в один ответ.
 
-### Корень сервиса
+### Корень сервиса microservice_gateway
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `GatewayService.sln` | Solution-файл .NET |
 | `Dockerfile` | Multi-stage сборка: `build` → `publish` → `runtime` |
 | `docker-compose.yml` | Один сервис `gateway-service`; upstream account — `http://host.docker.internal:5010` |
@@ -311,7 +311,7 @@
 #### Controllers/
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `AccountController.cs` | Проксирование запросов аутентификации к `microservice_account` |
 | `AppController.cs` | Общие эндпоинты приложения (health, version) |
 | `DashboardController.cs` | Агрегированные данные для главного экрана мобильного приложения |
@@ -321,7 +321,7 @@
 #### Clients/
 
 | Папка | Описание |
-|---|---|
+| ----- | -------- |
 | `Account/` | `AccountServiceClient` — HTTP-клиент к `microservice_account` (Refit или HttpClient) |
 | `Market/` | `MarketServiceClient` — клиент к рыночным данным |
 | `News/` | `NewsServiceClient` — клиент к новостному сервису |
@@ -331,21 +331,21 @@
 #### Aggregators/
 
 | Папка | Описание |
-|---|---|
+| ----- | -------- |
 | `Dashboard/` | `DashboardAggregator` — параллельный вызов нескольких клиентов, сборка dashboard-ответа |
 | `Bootstrap/` | `BootstrapAggregator` — агрегация данных первого запуска приложения |
 
 #### Middleware/
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `CorrelationIdMiddleware.cs` | Добавляет / пробрасывает `X-Correlation-Id` заголовок для трейсинга |
 | `GlobalExceptionMiddleware.cs` | Обрабатывает необработанные исключения → `ProblemDetails` |
 
 #### Settings/
 
 | Файл | Описание |
-|---|---|
+| ---- | -------- |
 | `DownstreamServicesSettings.cs` | URL и флаг `Enabled` для каждого downstream-сервиса |
 | `FeatureFlagsSettings.cs` | Runtime feature-флаги (включение/отключение функций без редеплоя) |
 | `JwtSettings.cs` | `SecretKey`, `Issuer`, `Audience`, сроки действия токенов |
@@ -354,7 +354,7 @@
 #### Остальное
 
 | Файл / Папка | Описание |
-|---|---|
+| ------------- | -------- |
 | `Common/` | Общие типы и вспомогательные классы |
 | `DTOs/` | DTO запросов и ответов gateway |
 | `Extensions/` | `IServiceCollection` extension methods — регистрация DI, HTTP-клиентов, Polly |
@@ -364,7 +364,7 @@
 ### tests/ (microservice_gateway)
 
 | Папка | Описание |
-|---|---|
+| ----- | -------- |
 | `GatewayService.UnitTests/` | Юнит-тесты агрегаторов и клиентов |
 | `GatewayService.IntegrationTests/` | Интеграционные тесты с мок-серверами (WireMock) |
 | `GatewayService.ContractTests/` | Контрактные тесты API (PactNet) |
@@ -377,13 +377,13 @@
 **Роль:** Shared инфраструктура платформы. Поднимается первым, создаёт `modelline_net`.  
 **Детали:** [microservice_infra/STRUCTURE.md](microservice_infra/STRUCTURE.md)
 
-| Компонент        | Порт (host) | Назначение |
-|------------------|-------------|------------|
-| Nginx            | `8501`      | Browser-facing ingress local/full-стека и download ingress backend-host'а: `/admin/*` → admin:3000, `/modelline-blobs/*` → minio:9000 |
-| Redpanda         | `9092`      | Kafka-API broker. Внутри сети: `redpanda:29092` |
-| Redpanda Console | `8080`      | Web UI топиков |
-| MinIO            | `9000`      | S3 claim-check хранилище (внутренний; наружу не публикуется как download path — для браузера используется `8501/modelline-blobs/*`) |
-| MinIO Console    | `9001`      | Web UI MinIO |
+| Компонент | Порт (host) | Назначение |
+| ---------------- | ----------- | ---------- |
+| Nginx | `8501` | Browser-facing ingress local/full-стека и download ingress backend-host'а: `/admin/*` → admin:3000, `/modelline-blobs/*` → minio:9000 |
+| Redpanda | `9092` | Kafka-API broker. Внутри сети: `redpanda:29092` |
+| Redpanda Console | `8080` | Web UI топиков |
+| MinIO | `9000` | S3 claim-check хранилище (внутренний; наружу не публикуется как download path — для браузера используется `8501/modelline-blobs/*`) |
+| MinIO Console | `9001` | Web UI MinIO |
 
 ---
 
@@ -413,7 +413,7 @@ Admin UI. Общается с `data` и `analytics` через Kafka (via server
 **Детали:** [shared/STRUCTURE.md](shared/STRUCTURE.md)
 
 | Модуль | Описание |
-|--------|----------|
+| ------ | -------- |
 | `modelline_shared.schemas` | Shared Pydantic схемы (`HealthResponse`) |
 | `modelline_shared.messaging.schemas` | `Envelope`, `HealthReply` |
 | `modelline_shared.messaging.topics` | Все Kafka-топики как константы |
@@ -423,7 +423,7 @@ Admin UI. Общается с `data` и `analytics` через Kafka (via server
 
 ## Схема взаимодействия сервисов
 
-```
+```text
 Мобильный клиент
       │
       ▼ :5020
@@ -443,4 +443,3 @@ microservice_data (.NET :8100)      microservice_analitic (Python :8000/:8501)
               │                                   │
               └─── MinIO (claim-check blobs) ─────┘
 ```
-

@@ -13,7 +13,7 @@
 ## Корень
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `docker-compose.yml` | Запускает: Redpanda, Redpanda Console, MinIO, MinIO Console + init и **nginx** (всегда, без profile-флагов) — ingress/download endpoint backend/full-стека на host-порте 8501 (override через `NGINX_PORT`). `nginx` проксирует `/admin/*` → `admin:3000` и `/modelline-blobs/*` → `minio:9000`. |
 | `nginx/nginx.conf` | Конфиг nginx: `default_server`, `/admin/*` → admin:3000 (включая `/admin/api/events` SSE), `/modelline-blobs/*` → minio:9000 без буферизации (`proxy_buffering off`, `proxy_request_buffering off`, `proxy_read_timeout 3600s`, `client_max_body_size 0` — для многогигабайтных CSV/ZIP экспортов). В `noadmin` deployment этот nginx остаётся download ingress-ом backend-хоста, а отдельная remote admin-head не обязана ходить через локальный `/admin/*`. |
 | `.env.example` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `REDPANDA_CONSOLE_PORT`, `NGINX_PORT` (default `8501`) |
@@ -24,7 +24,7 @@
 ## Сервисы docker-compose
 
 | Сервис | Образ | Порты (host) | Описание |
-|--------|-------|-------------|----------|
+| ------ | ----- | ------------ | -------- |
 | `redpanda` | `redpandadata/redpanda:v24.1.9` | `9092` (EXTERNAL), `9644` (admin) | Kafka-API брокер (KRaft, single-node). Внутри сети: `redpanda:29092` |
 | `redpanda-console` | `redpandadata/console` | `8080` | Web UI для топиков и consumer-групп |
 | `redpanda-init` | `redpandadata/redpanda` | — | One-shot: `topic_partitions_per_shard=10000`, `auto_create_topics_enabled=true` |
@@ -38,7 +38,7 @@
 ## Сеть
 
 | Сеть | Описание |
-|------|----------|
+| ---- | -------- |
 | `modelline_net` | Docker bridge-сеть. Создаётся этим compose. Все остальные сервисы подключаются как `external: true` |
 
 ---
@@ -46,7 +46,7 @@
 ## Endpoints (внутри сети `modelline_net`)
 
 | Сервис | Адрес |
-|--------|-------|
+| ------ | ----- |
 | Kafka broker | `redpanda:29092` |
 | MinIO S3 API (для signing внутри сервисов) | `http://minio:9000` |
 | MinIO Console | `http://localhost:9001` |

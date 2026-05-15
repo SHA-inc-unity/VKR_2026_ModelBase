@@ -39,7 +39,7 @@
 ### Компоненты
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `src/lib/redisCache.ts` | **Server-only.** Singleton `ioredis` клиент (URL из `REDIS_URL`). Быстрые fast-fail параметры: `connectTimeout:2000`, `commandTimeout:1000`, `retryStrategy:()=>null`. Если Redis недоступен — ошибки поглощаются, fallback прозрачен. |
 | `src/lib/cacheClient.ts` | **Browser-safe.** Не импортирует ioredis. `cacheRead<T>(key)` и `cacheWrite(key, value, ttl)` общаются с `/api/cache` через `fetch`. |
 | `src/app/api/cache/route.ts` | Route Handler. GET `?key=X` → `{value}`. POST `{key,value,ttl?}` → `{ok:true}`. |
@@ -47,13 +47,13 @@
 ### Переменная окружения
 
 | Переменная | Описание |
-|-----------|----------|
+| ---------- | -------- |
 | `REDIS_URL` | URL подключения к Redis. Пример: `redis://redis:6379`. Опциональна — отсутствие/недоступность Redis не вызывает ошибок. |
 
 ### Ключи и TTL
 
 | Страница | Ключ | TTL | Что кешируется |
-|----------|------|-----|----------------|
+| -------- | ---- | --- | -------------- |
 | Dashboard | `modelline:dashboard:v1` | 60 мин | `tables`, `coverage`, `modelCount` |
 | Anomaly | `modelline:anomaly:v1:{symbol}:{timeframe}` | 30 мин | `stats`, `coverage` |
 | Download | `modelline:dataset-tables:v1` | 60 мин | список таблиц (`DataTableInfo[]`) |
@@ -70,7 +70,7 @@
 
 ## Архитектура запросов
 
-```
+```text
 Browser → Next.js page (client component)
              ↓ fetch (command)
           POST /api/kafka          (Next.js Route Handler, server-side)
@@ -134,7 +134,7 @@ KafkaJS 2.x шлёт `MetadataRequest v6` с флагом `auto-create` при `
 **Стало.** Каждый Admin-процесс владеет:
 
 | Объект | Файл | Лайфтайм |
-|--------|------|----------|
+| ------ | ---- | -------- |
 | **Reply-inbox** `reply.microservice_admin.<instance>` | `src/lib/kafka.ts` | весь процесс |
 | **EVT_* consumer** group `admin-sse` | `src/lib/sseHub.ts` | весь процесс |
 
@@ -158,7 +158,7 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 вызывающий передал собственный `correlationId` (значит, он подписан на progress).
 
 | Топик | TTL |
-|-------|-----|
+| ----- | --- |
 | `cmd.data.health`, `cmd.analytics.health`, `cmd.data.db.ping` | 1.5 c |
 | `cmd.data.dataset.list_tables`, `cmd.data.dataset.coverage`, `cmd.analitic.dataset.status` | 2 c |
 | `cmd.data.dataset.table_schema` | 10 c |
@@ -168,6 +168,7 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 ## Design System (shadcn/ui)
 
 **CSS variables** (`globals.css` `@layer base :root {}`):
+
 - `--background: 222 47% 7%` — фон приложения
 - `--card: 222 47% 16%` — фон карточек и сайдбара (повышена яркость для контраста)
 - `--primary: 217 91% 60%` — акцентный синий
@@ -182,10 +183,12 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 **Шрифт:** Inter (загружен через `next/font/google`)
 
 **Брейкпоинты:**
+
 - Стандартные Tailwind: `sm` 640 px, `md` 768 px, `lg` 1024 px, `xl` 1280 px, `2xl` 1536 px
 - Кастомные: `xs` 480 px (phone landscape / small portrait), `3xl` 1920 px (Full HD), `4xl` 2560 px (4K)
 
 **Адаптивный дизайн (20:9 → 9:20):**
+
 - **Root layout** (`src/app/layout.tsx`): `flex flex-col md:flex-row` — на `< md` сайдбар становится нижней навигацией (`order-last`), на `md+` возвращается слева. `<main>` имеет `pb-14 md:pb-5 lg:pb-6` чтобы контент не прятался под bottom-nav. Контент ограничен `max-w-[1920px]` только с `md:`, на узких — `max-w-full`.
 - **Sidebar** (`src/components/Sidebar.tsx`): три режима по `window.innerWidth`:
   - `≥ 1024 px` — **expanded-collapsible**: full label `w-56` с toggle-кнопкой; свёрнутое состояние `w-14` (только иконки) сохраняется в `localStorage('sidebar:collapsed')`.
@@ -197,13 +200,14 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 - **Контролы**: на `< xs` Select/Button/Input растягиваются на всю ширину (`w-full xs:w-auto`, `min-w-0 flex-1 xs:min-w-[180px]`).
 
 **Анимации:**
+
 - `pulse-dot` — пульсирующая точка (`.status-dot-ok` класс) для Kafka-статуса
 - `shimmer` — скользящий блик, используется в skeleton
 
 ## shadcn/ui Components (`src/components/ui/`)
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `button.tsx` | CVA variants: default/outline/secondary/ghost/link; sizes: default/sm/lg/icon |
 | `card.tsx` | Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter |
 | `badge.tsx` | CVA variants: default/secondary/destructive/outline/success/warning/info |
@@ -223,6 +227,7 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 **Stale-while-revalidate:** каждая секция Dashboard обновляется независимо. Kafka-запросы запускаются параллельно без `await`; каждый обновляет свой срез состояния по завершении. UI никогда не блокируется ожиданием самого медленного запроса.
 
 **Таймауты:**
+
 - Health-чеки: `2 000 мс`
 - Список таблиц: `8 000 мс`
 - Coverage: `5 000 мс`
@@ -232,11 +237,12 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 Для избежания polling-нагрузки Dashboard и Train страницы получают обновления через SSE:
 
 | SSE событие | Топик Kafka | Кто подписан | Действие |
-|-------------|-------------|--------------|----------|
+| ----------- | ----------- | ------------ | -------- |
 | `events.analytics.model.ready` | `EVT_ANALYTICS_MODEL_READY` | Dashboard | Перезапрашивает список моделей (`modelCount`) |
 | `events.analytics.train.progress` | `EVT_ANALYTICS_TRAIN_PROGRESS` | Train page | Добавляет точку в `progressHistory`, обновляет `status.progress` |
 
 **Компоненты:**
+
 - `GET /api/events` — SSE Route Handler. Подписывается на process-wide SSE-хаб (`src/lib/sseHub.ts`); каждое новое соединение лишь добавляет subscriber-callback в `Set<Subscriber>`. Один Kafka-consumer на процесс, fan-out всем подключённым клиентам. Heartbeat `:keepalive` каждые 25 с.
 - `src/hooks/useEvents.ts` — React hook `useEvents(handlers)`. Открывает `EventSource` на mount, диспатчит payload в нужный handler, закрывает на unmount. Handlers хранятся в ref — не вызывает реконнект при перерендере.
 
@@ -248,7 +254,7 @@ Kafka-roundtrip на всех. Mutating-команды (ingest, clean, train, an
 ## Страницы
 
 | Страница | Описание |
-|----------|----------|
+| -------- | -------- |
 | `/` (Dashboard) | Bento Grid: Row 1 — 4 StatCard с `border-l-4 border-l-{color}` акцентами (`grid-cols-2 xl:grid-cols-4`). Row 2 — 2 колонки: стек из 4 ServiceCard (2 application через Kafka: `data`, `analitic`; 2 infra через HTTP `/api/health`: `Redpanda`, `MinIO`) + `CoverageBar` (recharts BarChart horizontal). Row 3 — shadcn Table датасетов с `pct.toFixed(1)%`. Кнопка Refresh обновляет все карточки одновременно. |
 | `/download` | 2-колоночный layout (`lg:grid-cols-[380px,1fr]`): слева Dataset Configuration, ingest controls и quality actions; справа coverage/stat cards; ниже Available Tables, Quality Block и Action History. Ingest работает только через dataset jobs: и single-TF, и `ALL` сначала делают `refreshCoverageState()` без обнуления покрытия, затем отправляют быстрый `CMD_DATA_DATASET_JOBS_START` (`timeoutMs: 5_000`). После успешного ответа timeframe попадает в `queued` и seed-ится через `seedQueuedJob(...)`; в `running` он переходит только после реального backend-progress/job update. Локальный `loading/busy` и page-level lock не снимаются сразу после `JOBS_START`: admin остаётся занятым, пока принятая remote job действительно не перейдёт в terminal state; если job не создана, busy-state отпускается сразу по явному backend-отказу. `ALL`-виджет `AllIngestProgress` показывает 2 execution slot-а, отдельную очередь queued jobs, stalled-state если очередь есть, а running нет слишком долго, и recent done/error list. Для running-slot видны stage, progress, detail, elapsed и short job id. Успешное завершение с `completed=0` показывается как нормальный no-op (`без новых строк` / `дозагрузка не потребовалась`), а не как скрытая ошибка. Верхний блок активных dataset jobs приведён к обычному тёмному card-стилю admin-панели: без яркого белого фона, со спокойными muted-подложками и status/progress-элементами в текущей теме. Backend start errors (`schema_not_ready`, `bad_request`, `db_unavailable`, `pg_*`, `internal_error`) сразу переводят конкретный TF в `error`. После terminal jobs, quality-check и repair coverage подтягивается автоматически; пользователь всё время видит последнее реальное состояние данных, а не фальшивый zero-skeleton. **Dataset CSV/ZIP export — zero-byte для admin**: route `/api/export/csv` только проксирует Kafka-ответ `{ presigned_url }` и пробрасывает URL клиенту как есть, без host-нормализации и без legacy raw-localhost fallback. URL уже подписан data-сервисом на browser-facing origin (внешний вход infra-nginx, по умолчанию `http://localhost:8501`), а `/modelline-blobs/*` стримит файл из MinIO напрямую — байты не проходят через admin runtime, поэтому файлы значительно больше 2 ГБ работают штатно. Delete rows и repair по-прежнему идут через Kafka-команды владельцам сервисов: admin только инициирует операции и отображает удалённое состояние. |
 | `/train` | Кастомный tab-switcher в header (без Radix Tabs). 2-колоночный grid на `lg+`: левая — Config + Status Card с `ProgressLine` (recharts LineChart, показывается после ≥2 точек прогресса); правая — Training History table. `progressHistory` state сбрасывается при каждом новом запуске. |

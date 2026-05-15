@@ -26,7 +26,7 @@
 | microservice_data | `microservice_data/README.md`, `microservice_data/STRUCTURE.md`, `docs/agents/services/microservice_data.md` | те же документы + `docs/agents/CHANGE_LOG.md` |
 | microservice_analitic | `microservice_analitic/README.md`, `microservice_analitic/STRUCTURE.md`, `docs/agents/services/microservice_analitic.md` | те же документы + `docs/agents/CHANGE_LOG.md` |
 | microservice_account | `microservice_account/README.md`, `microservice_account/STRUCTURE.md`, `docs/agents/services/microservice_account.md` | те же документы + `docs/agents/CHANGE_LOG.md` |
-| microservice_gateway | `microservice_gateway/README.md`, `microservice_gateway/STRUCTURE.md`, `docs/agents/services/microservice_gateway.md` | те же документы + `docs/agents/CHANGE_LOG.md` |
+| microservice_gateway | `microservice_gateway/README.md`, `microservice_gateway/API.md`, `microservice_gateway/STRUCTURE.md`, `docs/agents/services/microservice_gateway.md` | те же документы + `docs/agents/CHANGE_LOG.md` |
 | microservice_infra | `microservice_infra/README.md`, `microservice_infra/STRUCTURE.md`, профиль сервиса в `docs/agents/services/` | те же документы + `docs/agents/CHANGE_LOG.md` |
 | microservicestarter | `microservicestarter/README.md`, `microservicestarter/STRUCTURE.md`, `docs/agents/services/microservicestarter.md` | те же документы + `docs/agents/CHANGE_LOG.md` |
 | shared | `shared/README.md`, `shared/STRUCTURE.md`, профиль сервиса в `docs/agents/services/` | те же документы + `docs/agents/CHANGE_LOG.md` |

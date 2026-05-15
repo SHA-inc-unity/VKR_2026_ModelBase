@@ -2,13 +2,13 @@
 
 Общая инфраструктура ModelLine:
 
-| Компонент         | Порт (host) | Назначение                                     |
-|-------------------|-------------|------------------------------------------------|
-| **Nginx**         | **8501**    | **Локальный ingress и download endpoint backend/full-стека** |
-| Redpanda          | 9092        | Kafka-API брокер (единственный канал IPC)      |
-| Redpanda Console  | 8080        | UI для топиков / consumer groups               |
-| MinIO             | 9000        | S3-совместимое хранилище (внутренний; наружу как download path не публикуется) |
-| MinIO Console     | 9001        | UI MinIO (логин из `.env`)                     |
+| Компонент | Порт (host) | Назначение |
+| --------- | ----------- | ---------- |
+| **Nginx** | **8501** | **Локальный ingress и download endpoint backend/full-стека** |
+| Redpanda | 9092 | Kafka-API брокер (единственный канал IPC) |
+| Redpanda Console | 8080 | UI для топиков / consumer groups |
+| MinIO | 9000 | S3-совместимое хранилище (внутренний; наружу как download path не публикуется) |
+| MinIO Console | 9001 | UI MinIO (логин из `.env`) |
 
 Создаёт docker-сеть **`modelline_net`**, к которой подключаются остальные
 сервисы (`microservice_data`, `microservice_admin`, `microservice_analitic`).
@@ -25,11 +25,11 @@
 docker-compose публикуется как host-порт **`8501`** (override через
 `NGINX_PORT`). В local/full stack это browser-facing вход платформы:
 
-| URL                          | Куда проксируется          |
-|------------------------------|----------------------------|
-| `localhost:8501/`            | 301 → `/admin/`            |
-| `localhost:8501/admin`       | 301 → `/admin/`            |
-| `localhost:8501/admin/*`     | `http://admin:3000` (Next.js basePath=/admin) |
+| URL | Куда проксируется |
+| --- | ----------------- |
+| `localhost:8501/` | 301 → `/admin/` |
+| `localhost:8501/admin` | 301 → `/admin/` |
+| `localhost:8501/admin/*` | `http://admin:3000` (Next.js basePath=/admin) |
 | `localhost:8501/admin/api/events` | `http://admin:3000` (SSE, без буферизации) |
 | `localhost:8501/modelline-blobs/*` | `http://minio:9000` (signed dataset downloads, path/query сохраняются как есть) |
 
@@ -100,6 +100,7 @@ runtime'а.
   их HW > 0, и они автоматически защищены от удаления.
 
 Конфиг кластера (через `redpanda-init`):
+
 - `topic_partitions_per_shard=10000` — единственный shard в dev-режиме
   должен помещать ~N реплай-топиков; после миграции это с большим запасом.
 - `auto_create_topics_enabled=true` — для упрощённого dev UX.

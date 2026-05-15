@@ -1,30 +1,25 @@
 # syntax=docker/dockerfile:1
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM node:22-alpine AS build
+FROM cgr.dev/chainguard/node:latest AS build
 WORKDIR /app
 
-RUN apk upgrade --no-cache
-
-COPY package.json package-lock.json* ./
-RUN --mount=type=cache,target=/root/.npm \
+COPY --chown=node:node package.json package-lock.json* ./
+RUN --mount=type=cache,target=/home/node/.npm \
     npm ci --prefer-offline
 
-COPY . .
+COPY --chown=node:node . .
 RUN npm run build
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:22-alpine AS runtime
+FROM cgr.dev/chainguard/node:latest-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN apk upgrade --no-cache && \
-    addgroup -S appgroup && adduser -S appuser -G appgroup
+COPY --chown=node:node --from=build /app/.next/standalone ./
+COPY --chown=node:node --from=build /app/.next/static ./.next/static
+COPY --chown=node:node --from=build /app/public ./public
 
-COPY --chown=appuser:appgroup --from=build /app/.next/standalone ./
-COPY --chown=appuser:appgroup --from=build /app/.next/static ./.next/static
-COPY --chown=appuser:appgroup --from=build /app/public ./public
-
-USER appuser
+USER node
 
 EXPOSE 3000
 
@@ -32,6 +27,6 @@ ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD wget -qO /dev/null http://127.0.0.1:3000/admin || exit 1
+    CMD ["node", "-e", "fetch('http://127.0.0.1:3000/admin').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
 
 ENTRYPOINT ["node", "server.js"]

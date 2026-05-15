@@ -15,7 +15,7 @@
 ## Корень сервиса
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `AccountService.sln` | Solution-файл .NET |
 | `Dockerfile` | Контейнеризация API-сервиса |
 | `docker-compose.yml` | Локальный стек сервиса: API, PostgreSQL, Redis profile |
@@ -69,7 +69,7 @@ HTTP и Kafka-входные точки.
 ## tests/
 
 | Папка | Назначение |
-|------|------------|
+| ----- | ---------- |
 | `AccountService.UnitTests/` | Юнит-тесты прикладной логики |
 | `AccountService.IntegrationTests/` | Интеграционные тесты с реальной инфраструктурой |
 | `AccountService.ContractTests/` | Контрактные тесты публичного API |

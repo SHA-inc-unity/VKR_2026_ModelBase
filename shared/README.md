@@ -17,7 +17,7 @@ pip install -e ./shared
 ## Модули
 
 | Модуль | Описание |
-|--------|----------|
+| ------ | -------- |
 | `modelline_shared.schemas` | Pydantic BaseModel: `HealthResponse` и будущие shared-контракты |
 | `modelline_shared.messaging.schemas` | `Envelope` (универсальный Kafka-конверт), `HealthReply` |
 | `modelline_shared.messaging.topics` | Константы топиков Kafka (`CMD_DATA_*`, `CMD_ANALYTICS_*`, `EVT_*`) + `reply_inbox()` |
@@ -25,7 +25,7 @@ pip install -e ./shared
 
 ## Kafka-конвенция именования топиков
 
-```
+```text
 cmd.<service>.<action>        — команда с ожидаемым ответом
 reply.<requester>.<instance>  — приватный inbox для reply
 events.<service>.<event>      — fire-and-forget события

@@ -1,0 +1,60 @@
+# ModelLine Deployment Configuration
+# ------------------------------------
+# Each entry describes one deployable unit.
+#
+# Fields (per service):
+#   name         - Human-readable label used in log output.
+#   compose_file - Path to docker-compose.yml relative to this YAML file's directory.
+#   services     - List of docker-compose service names to pull + (re)start.
+#   profile      - Optional: docker-compose --profile flag (omit or "" to skip).
+#   pull          - Whether to pull the latest images before up (default: true).
+#   restart_policy - "if_changed" (restart only when the digest changes, default)
+#                    "always"     (always restart)
+#                    "never"      (pull only, never restart)
+
+version: "1"
+
+services:
+
+  - name: gateway
+    compose_file: ../microservice_gateway/docker-compose.yml
+    services:
+      - gateway
+    pull: true
+    restart_policy: if_changed
+
+  - name: data
+    compose_file: ../microservice_data/docker-compose.yml
+    services:
+      - data
+    pull: true
+    restart_policy: if_changed
+
+  - name: analytic
+    compose_file: ../microservice_analitic/docker-compose.yml
+    services:
+      - analitic
+    pull: true
+    restart_policy: if_changed
+
+  - name: account
+    compose_file: ../microservice_account/docker-compose.yml
+    services:
+      - account
+    pull: true
+    restart_policy: if_changed
+
+  - name: infra
+    compose_file: ../microservice_infra/docker-compose.yml
+    services:
+      - kafka
+      - redis
+      - postgres
+    pull: true
+    restart_policy: never   # infra restarted only on explicit intent
+
+# ------------------------------------
+# Deploy order is top-to-bottom.
+# Infra should be first if you want to
+# ensure it is running before apps start.
+# ------------------------------------

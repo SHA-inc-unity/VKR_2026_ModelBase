@@ -79,13 +79,13 @@
 ## Корень сервиса
 
 | Файл | Описание |
-|------|-----------|
+| ---- | --------- |
 | `package.json` | Зависимости: `next@14`, `react@18`, `kafkajs@2`, `ioredis@5`, `uuid@10`, Tailwind CSS 3, shadcn/ui (Radix UI), lucide-react, class-variance-authority, clsx, tailwind-merge, tailwindcss-animate, **recharts ^2.15.0**. `@aws-sdk/client-s3` больше не используется — байты через Admin не проходят, DataService возвращает presigned URL для обоих режимов экспорта. |
 | `next.config.js` | Next.js конфиг (App Router, environment proxy). `output: 'standalone'`, `basePath: '/admin'`, `assetPrefix: '/admin'`, `env.NEXT_PUBLIC_BASE_PATH: '/admin'`. basePath встраивается в билд — требует пересборки образа при изменении. |
 | `tsconfig.json` | TypeScript-конфиг (`@/` → `src/`) |
 | `tailwind.config.js` | Tailwind CSS конфиг: `darkMode: ['class']`, shadcn CSS var tokens, keyframes pulse-dot/shimmer/accordion. Кастомные экраны: `xs: '480px'` (phone landscape / small portrait), `3xl: '1920px'` (Full HD), `4xl: '2560px'` (4K) |
 | `postcss.config.js` | PostCSS конфиг (CommonJS): регистрирует `tailwindcss` и `autoprefixer` как PostCSS плагины. **Критичен** — без него Next.js не обрабатывает директивы `@tailwind` в `globals.css` и utility-классы не генерируются (CSS bundle ~4 KB вместо ~26 KB). |
-| `Dockerfile` | Multi-stage: `deps` → `builder` → `runner` (Node 20 Alpine) |
+| `Dockerfile` | Multi-stage build на `cgr.dev/chainguard/node:latest` и runtime на `cgr.dev/chainguard/node:latest-slim`; standalone Next.js image с отдельным non-root runtime user |
 | `docker-compose.yml` | Поддерживает **два режима**. `admin` — local-stack service: `expose: ["3000"]`, подключён к `modelline_net`, наружу не публикуется, browser-facing вход даёт nginx из `microservice_infra` на `8501/admin/*`. `admin-online` — profile `online`, отдельная online-head нода для split deployment: публикует `${ADMIN_PORT:-8501}:3000`, не требует `modelline_net` и читает внешние адреса из `ONLINE_*` namespace (`ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`). В обоих случаях Admin не ходит в MinIO напрямую и остаётся zero-byte для dataset export. |
 
 ---
@@ -95,7 +95,7 @@
 ### Корень
 
 | Файл | Описание |
-|------|-----------|
+| ---- | --------- |
 | `layout.tsx` | Root layout: Inter шрифт, **адаптивный flex-контейнер** `flex h-screen overflow-hidden flex-col md:flex-row` — на `< md` Sidebar становится нижней навигацией (order-last), на `md+` сидит слева. `<main>` имеет fluid padding `p-3 sm:p-4 md:p-5 lg:p-6` и `pb-14 md:pb-5 lg:pb-6` (отступ под bottom-nav на мобилке). Внутри main — `<div className="max-w-full md:max-w-[1920px] mx-auto w-full">` (ограничение только с md, на узких — full-width). Без header. |
 | `globals.css` | `@layer base :root {}` с CSS vars. Актуальные значения: `--card: 222 47% 16%`, `--border: 217 33% 22%`, `--muted: 217 33% 20%`, `--accent: 217 33% 25%`. **Fluid type scale** `--font-size-xs` … `--font-size-3xl` через `clamp()`, диапазон 360—2560 px (для 20:9—9:20 adaptation). **Responsive sidebar width var** `--sidebar-width`: `0px` (mobile, bottom-nav) → `3.5rem` с `md` (icon-only) → `14rem` с `lg` (expanded). `.status-dot-ok` (pulse-dot анимация). |
 | `page.tsx` | Dashboard Bento Grid. Row 1: `StatCard` (×4) с `border-l-4` акцентами (`grid-cols-2 xl:grid-cols-4`). Row 2: `grid-cols-1 lg:grid-cols-2` — стек из 6 `ServiceCard` слева: 2 Kafka health (`microservice_data`, `microservice_analitic`) и 4 HTTP probe через `fetchInfraHealth()` (`Redpanda`, `MinIO`, `account`, `gateway`), `CoverageBar` chart справа. Маппинг infra → `ServiceHealth`: `online` → `{ status: 'ok' }`, `offline` → `{ status: 'error', error }`. В online-head режиме те же карточки продолжают работать через env-переопределения `ONLINE_*`, без локальной `modelline_net`. `anyLoading` = `dataLoading` + `tablesLoading` + `modelsLoading` + `infraLoading` (OR). Row 3: Dataset shadcn Table. Авто-рефреш через `useEvents(EVT_ANALYTICS_MODEL_READY)`. Empty-state placeholders в `StatCard.value` и `<span>` ячейках coverage-таблицы — `'–'` (en-dash, U+2013); JSX-комментарии — обычный `-`. **Redis cache**: на маунте читает `modelline:dashboard:v1` (TTL 60 мин) → восстанавливает `tables/coverage/modelCount` до завершения `refresh()`; после загрузки таблиц — `cacheWrite` fire-and-forget. Health-состояния не кешируются. |
@@ -103,7 +103,7 @@
 ### Страницы
 
 | Маршрут | Файл | Описание |
-|---------|------|----------|
+| ------- | ---- | -------- |
 | `/download` | `download/page.tsx` | **Dataset страница.** Layout: `grid-cols-1 lg:grid-cols-[380px,1fr]`. Левая колонка: конфигурация, кнопки операций и ingest progress UI; правая: coverage/stat cards; ниже Available Tables, Quality Block и Action History. `handleIngest` больше не делает долгий ingest RPC: single-TF и `ALL` сначала `await refreshCoverageState()`, затем отправляют быстрый `CMD_DATA_DATASET_JOBS_START` (`timeoutMs: 5_000`) и переводят TF в `queued`. `running` приходит только из remote job state (`useDatasetJobs` + SSE/job list). Если remote job реально создана, `loadingIngest` и page-level lock удерживаются до её terminal-state; если старт не состоялся, локальный busy-state снимается сразу по явному отказу backend. Для `ALL` локальный `AllIngestProgress` строится вокруг `allIngestJobIds` + `DatasetJobView[]`: рендерит 2 execution slot-а, очередь queued jobs, stalled-banner если очередь не двигается, и recent done/error list; running-slot показывает stage/progress/detail/elapsed/short job id, а succeeded+`completed=0` читается как нормальный no-op. Верхний `DatasetJobsPanel` оставлен функционально тем же, но косметически приведён к штатному тёмному карточному стилю admin-панели без светлого фона и выбивающихся инородных элементов. Ошибки старта (`schema_not_ready`, `bad_request`, `db_unavailable`, `pg_*`, `internal_error`) сразу переводят конкретный TF в `error` без ложного running. Coverage не обнуляется; после terminal jobs, quality-check и repair выполняется `refreshCoverageState()` и `handleListTables()`, поэтому UI всегда опирается на последнее реальное состояние БД. Dataset export остаётся Kafka-only и zero-byte для Admin: `/api/export/csv` возвращает только `presigned_url` без host-нормализации и без legacy raw-localhost fallback'а — URL уже подписан data-сервисом на browser-facing origin (внешний вход infra-nginx, по умолчанию `http://localhost:8501`), а `/modelline-blobs/*` стримит файл напрямую из MinIO; страница `download/page.tsx` использует ссылку как есть (`a.href = presigned_url; a.click()`), без `explainExportDownloadPath`-проверок и без переписывания host. Остальные операции (`handleCheckCoverage`, `handleDeleteRows`, `handleRepairDataset`, quality/repair, fix-all) сохраняют Kafka-only ownership: admin только запускает команды и отображает удалённый прогресс/результат. |
 | `/train` | `train/page.tsx` | Кастомный tab-switcher в `<header>`. Layout: `grid-cols-1 lg:grid-cols-2`. Левая: Config Card + Status Card (если обучается: `ProgressLine` при ≥2 точках, иначе `Progress`). Правая: Training History table. State: `progressHistory: StepPoint[]`, сбрасывается при `handleTrain`. Поллинг 3 с + `useEvents(EVT_ANALYTICS_TRAIN_PROGRESS)` для real-time обновлений прогресса. |
 | `/compare` | `compare/page.tsx` | CSS grid 2 колонки. shadcn Card в каждой: Select (symbol/timeframe) + Button Load + shadcn Table predictions. Кнопка Export CSV |
@@ -116,14 +116,14 @@
 ### Shared components
 
 | Файл | Описание |
-|------|-----------|
+| ---- | --------- |
 | `Sidebar.tsx` | **Трёхрежимная адаптивная навигация.** `detectMode()` по `window.innerWidth` + `resize` listener возвращает `'expanded-collapsible' \| 'icon-only' \| 'bottom-nav'`. **Mode A (≥ 1024 px)** — expanded-collapsible: `collapsed` state (`false`=`w-56`, `true`=`w-14`, `transition-all duration-200`), тоггл-кнопка `ChevronLeft/ChevronRight`, `localStorage('modelline:sidebar:collapsed')`. **Mode B (768—1023 px)** — icon-only: всегда `w-14`, тоггл скрыт (`{!isIconOnly && …}`), `effectiveCollapsed = true`. **Mode C (< 768 px)** — bottom-nav: early return `<aside className="order-last flex flex-row w-full h-14 border-t">`, `nav` = `flex-row items-stretch justify-around`, каждый Link = `flex flex-1 flex-col items-center justify-center gap-0.5`, показывается только иконка с `aria-label={label}`. Ключ `order-last` + parent `flex-col md:flex-row` дают nav внизу. Kafka healthcheck каждые 30 с во всех режимах. Footer/dot/версия видны только в Mode A (expanded). Навигация: Dashboard / Download / Train / Compare / **Anomaly** (`ShieldAlert`). |
 | `Toast.tsx` | Глобальные toast-уведомления. Хук `useToast()` + `ToastProvider`. Типы: `success`, `error`, `info`. Авто-закрытие 4 с |
 
 ### src/components/ui/ (shadcn/ui компоненты)
 
 | Файл | Примитив | Описание |
-|------|----------|----------|
+| ---- | -------- | -------- |
 | `button.tsx` | — | CVA: variant(default/destructive/outline/secondary/ghost/link), size(default/sm/lg/icon). Radix Slot для `asChild` |
 | `card.tsx` | — | Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter |
 | `badge.tsx` | — | CVA: default/secondary/destructive/outline/success/warning/info |
@@ -142,7 +142,7 @@
 ## src/lib/ (утилиты)
 
 | Файл | Ключевые объекты | Описание |
-|------|-----------------|----------|
+| ---- | ---------------- | -------- |
 | `utils.ts` | `cn(...inputs)` | `clsx` + `tailwind-merge` утилита для shadcn |
 | `redisCache.ts` | `cacheGet(key)`, `cacheSet(key, value, ttlSeconds)` | **Server-only** (`import 'server-only'`). Singleton `ioredis` клиент (URL из `REDIS_URL`). Параметры: `lazyConnect, enableOfflineQueue:false, connectTimeout:2000, commandTimeout:1000, maxRetriesPerRequest:0, retryStrategy:()=>null`. Все ошибки поглощаются — Redis недоступен = прозрачный fallback. |
 | `cacheClient.ts` | `cacheRead<T>(key)`, `cacheWrite(key, value, ttl)` | **Browser-safe**. Обращается к `/api/cache` через `fetch`. Значения сериализуются в JSON. Все ошибки поглощаются. |
@@ -161,15 +161,16 @@
 ## src/hooks/
 
 | Файл | Описание |
-|------|-----------|
-| `useHistory.ts` | `HistoryEntry` тип, localStorage (`modelline:history`), max 100 записей, `addEntry()` || `useEvents.ts` | SSE hook `useEvents(handlers)`. Открывает `EventSource('${NEXT_PUBLIC_BASE_PATH}/api/events')` на mount, диспатчит `{ type, payload }` в соответствующий handler, закрывает на unmount. Handlers в ref (без реконнекта). `EventHandlers` = `Partial<{ EVT_ANALYTICS_TRAIN_PROGRESS, EVT_ANALYTICS_MODEL_READY, EVT_DATA_INGEST_PROGRESS, EVT_ANALITIC_DATASET_REPAIR_PROGRESS }>`. URL строится через `process.env.NEXT_PUBLIC_BASE_PATH ?? ''`. |---
+| ---- | -------- |
+| `useHistory.ts` | `HistoryEntry` тип, localStorage (`modelline:history`), max 100 записей, `addEntry()` |
+| `useEvents.ts` | SSE hook `useEvents(handlers)`. Открывает `EventSource('${NEXT_PUBLIC_BASE_PATH}/api/events')` на mount, диспатчит `{ type, payload }` в соответствующий handler, закрывает на unmount. Handlers в ref (без реконнекта). `EventHandlers` = `Partial<{ EVT_ANALYTICS_TRAIN_PROGRESS, EVT_ANALYTICS_MODEL_READY, EVT_DATA_INGEST_PROGRESS, EVT_ANALITIC_DATASET_REPAIR_PROGRESS }>`. |
 
 ## src/components/charts/ (Recharts компоненты)
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `CoverageBar.tsx` | `BarChart layout="vertical"` (горизонтальные бары). Props: `data: BarDatum[]` (`{ name, pct }`), `height?`. XAxis: 0–100%, YAxis: category (имя таблицы, truncated 20 chars). Primary fill color. Custom tooltip. Dynamic-import safe (только client). |
-| `ProgressLine.tsx` | `LineChart` двух линий: `loss` (primary) и `val_loss` (warning, опционально). Props: `points: StepPoint[]` (`{ step, loss?, val_loss? }`), `height?`. Dot только на последней точке. `isAnimationActive={false}`. Dynamic-import safe.
+| `ProgressLine.tsx` | `LineChart` двух линий: `loss` (primary) и `val_loss` (warning, опционально). Props: `points: StepPoint[]` (`{ step, loss?, val_loss? }`), `height?`. Dot только на последней точке. `isAnimationActive={false}`. Dynamic-import safe. |
 | `HistogramChart.tsx` | `BarChart` для гистограмм колонок. Props: `data: HistogramBucket[]` (`{ range_start, range_end, count }`), `height?`. Цвета HSL: MUTED_FG `hsl(215 20% 65%)`, PRIMARY `hsl(217 91% 60%)`, BG_CARD `hsl(222 47% 16%)`, BORDER `hsl(217 33% 22%)`. Dynamic import ssr:false. |
 | `BrowseAreaChart.tsx` | `AreaChart` для временных рядов из Browse-секции. Props: `data: { ts: number; val: number }[]`. Те же inline HSL-цвета, градиент `browseGrad`, `isAnimationActive={false}`, custom tooltip (дата `toLocaleString` + `fmtNum`). Dynamic import ssr:false. |
 | `AnomalyTimelineChart.tsx` | `ScatterChart` для Anomaly → Timeline tab. Props: `data: AnomalyTimelinePoint[]`, `types: string[]` (стабильный порядок строк). Категориальная Y-ось реализована через числовой YAxis + `tickFormatter` маппит индекс→имя типа (избегает багов recharts с `type='category'` на scatter). Цвет каждой точки через `<Cell>` (red=critical / yellow=warning). Custom tooltip с timestamp + severity + details. |
@@ -180,7 +181,7 @@
 ## API Routes (server-side)
 
 | Маршрут | Файл | Описание |
-|---------|------|----------|
+| ------- | ---- | -------- |
 | `POST /api/kafka` | `api/kafka/route.ts` | Универсальный Kafka proxy. Body: `{ topic, payload?, timeoutMs? }`. Возвращает `{ data }` или `{ error }` |
 | `GET /api/cache` | `api/cache/route.ts` | Redis cache bridge. GET `?key=X` → `{ value: string\|null }`. POST `{ key, value, ttl? }` → `{ ok: true }`. Сервер-единственный мост между браузером и Redis (через `redisCache.ts`). TTL по умолчанию 3600 с. |
 | `GET /api/health` | `api/health/route.ts` | Параллельный HTTP health-probe (через `Promise.allSettled`) для четырёх server-side адресов: `REDPANDA_ADMIN_URL/v1/status/ready`, `MINIO_URL/minio/health/live`, `ACCOUNT_URL/health`, `GATEWAY_URL/health`. Таймаут `2 000 мс` (`AbortSignal.timeout`). Local-stack использует docker-hostname, online-head — те же поля, но заполненные из `ONLINE_*` namespace на уровне compose (`admin-online`). Response 2xx → `{ status: 'online' }`, иначе/исключение → `{ status: 'offline', error }`. `dynamic = 'force-dynamic'` |
@@ -191,14 +192,14 @@
 ## Kafka-топики которые использует admin
 
 | Топик | Направление | Описание |
-|-------|------------|----------|
+| ----- | ---------- | -------- |
 | `cmd.data.health` | out | Health microservice_data |
 | `cmd.data.db.ping` | out | Kafka healthcheck из Sidebar (таймаут 2 с, опрос каждые 30 с) |
 | `cmd.data.dataset.list_tables` | out | Список таблиц |
 | `cmd.data.dataset.coverage` | out | Диапазон дат / кол-во строк |
 | `cmd.data.dataset.rows` | out | Срез данных |
 | `cmd.data.dataset.ingest` | out | Запуск ingestion |
-| `events.data.ingest.progress` | in  | Поэтапный прогресс ingest-а для Download-страницы (SSE через `useEvents`) |
+| `events.data.ingest.progress` | in | Поэтапный прогресс ingest-а для Download-страницы (SSE через `useEvents`) |
 | `events.analitic.dataset.repair.progress` | in | Поэтапный прогресс audit-repair (`load_ohlcv` / `recompute_features`) для Quality-блока (SSE через `useEvents`, ключ `EVT_ANALITIC_DATASET_REPAIR_PROGRESS`) |
 | `cmd.data.dataset.export` | out | Экспорт CSV, таймаут 300 с. Оба режима возвращают `{ presigned_url }`. Payload `{ table, start_ms, end_ms }` → DataService стримит CSV в MinIO, Admin передаёт URL как JSON 200. Payload `{ tables: string[], symbol: string, start_ms, end_ms }` (режим ALL) → DataService бундлирует ZIP через Pipe → MinIO, Admin передаёт URL как JSON 200. URL уже подписан data-сервисом на browser-facing origin (внешний вход infra-nginx, env `PUBLIC_DOWNLOAD_BASE_URL`, по умолчанию `http://localhost:8501`); `/modelline-blobs/*` стримит объект напрямую из MinIO. Admin **не нормализует** host и не имеет legacy fallback на raw `localhost:9000`/`minio:9000` — ответственность за корректный URL полностью на data-сервисе и infra-nginx. |
 | `cmd.data.dataset.column_stats` | out | df.info()-style агрегаты (Non-Null / Min / Max / Mean / Std) по всем колонкам таблицы. Anomaly → Inspect. |

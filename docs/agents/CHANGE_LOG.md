@@ -4,8 +4,22 @@
 
 ## 2026-05
 
+### 2026-05-16
+
+- `microservice_gateway`: доработан и закрыт блок ChartService + ChartRequestQueue. Зафиксированные изменения: (1) `ChartService` — ingest lock/marker снимается и при ошибке, а не только при успехе (`IngestErrorCooldownSeconds`); window-scoped coverage вместо full-table; (2) `DataServiceClient` — `claim_check` выделяется как отдельный large-payload сценарий и не трактуется как пустой результат; (3) `ChartRequestQueue` — coalescing-декоратор с `ConcurrentDictionary<string, InFlightEntry>` + `TaskCompletionSource` + `WaitAsync(callerCt)` для изоляции CT-ов; workCts независим от caller CT; (4) `MarketSettings` — 4 новых queue-поля; (5) 4 deploy-скрипта в `deploy/`; (6) интеграционные тесты `MarketQueueIntegrationTests` (3 теста: coalescing, independent keys, waiter cancellation). Итог: 117/117 тестов проходят (78 unit + 31 integration + 4 smoke + 4 contract).
+
+### 2026-05-15
+
+- `microservice_account` + `microservice_gateway`: для Docker Compose изменены default host ports backend-only схемы. `account` теперь публикуется как `${ACCOUNT_API_PORT:-7510}:5000`, `gateway` — как `${GATEWAY_API_PORT:-7520}:5020`. Сервисные README и frontend API reference синхронизированы под новые внешние порты; внутренние container ports не менялись.
+
+- `microservice_gateway`: добавлен отдельный `API.md` как frontend-oriented HTTP contract reference. В одном месте собраны base URL, auth model, общие соглашения JSON/header/time formats, error contract, degraded/pending semantics, детальные описания endpoint-ов (`bootstrap`, `account/me`, `dashboard`, `market/config`, `market/chart`, `news`, `notifications`, `health`) и примеры wire-format ответов. Одновременно README/STRUCTURE и agent-doc route обновлены так, чтобы `API.md` стал обязательной опорой перед изменением gateway API.
+
+- `microservice_gateway`: реализован полный market HTTP API для Kotlin mobile client — `GET /api/v1/market/config` и `GET /api/v1/market/chart`. Добавлена папка `src/GatewayService.API/Market/` с 16 production-файлами: `TimeframeMap`, `CandleCountGrid`, `ServiceResult<T>`, `MarketSettings`, `IMarketCacheService` + `RedisMarketCacheService`, `IBybitSymbolProvider` + `BybitSymbolProvider`, `IMarketConfigService` + `MarketConfigService`, `IChartService` + `ChartService`, `MarketIngestService`, `MarketController`, DTOs. Включён Redis-кэш с stampede protection (`SetIfNotExistsAsync`), fire-and-forget Kafka ingest. Добавлены unit-тесты (72) и integration-тесты (28); итого 108/108 проходят.
+
 ### 2026-05-03
 
+- Workspace-wide VS Code Problems cleanup завершён. Исправлены markdownlint-диагностики в root/service/shared/infra docs и связанном agent-doc слое; повторяющиеся причины были типовыми: compact separator rows без пробелов, смешение aligned/compact table styles, отсутствующий language у fenced block, отсутствие blank line вокруг heading/list/fence, лишние `|` внутри табличных строк и отсутствие завершающего newline в EOF.
+- `microservice_admin/Dockerfile`: финальный base-image fix для security warning — переход на `cgr.dev/chainguard/node:latest` (build) и `cgr.dev/chainguard/node:latest-slim` (runtime). Попытки остаться на `node:22-alpine3.22` и затем на `node:22-bookworm-slim` warning не снимали.
 - `microservicestarter/README.md`: после дополнительной проверки Markdown исправлены неверные PowerShell-примеры для `restart.ps1` (`api/full/deps/postgres/redis` теперь документированы с явным `-Mode` и target-service), а описание параллельного запуска переформулировано под реальное multi-service поведение launcher-а.
 - `microservicestarter`: исправлен PowerShell parallel fan-out для `start.ps1` и `restart.ps1`. В этом host-е `Start-Process(...).ExitCode` возвращал пустое значение даже при успешном дочернем завершении, из-за чего launcher ложно падал после успешного `docker compose`. Parent-side проверка переписана на явный `ResultFile` handoff (`OK` / `FAIL`) между дочерним и родительским launcher-процессом; живые прогоны `./restart` и `./start` на Windows подтверждены.
 - `microservicestarter`: `start`/`restart` для multi-service сценариев ускорены параллельным fan-out. Launcher сначала поднимает `microservice_infra`, затем запускает/перезапускает остальные выбранные сервисы параллельно отдельными дочерними процессами; для `restart` `git pull` по-прежнему выполняется один раз до этого fan-out.

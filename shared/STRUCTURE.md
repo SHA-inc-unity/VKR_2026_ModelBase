@@ -13,7 +13,7 @@
 ## Корень
 
 | Файл | Описание |
-|------|----------|
+| ---- | -------- |
 | `pyproject.toml` | Пакет `modelline-shared 0.1.0`. Зависимости: `pydantic>=2.5`, `aiokafka>=0.11`. `pip install -e ./shared` |
 
 ---
@@ -23,7 +23,7 @@
 ### schemas.py
 
 | Класс | Описание |
-|-------|----------|
+| ----- | -------- |
 | `HealthResponse` | `status`, `service`, `version` — универсальный health-ответ для всех сервисов |
 
 ### messaging/
@@ -33,7 +33,7 @@
 Все Kafka-топики как строковые константы. Зеркалится в `microservice_admin/src/lib/topics.ts`.
 
 | Константа | Значение | Тип |
-|-----------|---------|-----|
+| --------- | ------- | --- |
 | `CMD_DATA_HEALTH` | `cmd.data.health` | req/reply |
 | `CMD_ANALYTICS_HEALTH` | `cmd.analytics.health` | req/reply |
 | `CMD_DATA_DATASET_LIST_TABLES` | `cmd.data.dataset.list_tables` | req/reply |
@@ -68,17 +68,17 @@
 
 `reply_inbox(service, instance_id)` → `reply.{service}.{instance_id}`
 
-#### schemas.py
+#### messaging/schemas.py
 
 | Класс | Поля | Описание |
-|-------|------|----------|
+| ----- | ---- | -------- |
 | `Envelope` | `message_id`, `correlation_id`, `reply_to`, `issued_at`, `type`, `payload` | Универсальный конверт для каждого Kafka-сообщения |
 | `HealthReply` | `status`, `service`, `version` | Типизированный payload ответа на `cmd.*.health` |
 
 #### client.py
 
 | Класс/функция | Описание |
-|---------------|----------|
+| ------------- | -------- |
 | `KafkaClient` | Async Kafka client (aiokafka). Singleton per service instance. Поля: `bootstrap_servers`, `service_name`, `instance_id`, `request_timeout` |
 | `.start(subscribe=[...])` | Запуск producer + consumer. Авто-подписка на private reply inbox |
 | `.register_handler(topic, async_fn)` | Регистрация async-обработчика. Если `reply_to` в конверте — ответ публикуется автоматически |
