@@ -344,7 +344,12 @@ export default function DashboardPage() {
 
       {/* в”Ђв”Ђ Header в”Ђв”Ђ */}
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-2xl font-bold tracking-tight">{t('dashboard.title')}</h1>
+        <div className="flex min-w-0 items-center gap-3">
+          <h1 className="text-2xl font-bold tracking-tight">{t('dashboard.title')}</h1>
+          <Badge variant="outline" className="max-w-full truncate font-mono text-[11px]">
+            {connectionTarget}
+          </Badge>
+        </div>
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-xs text-muted-foreground hidden sm:block">

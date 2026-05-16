@@ -127,7 +127,12 @@ export function Sidebar() {
           <Zap className="w-4 h-4 text-primary-foreground" />
         </div>
         {!effectiveCollapsed && (
-          <span className="font-bold text-base tracking-tight truncate">ModelLine</span>
+          <div className="min-w-0">
+            <div className="font-bold text-base tracking-tight truncate">ModelLine</div>
+            <div className="truncate font-mono text-[10px] text-muted-foreground">
+              {connectionTarget}
+            </div>
+          </div>
         )}
         {!effectiveCollapsed && (
           /* Kafka status pulse — only when expanded */

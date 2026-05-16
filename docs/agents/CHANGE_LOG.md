@@ -6,6 +6,7 @@
 
 ### 2026-05-16
 
+- `microservice_admin`: отображение target backend усилено ещё раз. `connectionTarget` теперь дублируется в трёх верхнеуровневых точках UI: monospace badge рядом с title dashboard, brand header sidebar под логотипом и footer sidebar. Цель — убрать любой вопрос «где IP сервера в панели?» даже при беглом просмотре интерфейса.
 - `microservice_admin`: backend host/IP теперь дублируется не только в dashboard connection-card, но и в expanded sidebar footer. Это делает target backend видимым глобально на любой странице admin-панели и убирает зависимость от текущего route/layout.
 - `microservice_admin`: диагностика split deployment/Kafka сделана точнее. `/api/health` теперь возвращает не только HTTP reachability infra/account/gateway, но и реальный broker-level Kafka status с `bootstrapServers` и `error`; sidebar больше не считает `cmd.data.db.ping` за “Kafka health”, а dashboard connection-block показывает текущий Kafka bootstrap и текст broker error. Это позволяет отличать недоступный `9092`/advertise-path от случая, когда сам data-service не ответил на req/reply.
 - `microservicestarter`: исправлен shell-regression в `start.sh` / `restart.sh` для `onlyadmin`. Новый helper `resolve_admin_online_backend_host()` под `set -u` падал на `backend_host: unbound variable`, а его informational stdout мог попадать в command substitution. Переменная теперь инициализируется явно, а prompt/log output уходит в stderr, поэтому интерактивный запрос backend host/IP снова работает штатно.
