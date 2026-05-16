@@ -14,7 +14,11 @@
 registry `cgr.dev` может быть недоступен, а `docker compose up --build`
 должен работать штатно. В build stage также всегда создаётся каталог `public`,
 чтобы сборка не падала на clean server checkout, где пустая папка не хранится
-в git.
+в git. Для ускорения повторных rebuild на слабых серверах build stage теперь
+использует BuildKit cache mount для `.next/cache`, telemetry Next.js
+отключена, а production build пропускает ESLint через `next.config.js`
+(`eslint.ignoreDuringBuilds = true`). TypeScript typecheck и сам `next build`
+сохраняются.
 
 ## Deployment modes
 

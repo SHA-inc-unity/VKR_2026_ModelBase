@@ -46,6 +46,7 @@
 
 ### 2026-05-16
 
+- `microservice_admin`: добавлено безопасное ускорение Next.js build для слабого admin-host. В `Dockerfile` включён cache mount для `.next/cache` и отключена telemetry, а в `next.config.js` включено `eslint.ignoreDuringBuilds = true`. Это ускоряет повторные rebuild'ы без отключения TypeScript typecheck.
 - `microservice_admin`: найден вероятный root cause для текущего remote Kafka failure `This server does not host this topic-partition`. Reply-inbox topic в `lib/kafka.ts` создавался с `waitForLeaders: false`, а consumer сразу подписывался; для per-process reply topic это создавало race на leader election. Переведено на `waitForLeaders: true`.
 - `microservice_admin`: `connectionTarget` усилен до максимально заметного UI: теперь он виден рядом с title dashboard, под логотипом в sidebar header и в sidebar footer. Это прямой ответ на вопрос пользователя «где IP сервера в панели?».
 - `microservice_admin`: `connectionTarget` теперь дублируется и в expanded sidebar footer, не только на dashboard. Это прямой ответ на операторский запрос видеть IP/backend host глобально в admin-панели, даже если пользователь не на главной странице.

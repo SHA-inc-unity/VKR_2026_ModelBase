@@ -2,6 +2,7 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY package.json package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
@@ -9,12 +10,14 @@ RUN --mount=type=cache,target=/root/.npm \
 
 COPY . .
 RUN mkdir -p public
-RUN npm run build
+RUN --mount=type=cache,target=/app/.next/cache \
+    npm run build
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY --chown=node:node --from=build /app/.next/standalone ./
 COPY --chown=node:node --from=build /app/.next/static ./.next/static

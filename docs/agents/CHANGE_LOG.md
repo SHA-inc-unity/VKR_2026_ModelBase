@@ -6,6 +6,7 @@
 
 ### 2026-05-16
 
+- `microservice_admin`: ускорена server-side Next.js сборка для weak VPS/admin-host. `Dockerfile` теперь кэширует `.next/cache` между rebuild'ами через BuildKit cache mount и отключает telemetry, а `next.config.js` исключает ESLint из production build (`eslint.ignoreDuringBuilds = true`). TypeScript typecheck оставлен, так что ускорение не снимает базовую защиту от сломанных типов.
 - `microservice_admin`: исправлен вероятный Kafka reply-inbox race для remote `admin-online`. В `src/lib/kafka.ts` reply topic `reply.microservice_admin.<instance>` теперь создаётся с `waitForLeaders: true` перед consumer subscribe; это адресует ошибку Redpanda/KafkaJS `This server does not host this topic-partition`, которая всплывала именно на broker-level probe и ломала все Kafka req/reply вызовы (`cmd.data.health`, `cmd.analytics.health`, dataset pages).
 - `microservice_admin`: отображение target backend усилено ещё раз. `connectionTarget` теперь дублируется в трёх верхнеуровневых точках UI: monospace badge рядом с title dashboard, brand header sidebar под логотипом и footer sidebar. Цель — убрать любой вопрос «где IP сервера в панели?» даже при беглом просмотре интерфейса.
 - `microservice_admin`: backend host/IP теперь дублируется не только в dashboard connection-card, но и в expanded sidebar footer. Это делает target backend видимым глобально на любой странице admin-панели и убирает зависимость от текущего route/layout.
