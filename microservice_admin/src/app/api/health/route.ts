@@ -6,6 +6,7 @@
  * shared-infra services that sit in modelline_net and don't speak Kafka:
  * Redpanda's admin API and MinIO's liveness endpoint.
  */
+import { probeKafkaConnectivity } from '@/lib/kafka';
 import type { InfraHealthResponse, InfraServiceHealth } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -30,6 +31,8 @@ async function probe(url: string): Promise<InfraServiceHealth> {
 }
 
 export async function GET(): Promise<Response> {
+  const kafka = await probeKafkaConnectivity();
+
   const [redpanda, minio, account, gateway] = await Promise.allSettled([
     probe(`http://${REDPANDA_ADMIN_URL}/v1/status/ready`),
     probe(`http://${MINIO_URL}/minio/health/live`),
@@ -42,6 +45,7 @@ export async function GET(): Promise<Response> {
 
   const body: InfraHealthResponse = {
     connectionTarget: BACKEND_CONNECTION_TARGET,
+    kafka,
     redpanda: unwrap(redpanda),
     minio:    unwrap(minio),
     account:  unwrap(account),

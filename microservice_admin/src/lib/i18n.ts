@@ -43,6 +43,8 @@ const translations = {
     'dashboard.tables':       'Tables',
     'dashboard.infrastructure':'Infrastructure',
     'dashboard.connectedTo':  'Connected to',
+    'dashboard.kafkaBootstrap':'Kafka bootstrap',
+    'dashboard.kafkaError':    'Kafka error',
 
     // ── Dataset ──────────────────────────────────────────────────────────
     'dataset.title':          'Dataset',
@@ -146,6 +148,8 @@ const translations = {
     'dashboard.tables':       'Таблицы',
     'dashboard.infrastructure':'Инфраструктура',
     'dashboard.connectedTo':  'Подключение к',
+    'dashboard.kafkaBootstrap':'Kafka bootstrap',
+    'dashboard.kafkaError':    'Ошибка Kafka',
 
     // ── Dataset ──────────────────────────────────────────────────────────
     'dataset.title':          'Датасет',

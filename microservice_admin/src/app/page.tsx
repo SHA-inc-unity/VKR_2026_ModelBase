@@ -6,7 +6,7 @@ import { RefreshCw, Table2, Rows, CalendarClock, GitMerge, Server } from 'lucide
 import { kafkaCall } from '@/lib/kafkaClient';
 import { fetchInfraHealth } from '@/lib/healthClient';
 import { Topics } from '@/lib/topics';
-import type { ServiceHealth, TableCoverage, ModelInfo, InfraServiceHealth } from '@/lib/types';
+import type { ServiceHealth, TableCoverage, ModelInfo, InfraServiceHealth, KafkaBrokerHealth } from '@/lib/types';
 import { useEvents } from '@/hooks/useEvents';
 import { getCoveragePct } from '@/lib/constants';
 import { useLocale } from '@/lib/i18nContext';
@@ -151,6 +151,7 @@ export default function DashboardPage() {
   const [coverage,        setCoverage]        = useState<Record<string, TableCoverage>>({});
   const [modelCount,      setModelCount]      = useState<number | null>(null);
   const [connectionTarget, setConnectionTarget] = useState<string>('localhost');
+  const [kafkaBroker, setKafkaBroker] = useState<KafkaBrokerHealth | null>(null);
 
   const [analiticHealth, setAnaliticHealth] = useState<ServiceHealth | null>(null);
   const [redpandaInfra,  setRedpandaInfra]  = useState<InfraServiceHealth | null>(null);
@@ -268,6 +269,7 @@ export default function DashboardPage() {
       .then(infra => {
         const now = new Date();
         setConnectionTarget(infra.connectionTarget || 'localhost');
+        setKafkaBroker(infra.kafka);
         setRedpandaInfra(infra.redpanda);
         setMinioInfra(infra.minio);
         setAccountInfra(infra.account);
@@ -376,6 +378,18 @@ export default function DashboardPage() {
                 <div className="break-all font-mono text-base font-semibold text-foreground sm:text-lg">
                   {connectionTarget}
                 </div>
+                {kafkaBroker && (
+                  <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                    <div>
+                      {t('dashboard.kafkaBootstrap')}: <span className="font-mono">{kafkaBroker.bootstrapServers}</span>
+                    </div>
+                    {kafkaBroker.status === 'offline' && kafkaBroker.error && (
+                      <div className="text-destructive">
+                        {t('dashboard.kafkaError')}: {kafkaBroker.error}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
             <Badge variant="secondary" className="w-fit px-2.5 py-1 text-xs font-medium">

@@ -15,8 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
-import { kafkaCall } from '@/lib/kafkaClient';
-import { Topics } from '@/lib/topics';
+import { fetchInfraHealth } from '@/lib/healthClient';
 import { useLocale } from '@/lib/i18nContext';
 
 const NAV_KEYS = [
@@ -41,6 +40,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
   const [kafkaOk,   setKafkaOk]   = useState<boolean | null>(null);
+  const [connectionTarget, setConnectionTarget] = useState<string>('localhost');
   const [collapsed, setCollapsed] = useState(false);
   const [mode, setMode] = useState<Mode>('expanded-collapsible');
 
@@ -69,10 +69,12 @@ export function Sidebar() {
   useEffect(() => {
     const check = async () => {
       try {
-        await kafkaCall(Topics.CMD_DATA_DB_PING, undefined, 2_000);
-        setKafkaOk(true);
+        const infra = await fetchInfraHealth();
+        setKafkaOk(infra.kafka.status === 'online');
+        setConnectionTarget(infra.connectionTarget || 'localhost');
       } catch {
         setKafkaOk(false);
+        setConnectionTarget('localhost');
       }
     };
     check();
@@ -231,6 +233,14 @@ export function Sidebar() {
                 ))}
               </div>
               <p className="text-xs text-muted-foreground opacity-50">v1.0.0</p>
+            </div>
+            <div className="mb-2 rounded-md border border-border/80 bg-background/30 px-2 py-1.5">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                {t('dashboard.connectedTo')}
+              </div>
+              <div className="mt-1 break-all font-mono text-[11px] font-semibold text-foreground">
+                {connectionTarget}
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <div className={cn(

@@ -170,8 +170,16 @@ export interface InfraServiceHealth {
   error?: string;
 }
 
+export interface KafkaBrokerHealth {
+  status: 'online' | 'offline';
+  bootstrapServers: string;
+  error?: string;
+  replyInbox?: string;
+}
+
 export interface InfraHealthResponse {
   connectionTarget: string;
+  kafka:    KafkaBrokerHealth;
   redpanda: InfraServiceHealth;
   minio:    InfraServiceHealth;
   account:  InfraServiceHealth;

@@ -217,3 +217,25 @@ export async function kafkaRequest(
 export function kafkaStatus(): { replyInbox: string; pending: number } {
   return { replyInbox: REPLY_INBOX, pending: pending.size };
 }
+
+export async function probeKafkaConnectivity(): Promise<{
+  status: 'online' | 'offline';
+  bootstrapServers: string;
+  error?: string;
+  replyInbox?: string;
+}> {
+  try {
+    await ensureStarted();
+    return {
+      status: 'online',
+      bootstrapServers: BOOTSTRAP_SERVERS,
+      replyInbox: REPLY_INBOX,
+    };
+  } catch (err) {
+    return {
+      status: 'offline',
+      bootstrapServers: BOOTSTRAP_SERVERS,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}

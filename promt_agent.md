@@ -46,6 +46,8 @@
 
 ### 2026-05-16
 
+- `microservice_admin`: `connectionTarget` теперь дублируется и в expanded sidebar footer, не только на dashboard. Это прямой ответ на операторский запрос видеть IP/backend host глобально в admin-панели, даже если пользователь не на главной странице.
+- `microservice_admin`: Kafka-диагностика разделена от data-service ping. `/api/health` теперь возвращает broker-level Kafka status с `bootstrapServers` и `error`, sidebar использует именно его, а connection block на dashboard показывает bootstrap server и broker error. Это нужно для split deployment, где `9644/7510/7520` могут быть доступны, а `9092` или advertise-path всё ещё сломан.
 - `microservicestarter`: исправлен shell-bug в `start.sh` / `restart.sh` после раннего prompt-а для `onlyadmin`. Под `set -u` helper падал на `backend_host: unbound variable`, а лог в stdout мог загрязнить command substitution; теперь `backend_host` инициализируется пустой строкой, а informational prompt/log выводится в stderr.
 - `microservice_admin` + `microservicestarter`: connection target на dashboard усилен до отдельного заметного блока над stat cards, а `onlyadmin` теперь заранее спрашивает backend host/IP в консоли до `docker compose`, если `ONLINE_BACKEND_HOST` пустой. Это убирает ситуацию, когда оператор не видит target backend в UI и не получает явного prompt-а на split admin-head.
 - `microservice_admin`: на главной dashboard добавлен явный badge `Connected to`, чтобы сразу видеть реальный backend host/IP текущего admin-head. Источник унифицирован через runtime env `BACKEND_CONNECTION_TARGET`: local stack показывает `localhost`, `admin-online` получает значение из `ONLINE_BACKEND_HOST`, а `/api/health` возвращает его в `connectionTarget`.
