@@ -72,7 +72,7 @@ function Get-EnvValue {
     if (-not (Test-Path $EnvFile)) { return "" }
     $pattern = '^' + [regex]::Escape($Key) + '=(.*)$'
     foreach ($line in Get-Content $EnvFile) {
-        if ($line -match $pattern) { return $Matches[1] }
+        if ($line -match $pattern) { return $Matches[1].Trim() }
     }
     return ""
 }
@@ -109,6 +109,45 @@ function Test-BackendHost {
     }
 }
 
+function Resolve-AdminOnlineBackendHost {
+    param([string]$SvcDir, [string]$ExplicitBackendHost)
+    $envFile = Join-Path $SvcDir ".env"
+    $envExample = Join-Path $SvcDir ".env.example"
+    if (-not (Test-Path $envFile)) {
+        if (-not (Test-Path $envExample)) {
+            Write-Fail "[microservice_admin] .env.example не найден — не можем настроить admin-online."
+        }
+        Copy-Item $envExample $envFile
+    }
+
+    $currentBackendHost = (Get-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST").Trim()
+    $resolvedBackendHost = [string]$ExplicitBackendHost
+    $resolvedBackendHost = $resolvedBackendHost.Trim()
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
+        Test-BackendHost -Value $resolvedBackendHost
+        return $resolvedBackendHost
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($currentBackendHost)) {
+        Write-Info "[microservice_admin] Текущий backend host/IP для admin-online: $currentBackendHost"
+        $answer = Read-Host "[microservice_admin] Введите backend host/IP для admin-online [$currentBackendHost]"
+        $resolvedBackendHost = if ([string]::IsNullOrWhiteSpace($answer)) { $currentBackendHost } else { $answer.Trim() }
+    } else {
+        Write-Info "[microservice_admin] ONLINE_BACKEND_HOST не задан — сейчас запросим backend host/IP для admin-online."
+        do {
+            $resolvedBackendHost = (Read-Host "[microservice_admin] Введите backend host/IP для admin-online").Trim()
+            if ([string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
+                Write-Warn "Backend host/IP не может быть пустым."
+            }
+        } while ([string]::IsNullOrWhiteSpace($resolvedBackendHost))
+    }
+
+    $resolvedBackendHost = $resolvedBackendHost.Trim()
+    Test-BackendHost -Value $resolvedBackendHost
+    return $resolvedBackendHost
+}
+
 function Configure-AdminOnlineEnv {
     param([string]$SvcDir, [string]$ExplicitBackendHost)
     $envFile = Join-Path $SvcDir ".env"
@@ -120,23 +159,7 @@ function Configure-AdminOnlineEnv {
         Copy-Item $envExample $envFile
     }
 
-    $currentBackendHost = Get-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST"
-    $resolvedBackendHost = $ExplicitBackendHost
-    if ([string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
-        if (-not [string]::IsNullOrWhiteSpace($currentBackendHost)) {
-            $answer = Read-Host "[microservice_admin] Backend host/IP для admin-online [$currentBackendHost]"
-            $resolvedBackendHost = if ([string]::IsNullOrWhiteSpace($answer)) { $currentBackendHost } else { $answer.Trim() }
-        } else {
-            do {
-                $resolvedBackendHost = (Read-Host "[microservice_admin] Backend host/IP для admin-online").Trim()
-                if ([string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
-                    Write-Warn "Backend host/IP не может быть пустым."
-                }
-            } while ([string]::IsNullOrWhiteSpace($resolvedBackendHost))
-        }
-    }
-
-    Test-BackendHost -Value $resolvedBackendHost
+    $resolvedBackendHost = Resolve-AdminOnlineBackendHost -SvcDir $SvcDir -ExplicitBackendHost $ExplicitBackendHost
 
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST" -Value $resolvedBackendHost
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_KAFKA_BOOTSTRAP_SERVERS" -Value "${resolvedBackendHost}:9092"
@@ -328,6 +351,8 @@ if ($Mode -eq "onlyadmin") {
     if ($Service -ne "all" -and $Service -ne "microservice_admin") {
         Write-Fail "mode=onlyadmin поддерживается только для microservice_admin"
     }
+    $adminSvcDir = Get-ServiceDirectory -Name "microservice_admin"
+    $BackendHost = Resolve-AdminOnlineBackendHost -SvcDir $adminSvcDir -ExplicitBackendHost $BackendHost
     Restart-Microservice -Name "microservice_admin" -RunMode "onlyadmin"
 } else {
     $selectedServices = @()

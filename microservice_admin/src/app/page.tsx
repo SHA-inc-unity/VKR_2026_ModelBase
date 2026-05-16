@@ -342,13 +342,7 @@ export default function DashboardPage() {
 
       {/* в”Ђв”Ђ Header в”Ђв”Ђ */}
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="space-y-2">
-          <h1 className="text-2xl font-bold tracking-tight">{t('dashboard.title')}</h1>
-          <Badge variant="secondary" className="gap-1.5 px-2.5 py-1 text-xs font-medium">
-            <Server className="h-3.5 w-3.5" />
-            {t('dashboard.connectedTo')}: {connectionTarget}
-          </Badge>
-        </div>
+        <h1 className="text-2xl font-bold tracking-tight">{t('dashboard.title')}</h1>
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-xs text-muted-foreground hidden sm:block">
@@ -367,6 +361,29 @@ export default function DashboardPage() {
           </Button>
         </div>
       </header>
+
+      <section>
+        <Card className="border-l-4 border-l-primary bg-card/90">
+          <CardContent className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="rounded-md bg-primary/10 p-2 text-primary">
+                <Server className="h-5 w-5" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  {t('dashboard.connectedTo')}
+                </div>
+                <div className="break-all font-mono text-base font-semibold text-foreground sm:text-lg">
+                  {connectionTarget}
+                </div>
+              </div>
+            </div>
+            <Badge variant="secondary" className="w-fit px-2.5 py-1 text-xs font-medium">
+              {connectionTarget === 'localhost' ? 'localhost' : 'admin-online'}
+            </Badge>
+          </CardContent>
+        </Card>
+      </section>
 
       {/* в”Ђв”Ђ Row 1: Stat cards в”Ђв”Ђ */}
       <section className="grid grid-cols-1 xs:grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-3">

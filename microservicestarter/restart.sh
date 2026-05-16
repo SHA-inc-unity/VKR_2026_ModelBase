@@ -85,7 +85,7 @@ get_env_value() {
     local env_file="$1"
     local key="$2"
     [[ -f "$env_file" ]] || return 0
-    grep -m1 -E "^${key}=" "$env_file" | sed -E "s|^${key}=||"
+    grep -m1 -E "^${key}=" "$env_file" | sed -E "s|^${key}=||" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
 }
 
 set_env_value() {
@@ -108,7 +108,7 @@ validate_backend_host() {
     [[ ! "$backend_host" =~ [[:space:]] ]] || fail "Для mode=onlyadmin host/IP не должен содержать пробелы: $backend_host"
 }
 
-configure_admin_online_env() {
+resolve_admin_online_backend_host() {
     local svc_dir="$1"
     local explicit_backend_host="${2:-}"
     local env_file="$svc_dir/.env"
@@ -121,26 +121,46 @@ configure_admin_online_env() {
 
     local current_backend_host backend_host
     current_backend_host="$(get_env_value "$env_file" "ONLINE_BACKEND_HOST")"
+    explicit_backend_host="$(printf '%s' "$explicit_backend_host" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
 
     if [[ -n "$explicit_backend_host" ]]; then
         backend_host="$explicit_backend_host"
-    elif [[ -t 0 ]]; then
-        if [[ -n "$current_backend_host" ]]; then
-            read -rp "[microservice_admin] Backend host/IP для admin-online [$current_backend_host]: " backend_host
+    elif [[ -n "$current_backend_host" ]]; then
+        if [[ -t 0 ]]; then
+            info "[microservice_admin] Текущий backend host/IP для admin-online: $current_backend_host"
+            read -rp "[microservice_admin] Введите backend host/IP для admin-online [$current_backend_host]: " backend_host
             backend_host="${backend_host:-$current_backend_host}"
         else
-            while [[ -z "$backend_host" ]]; do
-                read -rp "[microservice_admin] Backend host/IP для admin-online: " backend_host
-                [[ -z "$backend_host" ]] && warn "Backend host/IP не может быть пустым."
-            done
+            backend_host="$current_backend_host"
         fi
-    elif [[ -n "$current_backend_host" ]]; then
-        backend_host="$current_backend_host"
+    elif [[ -t 0 ]]; then
+        info "[microservice_admin] ONLINE_BACKEND_HOST не задан — сейчас запросим backend host/IP для admin-online."
+        while [[ -z "$backend_host" ]]; do
+            read -rp "[microservice_admin] Введите backend host/IP для admin-online: " backend_host
+            [[ -z "$backend_host" ]] && warn "Backend host/IP не может быть пустым."
+        done
     else
         fail "Для mode=onlyadmin укажи backend host/IP третьим аргументом или сохрани ONLINE_BACKEND_HOST в microservice_admin/.env"
     fi
 
+    backend_host="$(printf '%s' "$backend_host" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
     validate_backend_host "$backend_host"
+    printf '%s' "$backend_host"
+}
+
+configure_admin_online_env() {
+    local svc_dir="$1"
+    local explicit_backend_host="${2:-}"
+    local env_file="$svc_dir/.env"
+    local env_example="$svc_dir/.env.example"
+
+    if [[ ! -f "$env_file" ]]; then
+        [[ -f "$env_example" ]] || fail "[microservice_admin] .env.example не найден — не можем настроить admin-online."
+        cp "$env_example" "$env_file"
+    fi
+
+    local backend_host
+    backend_host="$(resolve_admin_online_backend_host "$svc_dir" "$explicit_backend_host")"
 
     set_env_value "$env_file" "ONLINE_BACKEND_HOST" "$backend_host"
     set_env_value "$env_file" "ONLINE_KAFKA_BOOTSTRAP_SERVERS" "$backend_host:9092"
@@ -297,6 +317,8 @@ do_git_pull
 
 if [[ "$MODE" == "onlyadmin" ]]; then
     [[ "$TARGET" == "all" || "$TARGET" == "microservice_admin" ]] || fail "mode=onlyadmin поддерживается только для microservice_admin"
+    admin_svc_dir="$(get_service_directory "microservice_admin")"
+    BACKEND_HOST="$(resolve_admin_online_backend_host "$admin_svc_dir" "${BACKEND_HOST:-}")"
     restart_service "microservice_admin" "onlyadmin"
 else
     declare -a selected_services=()
