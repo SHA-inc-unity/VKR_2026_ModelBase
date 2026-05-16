@@ -42,6 +42,17 @@ registry `cgr.dev` может быть недоступен, а `docker compose 
 - внешние адреса берутся из namespace `ONLINE_*`: `ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`
 - для split deployment эти `ONLINE_*` должны указывать на приватный WG/private DNS адрес backend-хоста, а не на `localhost`; рекомендуемая схема описана в `microservice_infra/WG_WSTUNNEL.md`
 
+Канонический URL для браузера в этом режиме: `http://<admin-host>:8501/admin/`.
+`admin-online` работает с `basePath=/admin`, поэтому bare `http://<admin-host>:8501/`
+не должен считаться правильной точкой входа. Если backend-хост запущен в
+режиме `noadmin`, то его собственный `8501` тоже не является адресом панели:
+UI живёт только на отдельном admin-host.
+
+Этот URL по умолчанию именно `http`, а не `https`: compose публикует
+`${ADMIN_PORT:-8501}:3000` напрямую без TLS. Если нужен браузерный вход
+`https://<admin-host>:8501/admin/` или `https://admin.example.com/admin/`,
+перед `admin-online` должен стоять отдельный reverse proxy/TLS-terminator.
+
 Практически это означает следующее: если admin-head живёт на одном сервере, а backend на другом, пустые `ONLINE_*` оставлять нельзя. Иначе `admin-online` будет пытаться ходить в локальные `localhost:*`, а dashboard покажет `fetch failed` / `unreachable`. Для published backend ports дефолты у `admin-online` такие:
 
 - `ONLINE_ACCOUNT_URL` → `localhost:7510`

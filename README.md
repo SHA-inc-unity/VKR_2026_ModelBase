@@ -83,6 +83,13 @@ data, analitic, account и gateway, но без `microservice_admin`. Отдел
 `/admin` и работает против внешних Kafka/HTTP endpoints через namespace
 переменных `ONLINE_*`.
 
+Важное уточнение для split deployment:
+
+- рабочая UI-точка admin-панели находится на **admin-host** по адресу `http://<admin-host>:8501/admin/`
+- в текущем compose `admin-online` публикует plain HTTP на `8501`; URL вида `https://<admin-host>:8501/admin/` не будет работать, пока перед `admin-online` не появится отдельный TLS reverse proxy/terminator
+- bare URL `http://<admin-host>:8501/` не является канонической точкой входа, потому что `admin-online` работает с `basePath=/admin`
+- на **backend-host** в режиме `noadmin` порт `8501` не должен считаться адресом admin-панели; там остаётся только infra-nginx/download ingress, а локальный `/admin/*` без поднятого `microservice_admin` не является рабочей UI-точкой
+
 Рекомендуемый transport для общей приватной сети между этими двумя машинами — **WireGuard over WStunnel (WSS/443)**. Подробная схема есть в [microservice_infra/WG_WSTUNNEL.md](microservice_infra/WG_WSTUNNEL.md).
 
 Критичный technical detail для split deployment: backend Kafka broker не должен advertise'ить `localhost:9092`. В `microservice_infra/docker-compose.yml` внешний advertise address теперь configurable через `REDPANDA_EXTERNAL_HOST` и `REDPANDA_EXTERNAL_PORT`; для remote admin-head туда нужно подставлять WG IP или private DNS backend-хоста.

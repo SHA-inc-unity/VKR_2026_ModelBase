@@ -12,6 +12,8 @@
 
 ### 2026-05-17
 
+- Уточнена схема URL для split `admin-online`: текущий compose публикует plain HTTP на `8501`, поэтому канонический адрес панели — `http://<admin-host>:8501/admin/`. Для `https://...` нужен отдельный reverse proxy/TLS-terminator.
+- Уточнён docs-layer вокруг split deployment `8501`: панель в этом режиме открывается только на `http://<admin-host>:8501/admin/`. `backend-host:8501` в `noadmin` остаётся infra/download ingress и не должен считаться адресом admin UI.
 - В корневой `README.md` добавлены явные правила для split deployment на двух Linux-хостах: сначала `backend noadmin`, затем проверка WG/private path, затем `admin onlyadmin`. Отдельно зафиксированы правила работы с конфигом: `services.conf` не трогаем для выбора роли хоста, host-specific настройки живут в `.env`, а после их изменения нужен новый `start`/`restart`.
 - Реализована поддержка bind address для split deployment: в `docker-compose.yml` трёх сервисов (`microservice_infra`, `microservice_account`, `microservice_gateway`) порты 9092/9644/9000/7510/7520 теперь принимают `REDPANDA_BIND_ADDR` / `MINIO_BIND_ADDR` / `ACCOUNT_BIND_ADDR` / `GATEWAY_BIND_ADDR` (default: `0.0.0.0`, не ломает local stack).
 - В `.env.example` трёх сервисов добавлены bind address переменные с комментариями local/split.
