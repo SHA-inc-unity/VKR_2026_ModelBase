@@ -112,6 +112,27 @@ NGINX_PORT=8501
 
 Это критично: если оставить `REDPANDA_EXTERNAL_HOST=localhost`, remote `admin-online` подключится к bootstrap broker, получит metadata и затем попытается говорить с `localhost:9092` у самого себя.
 
+Дополнительно задай bind address, чтобы Docker публиковал эти порты только на WG-интерфейсе, а не на всех:
+
+```env
+# Редпанда: порты 9092 и 9644 слушают только на WG IP backend-хоста
+REDPANDA_BIND_ADDR=10.44.0.1
+# MinIO: порт 9000 слушает только на WG IP
+MINIO_BIND_ADDR=10.44.0.1
+```
+
+Аналогично в `microservice_account/.env` и `microservice_gateway/.env`:
+
+```env
+# microservice_account/.env
+ACCOUNT_BIND_ADDR=10.44.0.1
+
+# microservice_gateway/.env
+GATEWAY_BIND_ADDR=10.44.0.1
+```
+
+Все четыре переменные по умолчанию равны `0.0.0.0` — это поведение сохраняется для local/full stack без изменений.
+
 Для dataset downloads на backend-хосте оставь отдельный browser-facing ingress, например:
 
 ```env
@@ -202,6 +223,51 @@ cd /srv/ModelLine/microservicestarter
 
 ## Firewall / exposure rules
 
+> **Важно: Docker bypasses UFW на Linux.**
+> Docker добавляет собственные iptables правила напрямую в цепочку `FORWARD` и `DOCKER`, минуя `INPUT` и правила UFW. Поэтому `ufw deny 9092` **не** защитит порт, опубликованный через `docker run -p 9092:9092`. Единственный надёжный способ — цепочка `DOCKER-USER` (Docker проверяет её до своих правил) или явная привязка порта к конкретному интерфейсу через `REDPANDA_BIND_ADDR`/`MINIO_BIND_ADDR`/etc.
+
+### Рекомендованный подход: BIND_ADDR + DOCKER-USER
+
+Первый и основной слой — привязать publish-ed порты к WG-интерфейсу через переменные, описанные в разделе "Backend env":
+
+```env
+REDPANDA_BIND_ADDR=10.44.0.1
+MINIO_BIND_ADDR=10.44.0.1
+ACCOUNT_BIND_ADDR=10.44.0.1
+GATEWAY_BIND_ADDR=10.44.0.1
+```
+
+Докер просто не откроет эти порты на публичном интерфейсе. NGINX на порту `8501` (или `443`) оставляем привязанным к `0.0.0.0` — это публичный download ingress.
+
+Второй слой — defence-in-depth через `DOCKER-USER`. Эти правила срабатывают первыми внутри docker-managed forwarding:
+
+```bash
+# Добавить на backend-хосте один раз
+
+# Закрыть прямой доступ к private backend ports с публичного интерфейса
+# (замени eth0 на реальный публичный интерфейс backend-хоста)
+sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 9092 -j DROP
+sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 9644 -j DROP
+sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 7510 -j DROP
+sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 7520 -j DROP
+sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 9000 -j DROP
+
+# Разрешить трафик с WG-интерфейса явно (wg0 — WireGuard interface)
+sudo iptables -I DOCKER-USER -i wg0 -j ACCEPT
+
+# Сохранить правила (Debian/Ubuntu)
+sudo apt-get install -y iptables-persistent
+sudo netfilter-persistent save
+```
+
+Проверить, что правила применились:
+
+```bash
+sudo iptables -L DOCKER-USER -n -v
+```
+
+Ожидаемый вывод — DROP-правила для eth0 на private ports и ACCEPT для wg0.
+
 ### Public and private ports on backend host
 
 Публично:
@@ -225,13 +291,52 @@ cd /srv/ModelLine/microservicestarter
 
 ## Проверка после поднятия
 
-С admin-хоста после `wg-quick up wg0`:
+### На backend-хосте
+
+Проверь WireGuard-интерфейс:
 
 ```bash
-ping 10.44.0.1
-curl http://10.44.0.1:9644/v1/status/ready
-curl http://10.44.0.1:7510/health
-curl http://10.44.0.1:7520/health
+# Интерфейс поднят и имеет WG IP
+ip addr show wg0
+# Ожидаемо: inet 10.44.0.1/24
+
+# WG peer зарегистрирован и получает handshake
+wg show
+# Ожидаемо: peer = admin public key, latest handshake = N seconds/minutes ago
+
+# Docker publishes ports на нужном интерфейсе
+ss -tlnp | grep -E ':9092|:9644|:7510|:7520|:9000'
+# Ожидаемо: все эти порты слушают на 10.44.0.1 (WG IP), а не на 0.0.0.0
+
+# Redpanda advertise-addr содержит WG IP, а не localhost
+docker compose -f microservice_infra/docker-compose.yml exec redpanda rpk cluster info -X brokers=127.0.0.1:9092 2>/dev/null | grep broker
+# Ожидаемо: broker addr = 10.44.0.1:9092
+```
+
+### С admin-хоста после `wg-quick up wg0`
+
+```bash
+# WG туннель работает
+wg show
+# Ожидаемо: endpoint = 127.0.0.1:51820, latest handshake = recent
+
+# Ping до backend WG IP
+ping -c 3 10.44.0.1
+
+# Redpanda admin API
+curl -sf http://10.44.0.1:9644/v1/status/ready && echo OK
+
+# Kafka bootstrap port (TCP connect check без Kafka client)
+bash -c 'echo > /dev/tcp/10.44.0.1/9092' 2>/dev/null && echo "Kafka port: OK" || echo "Kafka port: FAIL"
+
+# Account API health
+curl -sf http://10.44.0.1:7510/health && echo OK
+
+# Gateway API health
+curl -sf http://10.44.0.1:7520/health && echo OK
+
+# MinIO health
+curl -sf http://10.44.0.1:9000/minio/health/ready && echo OK
 ```
 
 Если Kafka reachable, но `microservice_admin` всё ещё не подключается, первым делом проверь, что backend advertise'ит не `localhost`, а WG-адрес:

@@ -44,8 +44,8 @@ services:
       - --advertise-rpc-addr
       - redpanda:33145
     ports:
-      - "${REDPANDA_EXTERNAL_PORT:-9092}:9092"
-      - "${REDPANDA_ADMIN_PORT:-9644}:9644"
+      - "${REDPANDA_BIND_ADDR:-0.0.0.0}:${REDPANDA_EXTERNAL_PORT:-9092}:9092"
+      - "${REDPANDA_BIND_ADDR:-0.0.0.0}:${REDPANDA_ADMIN_PORT:-9644}:9644"
     volumes:
       - type: bind
         source: ../.runtime-data/microservice_infra/redpanda
@@ -154,7 +154,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-modelline_secret}
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_BIND_ADDR:-0.0.0.0}:${MINIO_API_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - type: bind

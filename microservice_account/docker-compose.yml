@@ -8,7 +8,7 @@ services:
     container_name: account_service_api
     restart: unless-stopped
     ports:
-      - "${ACCOUNT_API_PORT:-7510}:5000"
+      - "${ACCOUNT_BIND_ADDR:-0.0.0.0}:${ACCOUNT_API_PORT:-7510}:5000"
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ConnectionStrings__DefaultConnection: ${DATABASE_URL}

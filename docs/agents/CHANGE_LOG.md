@@ -4,6 +4,13 @@
 
 ## 2026-05
 
+### 2026-05-17
+
+- `README.md`: добавлены два верхнеуровневых runbook-раздела для split deployment на двух Linux-хостах: правильный порядок перезапуска (`backend noadmin` → проверки WG/private path → `admin onlyadmin`) и правила работы с конфигом. Зафиксировано, что `services.conf` не используется для выбора роли хоста, а host-specific настройки живут в `.env` сервисов.
+- `microservice_infra`, `microservice_account`, `microservice_gateway`: в `docker-compose.yml` добавлены bind address переменные `REDPANDA_BIND_ADDR`, `MINIO_BIND_ADDR`, `ACCOUNT_BIND_ADDR`, `GATEWAY_BIND_ADDR`. По умолчанию `0.0.0.0` — поведение local stack не меняется. Для split deployment уставливается WG IP (10.44.0.1), что ограничивает publish-ед порты 9092/9644/9000/7510/7520 только WG-интерфейсом без участия firewall.
+- `microservice_infra/.env.example`, `microservice_account/.env.example`, `microservice_gateway/.env.example`: добавлены BIND_ADDR переменные с комментариями про local/split deployment значения.
+- `microservice_infra/WG_WSTUNNEL.md`: расширены три раздела — backend env (добавлены BIND_ADDR примеры), firewall (практические `iptables DOCKER-USER` команды + warning про Docker-UFW bypass), валидация (полный набор: `wg show`, `ip addr`, `ss`, `curl`, `bash /dev/tcp`).
+
 ### 2026-05-16
 
 - `microservice_admin`: исправлен новый blocker на слабом сервере, где `docker compose build admin-online` падал уже на `npm ci` с `exit 137`. В `Dockerfile` install stage переведён в low-memory режим: отключены `audit/fund/progress`, ограничен `NPM_CONFIG_MAXSOCKETS=1`, добавлен `NODE_OPTIONS=--max-old-space-size=384`. Локальная проверка `docker compose build admin-online` прошла успешно.

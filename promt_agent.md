@@ -10,6 +10,14 @@
 
 ## Текущий контекст
 
+### 2026-05-17
+
+- В корневой `README.md` добавлены явные правила для split deployment на двух Linux-хостах: сначала `backend noadmin`, затем проверка WG/private path, затем `admin onlyadmin`. Отдельно зафиксированы правила работы с конфигом: `services.conf` не трогаем для выбора роли хоста, host-specific настройки живут в `.env`, а после их изменения нужен новый `start`/`restart`.
+- Реализована поддержка bind address для split deployment: в `docker-compose.yml` трёх сервисов (`microservice_infra`, `microservice_account`, `microservice_gateway`) порты 9092/9644/9000/7510/7520 теперь принимают `REDPANDA_BIND_ADDR` / `MINIO_BIND_ADDR` / `ACCOUNT_BIND_ADDR` / `GATEWAY_BIND_ADDR` (default: `0.0.0.0`, не ломает local stack).
+- В `.env.example` трёх сервисов добавлены bind address переменные с комментариями local/split.
+- В `WG_WSTUNNEL.md` расширены три секции: backend env (примеры BIND_ADDR), firewall (Docker-UFW bypass warning + iptables DOCKER-USER команды), verification (полный набор: `wg show`, `ip addr`, `ss`, `curl`, `bash /dev/tcp`).
+- Осталось: выполнить production deploy когда будет готов backend-host.
+
 ### 2026-05-03
 
 - Закрыт полный workspace sweep по VS Code Problems: основные повторяющиеся причины были в Markdown-слое — compact separator rows без пробелов, смешение aligned/compact table styles, пропущенный language у fenced code block, отсутствие blank line вокруг heading/list/fence, лишние `|` внутри табличной ячейки и отсутствие завершающего newline в EOF.
