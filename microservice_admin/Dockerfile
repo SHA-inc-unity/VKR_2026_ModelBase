@@ -8,6 +8,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline
 
 COPY . .
+RUN mkdir -p public
 RUN npm run build
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────

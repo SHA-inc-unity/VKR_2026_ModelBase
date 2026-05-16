@@ -47,6 +47,7 @@
 ### 2026-05-16
 
 - Для серверного запуска исправлен новый blocker в `microservice_admin`: build падал на registry `cgr.dev/chainguard/node:latest`. `Dockerfile` переведён на официальный `node:22-bookworm-slim` для build/runtime, а локальная проверка `docker compose build admin` прошла успешно.
+- Закрыт второй server-side build blocker в `microservice_admin`: после смены base image сборка падала на `COPY --from=build /app/public ./public`, потому что `public/` пустой и не хранится в git. В build stage добавлен `mkdir -p public`; повторная локальная сборка `docker compose build admin` проходит полностью.
 - `microservice_gateway`: закрыт весь блок ChartService + ChartRequestQueue. Исправлен ingest lock (снимается и при ошибке), window-scoped coverage, отдельная обработка `claim_check` large-payload сценария в DataServiceClient. Добавлены `ChartRequestQueue` (coalescing + CT-isolation), 4 queue-поля в `MarketSettings`, 4 deploy-скрипта, интеграционные тесты (3 теста). Все 117/117 тестов проходят. Docs синхронизированы.
 
 ### 2026-05-15

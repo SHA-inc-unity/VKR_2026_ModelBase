@@ -12,7 +12,9 @@
 `node:22-bookworm-slim` и для build stage, и для runtime stage. Это убирает
 зависимость сборки от `cgr.dev`, что критично для Linux-серверов, где
 registry `cgr.dev` может быть недоступен, а `docker compose up --build`
-должен работать штатно.
+должен работать штатно. В build stage также всегда создаётся каталог `public`,
+чтобы сборка не падала на clean server checkout, где пустая папка не хранится
+в git.
 
 ## Deployment modes
 
