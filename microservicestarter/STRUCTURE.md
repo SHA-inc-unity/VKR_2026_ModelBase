@@ -50,4 +50,4 @@
 - изменение аргументов PowerShell или shell-версий скриптов
 - изменение договорённостей по `.env`, Docker Compose и lifecycle launcher-а
 - изменение того, где хранятся repo-local runtime-данные сервисов и как `clean` их удаляет
-- изменение того, какие host-порты публикуются обычным `start` и split-режимами (`local/full` — `8501` от infra-nginx; `onlyadmin` — `8501` от `admin-online` на отдельном хосте)
+- изменение того, какие host-порты публикуются обычным `start` и split-режимами (`local/full` — `8501` от infra-nginx; `onlyadmin` — `443` от `admin-online` на отдельном хосте по умолчанию)

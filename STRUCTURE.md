@@ -37,7 +37,7 @@
 
        Split deployment:
              backend-host         → noadmin
-             remote admin-host    → onlyadmin (admin-head на :8501/admin)
+             remote admin-host    → onlyadmin (admin-head на :443/admin)
 ```
 
 **Правило:** межсервисная коммуникация внутри ML-платформы — только Kafka. HTTP между сервисами запрещён. `account` и `gateway` — отдельный независимый стек (REST + JWT).

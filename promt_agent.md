@@ -12,6 +12,7 @@
 
 ### 2026-05-17
 
+- Для split deployment default host port `admin-online` перенесён на `443`: compose теперь публикует `${ADMIN_PORT:-443}:3000`, а канонический URL панели на отдельном admin-host — `http://<admin-host>:443/admin/`. Local/full stack через infra-nginx на `8501` сохранён без изменений.
 - Уточнена схема URL для split `admin-online`: текущий compose публикует plain HTTP на `8501`, поэтому канонический адрес панели — `http://<admin-host>:8501/admin/`. Для `https://...` нужен отдельный reverse proxy/TLS-terminator.
 - Уточнён docs-layer вокруг split deployment `8501`: панель в этом режиме открывается только на `http://<admin-host>:8501/admin/`. `backend-host:8501` в `noadmin` остаётся infra/download ingress и не должен считаться адресом admin UI.
 - В корневой `README.md` добавлены явные правила для split deployment на двух Linux-хостах: сначала `backend noadmin`, затем проверка WG/private path, затем `admin onlyadmin`. Отдельно зафиксированы правила работы с конфигом: `services.conf` не трогаем для выбора роли хоста, host-specific настройки живут в `.env`, а после их изменения нужен новый `start`/`restart`.

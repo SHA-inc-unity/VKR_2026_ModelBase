@@ -10,7 +10,7 @@
 | ------ | ---------- | ----- | -------- |
 | [microservice_infra](microservice_infra/README.md) | Docker Compose, Redpanda, MinIO, Nginx | `9092`, `8080`, `9000`, `9001`, `8501` | Общая инфраструктура платформы: Kafka, S3 claim-check и локальный ingress/download endpoint backend-стека |
 | [microservice_data](microservice_data/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Kafka, MinIO | `8100` | Владелец рыночных данных, датасета, export и фоновых jobs |
-| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, Redis | `3000` (local stack), `8501` (`onlyadmin`) | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов. В local-стеке идёт через infra-nginx, в split deployment может публиковаться как отдельная online-head нода |
+| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, Redis | `3000` (local stack), `443` (`onlyadmin`, default) | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов. В local-стеке идёт через infra-nginx, в split deployment может публиковаться как отдельная online-head нода |
 | [microservice_analitic](microservice_analitic/README.md) | Python 3.12, CatBoost, FastAPI, PostgreSQL, Redis | API: `8000` | ML-сервис: обучение, прогнозы, аналитика рынка |
 | [microservice_account](microservice_account/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Redis | `7510` | Сервис аутентификации и управления аккаунтами (Clean Architecture) |
 | [microservice_gateway](microservice_gateway/README.md) | .NET 8, ASP.NET Core | `7520` | Mobile BFF Gateway — маршрутизация и агрегация запросов |
@@ -79,15 +79,15 @@ runtime не идут.
 Backend-хост можно поднять в режиме `noadmin`: локально стартуют infra,
 data, analitic, account и gateway, но без `microservice_admin`. Отдельно
 можно поднять `microservice_admin` в режиме `onlyadmin` на другой машине
-как **online-head**: admin сам публикует `8501:3000`, остаётся на basePath
+как **online-head**: admin сам публикует `443:3000`, остаётся на basePath
 `/admin` и работает против внешних Kafka/HTTP endpoints через namespace
 переменных `ONLINE_*`.
 
 Важное уточнение для split deployment:
 
-- рабочая UI-точка admin-панели находится на **admin-host** по адресу `http://<admin-host>:8501/admin/`
-- в текущем compose `admin-online` публикует plain HTTP на `8501`; URL вида `https://<admin-host>:8501/admin/` не будет работать, пока перед `admin-online` не появится отдельный TLS reverse proxy/terminator
-- bare URL `http://<admin-host>:8501/` не является канонической точкой входа, потому что `admin-online` работает с `basePath=/admin`
+- рабочая UI-точка admin-панели находится на **admin-host** по адресу `http://<admin-host>:443/admin/`
+- в текущем compose `admin-online` публикует plain HTTP на `443`; URL вида `https://<admin-host>:443/admin/` не будет работать, пока перед `admin-online` не появится отдельный TLS reverse proxy/terminator
+- bare URL `http://<admin-host>:443/` не является канонической точкой входа, потому что `admin-online` работает с `basePath=/admin`
 - на **backend-host** в режиме `noadmin` порт `8501` не должен считаться адресом admin-панели; там остаётся только infra-nginx/download ingress, а локальный `/admin/*` без поднятого `microservice_admin` не является рабочей UI-точкой
 
 Рекомендуемый transport для общей приватной сети между этими двумя машинами — **WireGuard over WStunnel (WSS/443)**. Подробная схема есть в [microservice_infra/WG_WSTUNNEL.md](microservice_infra/WG_WSTUNNEL.md).

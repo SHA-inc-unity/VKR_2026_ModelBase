@@ -8,14 +8,14 @@
 # В local/full stack сервис `admin` не публикует порты в хост: browser
 # идёт через nginx из microservice_infra на http://localhost:8501/admin/.
 # Для split deployment ниже есть отдельный сервис `admin-online`, который
-# публикует `${ADMIN_PORT:-8501}:3000` и работает без `modelline_net`.
+# публикует `${ADMIN_PORT:-443}:3000` и работает без `modelline_net`.
 #
 # Run:
 #   cd microservice_admin
 #   docker compose up -d --build
 #   → http://localhost:8501/admin/   (через nginx-вход infra)
 #   docker compose --profile online up -d --build admin-online
-#   → http://localhost:8501/admin/   (отдельная online-head нода)
+#   → http://localhost:443/admin/    (отдельная online-head нода)
 
 services:
   admin:
@@ -62,7 +62,7 @@ services:
       MINIO_URL: ${ONLINE_MINIO_URL:-localhost:9000}
       NODE_ENV: production
     ports:
-      - "${ADMIN_PORT:-8501}:3000"
+      - "${ADMIN_PORT:-443}:3000"
 
 networks:
   modelline_net:

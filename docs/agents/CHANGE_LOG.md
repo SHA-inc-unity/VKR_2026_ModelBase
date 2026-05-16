@@ -6,6 +6,7 @@
 
 ### 2026-05-17
 
+- `microservice_admin`: default host port для split `admin-online` перенесён с `8501` на `443` через `${ADMIN_PORT:-443}:3000`. Local/full stack не затронут: infra-nginx по-прежнему держит `8501`, а отдельный admin-host теперь использует канонический URL `http://<admin-host>:443/admin/` без TLS по умолчанию.
 - `README.md`, `microservicestarter/README.md`, `microservice_admin/README.md`: дополнительно снята двусмысленность по схеме URL для `admin-online`. Зафиксировано, что текущий compose даёт plain HTTP на `8501`, а `https://<admin-host>:8501/admin/` требует отдельный reverse proxy/TLS-terminator.
 - `README.md`, `microservicestarter/README.md`, `microservice_admin/README.md`: снята двусмысленность вокруг `8501` в split deployment. Теперь явно зафиксировано, что рабочая UI-точка панели — только `http://<admin-host>:8501/admin/`, а `backend-host:8501` в режиме `noadmin` не считается адресом admin-панели.
 - `README.md`: добавлены два верхнеуровневых runbook-раздела для split deployment на двух Linux-хостах: правильный порядок перезапуска (`backend noadmin` → проверки WG/private path → `admin onlyadmin`) и правила работы с конфигом. Зафиксировано, что `services.conf` не используется для выбора роли хоста, а host-specific настройки живут в `.env` сервисов.

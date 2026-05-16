@@ -203,7 +203,7 @@ ONLINE_ACCOUNT_URL=10.44.0.1:7510
 ONLINE_GATEWAY_URL=10.44.0.1:7520
 ONLINE_MINIO_URL=10.44.0.1:9000
 ONLINE_REDIS_URL=
-ADMIN_PORT=8501
+ADMIN_PORT=443
 ```
 
 ### 4. Launcher mode on admin
@@ -287,7 +287,7 @@ sudo iptables -L DOCKER-USER -n -v
 
 Публично:
 
-- `8501/tcp` или `443/tcp` через reverse proxy — UI ingress `admin-online`
+- `443/tcp` — UI ingress `admin-online` по умолчанию
 
 ## Проверка после поднятия
 
