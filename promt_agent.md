@@ -46,6 +46,7 @@
 
 ### 2026-05-16
 
+- `microservicestarter`: исправлен shell-bug в `start.sh` / `restart.sh` после раннего prompt-а для `onlyadmin`. Под `set -u` helper падал на `backend_host: unbound variable`, а лог в stdout мог загрязнить command substitution; теперь `backend_host` инициализируется пустой строкой, а informational prompt/log выводится в stderr.
 - `microservice_admin` + `microservicestarter`: connection target на dashboard усилен до отдельного заметного блока над stat cards, а `onlyadmin` теперь заранее спрашивает backend host/IP в консоли до `docker compose`, если `ONLINE_BACKEND_HOST` пустой. Это убирает ситуацию, когда оператор не видит target backend в UI и не получает явного prompt-а на split admin-head.
 - `microservice_admin`: на главной dashboard добавлен явный badge `Connected to`, чтобы сразу видеть реальный backend host/IP текущего admin-head. Источник унифицирован через runtime env `BACKEND_CONNECTION_TARGET`: local stack показывает `localhost`, `admin-online` получает значение из `ONLINE_BACKEND_HOST`, а `/api/health` возвращает его в `connectionTarget`.
 - Для split deployment улучшен UX launcher-а в режиме `onlyadmin`: `start/restart` теперь могут принять один backend host/IP аргументом или спросить его интерактивно, после чего автоматически записывают в `microservice_admin/.env` `ONLINE_BACKEND_HOST` и derived `ONLINE_*` на Kafka/Redpanda/Account/Gateway/MinIO. Заодно убран ложный prompt про PostgreSQL у сервисов, где `.env.example` не содержит pg/password placeholders.

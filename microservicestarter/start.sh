@@ -108,7 +108,7 @@ resolve_admin_online_backend_host() {
         cp "$env_example" "$env_file"
     fi
 
-    local current_backend_host backend_host
+    local current_backend_host backend_host=""
     current_backend_host="$(get_env_value "$env_file" "ONLINE_BACKEND_HOST")"
     explicit_backend_host="$(printf '%s' "$explicit_backend_host" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
 
@@ -116,17 +116,17 @@ resolve_admin_online_backend_host() {
         backend_host="$explicit_backend_host"
     elif [[ -n "$current_backend_host" ]]; then
         if [[ -t 0 ]]; then
-            info "[microservice_admin] Текущий backend host/IP для admin-online: $current_backend_host"
+            info "[microservice_admin] Текущий backend host/IP для admin-online: $current_backend_host" >&2
             read -rp "[microservice_admin] Введите backend host/IP для admin-online [$current_backend_host]: " backend_host
             backend_host="${backend_host:-$current_backend_host}"
         else
             backend_host="$current_backend_host"
         fi
     elif [[ -t 0 ]]; then
-        info "[microservice_admin] ONLINE_BACKEND_HOST не задан — сейчас запросим backend host/IP для admin-online."
+        info "[microservice_admin] ONLINE_BACKEND_HOST не задан — сейчас запросим backend host/IP для admin-online." >&2
         while [[ -z "$backend_host" ]]; do
             read -rp "[microservice_admin] Введите backend host/IP для admin-online: " backend_host
-            [[ -z "$backend_host" ]] && warn "Backend host/IP не может быть пустым."
+            [[ -z "$backend_host" ]] && warn "Backend host/IP не может быть пустым." >&2
         done
     else
         fail "Для mode=onlyadmin укажи backend host/IP третьим аргументом или сохрани ONLINE_BACKEND_HOST в microservice_admin/.env"
