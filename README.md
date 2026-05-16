@@ -127,6 +127,7 @@ cd microservicestarter/
 
 # Запуск только отдельной online-head admin-ноды
 ./start.sh all onlyadmin
+./start.sh all onlyadmin 10.44.0.1
 
 # Запуск конкретного сервиса
 ./start.sh microservice_infra
@@ -144,6 +145,7 @@ cd microservicestarter/
 ./restart.sh
 ./restart.sh all noadmin
 ./restart.sh all onlyadmin
+./restart.sh all onlyadmin 10.44.0.1
 ./restart.sh microservice_analitic
 
 # Статус контейнеров
@@ -164,6 +166,7 @@ cd microservicestarter\
 
 # Запуск только отдельной online-head admin-ноды
 .\start.ps1 -Mode onlyadmin
+.\start.ps1 -Mode onlyadmin -BackendHost 10.44.0.1
 
 # Запуск конкретного сервиса
 .\start.ps1 -Service microservice_infra
@@ -181,6 +184,7 @@ cd microservicestarter\
 .\restart.ps1
 .\restart.ps1 -Mode noadmin
 .\restart.ps1 -Mode onlyadmin
+.\restart.ps1 -Mode onlyadmin -BackendHost 10.44.0.1
 .\restart.ps1 -Service microservice_analitic
 
 # Статус
@@ -224,6 +228,11 @@ compose-команды строго последовательно. Launcher с�
 Для `onlyadmin`/online-head сценария ориентируйся дополнительно на
 `microservice_admin/README.md`: remote admin использует namespace
 `ONLINE_*` для Kafka bootstrap и внешних health endpoints.
+
+Launcher также умеет принять один backend host/IP для `onlyadmin` и сам
+заполнить derived `ONLINE_*` в `microservice_admin/.env`. Если аргумент не
+передан, в интерактивном режиме он спросит backend host/IP и сохранит его как
+`ONLINE_BACKEND_HOST`.
 
 ## Локальное хранение runtime-данных
 

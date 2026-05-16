@@ -6,10 +6,10 @@
 # Использование:
 #   .\restart.ps1                                                 - git pull + все сервисы
 #   .\restart.ps1 -Mode noadmin                                   - git pull + все, кроме admin
-#   .\restart.ps1 -Mode onlyadmin                                 - git pull + только admin-head
+#   .\restart.ps1 -Mode onlyadmin -BackendHost 10.44.0.1          - git pull + только admin-head
 #   .\restart.ps1 -Service microservice_analitic                  - git pull + конкретный
 #   .\restart.ps1 -Service all                                    - git pull + все
-#   .\restart.ps1 -Service microservice_admin -Mode onlyadmin     - git pull + только admin-head
+#   .\restart.ps1 -Service microservice_admin -Mode onlyadmin -BackendHost 10.44.0.1 - git pull + только admin-head
 #   .\restart.ps1 -Service microservice_analitic -Mode full       - core + scheduler
 #   .\restart.ps1 -Service microservice_analitic -Mode api        - только api
 #   .\restart.ps1 -Service microservice_analitic -Mode deps       - пересобрать base
@@ -21,6 +21,7 @@ param(
     [string]$Service = "all",
     [ValidateSet("core","full","api","deps","postgres","redis","noadmin","onlyadmin","")]
     [string]$Mode = "core",
+    [string]$BackendHost = "",
     [string]$ResultFile = ""
 )
 
@@ -64,6 +65,87 @@ function Get-ServiceDirectory {
     $svcDir = Join-Path $RepoRoot $ServicePaths[$Name]
     if (-not (Test-Path $svcDir)) { Write-Fail "Директория не найдена: $svcDir" }
     return $svcDir
+}
+
+function Get-EnvValue {
+    param([string]$EnvFile, [string]$Key)
+    if (-not (Test-Path $EnvFile)) { return "" }
+    $pattern = '^' + [regex]::Escape($Key) + '=(.*)$'
+    foreach ($line in Get-Content $EnvFile) {
+        if ($line -match $pattern) { return $Matches[1] }
+    }
+    return ""
+}
+
+function Set-EnvValue {
+    param([string]$EnvFile, [string]$Key, [string]$Value)
+    $lines = if (Test-Path $EnvFile) { @(Get-Content $EnvFile) } else { @() }
+    $pattern = '^' + [regex]::Escape($Key) + '='
+    $updated = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match $pattern) {
+            $lines[$i] = "${Key}=${Value}"
+            $updated = $true
+            break
+        }
+    }
+    if (-not $updated) { $lines += "${Key}=${Value}" }
+    [System.IO.File]::WriteAllText($EnvFile, (($lines -join "`r`n") + "`r`n"), [System.Text.Encoding]::UTF8)
+}
+
+function Test-BackendHost {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        Write-Fail "Для mode=onlyadmin backend host/IP не может быть пустым."
+    }
+    if ($Value.Contains('://')) {
+        Write-Fail "Для mode=onlyadmin указывай только host/IP без схемы: $Value"
+    }
+    if ($Value.Contains('/')) {
+        Write-Fail "Для mode=onlyadmin указывай только host/IP без пути: $Value"
+    }
+    if ($Value -match '\s') {
+        Write-Fail "Для mode=onlyadmin host/IP не должен содержать пробелы: $Value"
+    }
+}
+
+function Configure-AdminOnlineEnv {
+    param([string]$SvcDir, [string]$ExplicitBackendHost)
+    $envFile = Join-Path $SvcDir ".env"
+    $envExample = Join-Path $SvcDir ".env.example"
+    if (-not (Test-Path $envFile)) {
+        if (-not (Test-Path $envExample)) {
+            Write-Fail "[microservice_admin] .env.example не найден — не можем настроить admin-online."
+        }
+        Copy-Item $envExample $envFile
+    }
+
+    $currentBackendHost = Get-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST"
+    $resolvedBackendHost = $ExplicitBackendHost
+    if ([string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
+        if (-not [string]::IsNullOrWhiteSpace($currentBackendHost)) {
+            $answer = Read-Host "[microservice_admin] Backend host/IP для admin-online [$currentBackendHost]"
+            $resolvedBackendHost = if ([string]::IsNullOrWhiteSpace($answer)) { $currentBackendHost } else { $answer.Trim() }
+        } else {
+            do {
+                $resolvedBackendHost = (Read-Host "[microservice_admin] Backend host/IP для admin-online").Trim()
+                if ([string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
+                    Write-Warn "Backend host/IP не может быть пустым."
+                }
+            } while ([string]::IsNullOrWhiteSpace($resolvedBackendHost))
+        }
+    }
+
+    Test-BackendHost -Value $resolvedBackendHost
+
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST" -Value $resolvedBackendHost
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_KAFKA_BOOTSTRAP_SERVERS" -Value "${resolvedBackendHost}:9092"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_REDPANDA_ADMIN_URL" -Value "${resolvedBackendHost}:9644"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_ACCOUNT_URL" -Value "${resolvedBackendHost}:7510"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_GATEWAY_URL" -Value "${resolvedBackendHost}:7520"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_MINIO_URL" -Value "${resolvedBackendHost}:9000"
+
+    Write-Ok "[microservice_admin] ONLINE_* настроены на backend-host $resolvedBackendHost."
 }
 
 function Invoke-ParallelRestartSelection {
@@ -177,6 +259,7 @@ function Restart-Microservice {
     switch ($RunMode) {
         "onlyadmin" {
             if ($Name -ne "microservice_admin") { Write-Fail "mode=onlyadmin поддерживается только для microservice_admin" }
+            Configure-AdminOnlineEnv -SvcDir $SvcDir -ExplicitBackendHost $BackendHost
             docker compose --profile online up -d --build admin-online
             if ($LASTEXITCODE -ne 0) { Write-Fail "[$Name] Запуск admin-online провалился." }
         }

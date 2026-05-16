@@ -16,6 +16,7 @@ const REDPANDA_ADMIN_URL = process.env.REDPANDA_ADMIN_URL ?? 'redpanda:9644';
 const MINIO_URL          = process.env.MINIO_URL          ?? 'minio:9000';
 const ACCOUNT_URL        = process.env.ACCOUNT_URL        ?? 'account_service_api:5000';
 const GATEWAY_URL        = process.env.GATEWAY_URL        ?? 'exchange-gateway:5020';
+const BACKEND_CONNECTION_TARGET = process.env.BACKEND_CONNECTION_TARGET?.trim() || 'localhost';
 
 async function probe(url: string): Promise<InfraServiceHealth> {
   try {
@@ -40,6 +41,7 @@ export async function GET(): Promise<Response> {
     r.status === 'fulfilled' ? r.value : { status: 'offline', error: String(r.reason) };
 
   const body: InfraHealthResponse = {
+    connectionTarget: BACKEND_CONNECTION_TARGET,
     redpanda: unwrap(redpanda),
     minio:    unwrap(minio),
     account:  unwrap(account),

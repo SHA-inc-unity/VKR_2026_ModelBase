@@ -42,6 +42,7 @@ const translations = {
     'dashboard.coverage':     'Coverage',
     'dashboard.tables':       'Tables',
     'dashboard.infrastructure':'Infrastructure',
+    'dashboard.connectedTo':  'Connected to',
 
     // ── Dataset ──────────────────────────────────────────────────────────
     'dataset.title':          'Dataset',
@@ -144,6 +145,7 @@ const translations = {
     'dashboard.coverage':     'Покрытие',
     'dashboard.tables':       'Таблицы',
     'dashboard.infrastructure':'Инфраструктура',
+    'dashboard.connectedTo':  'Подключение к',
 
     // ── Dataset ──────────────────────────────────────────────────────────
     'dataset.title':          'Датасет',

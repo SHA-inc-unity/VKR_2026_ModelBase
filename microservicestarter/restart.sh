@@ -7,10 +7,10 @@
 # Использование:
 #   ./restart.sh                               — git pull + перезапустить все
 #   ./restart.sh all noadmin                  — git pull + всё, кроме admin
-#   ./restart.sh all onlyadmin                — git pull + только admin-head
+#   ./restart.sh all onlyadmin [backend-host] — git pull + только admin-head
 #   ./restart.sh microservice_analitic         — git pull + перезапустить сервис
 #   ./restart.sh all                           — git pull + перезапустить все
-#   ./restart.sh microservice_admin onlyadmin  — git pull + только admin-head
+#   ./restart.sh microservice_admin onlyadmin [backend-host] — git pull + только admin-head
 #   ./restart.sh microservice_analitic full    — core + scheduler
 #   ./restart.sh microservice_analitic api     — только api-контейнер
 #   ./restart.sh microservice_analitic deps    — пересобрать base + перезапустить
@@ -79,6 +79,77 @@ prepare_bind_mount_data_paths() {
         mkdir -p "$data_path"
         chmod -R a+rwX "$data_path" 2>/dev/null || true
     done < <(get_bind_mount_data_paths "$name")
+}
+
+get_env_value() {
+    local env_file="$1"
+    local key="$2"
+    [[ -f "$env_file" ]] || return 0
+    grep -m1 -E "^${key}=" "$env_file" | sed -E "s|^${key}=||"
+}
+
+set_env_value() {
+    local env_file="$1"
+    local key="$2"
+    local value="$3"
+    if grep -q -E "^${key}=" "$env_file" 2>/dev/null; then
+        sed -i.bak -E "s|^${key}=.*$|${key}=${value}|" "$env_file"
+        rm -f "$env_file.bak"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    fi
+}
+
+validate_backend_host() {
+    local backend_host="$1"
+    [[ -n "$backend_host" ]] || fail "Для mode=onlyadmin backend host/IP не может быть пустым."
+    [[ "$backend_host" != *"://"* ]] || fail "Для mode=onlyadmin указывай только host/IP без схемы: $backend_host"
+    [[ "$backend_host" != */* ]] || fail "Для mode=onlyadmin указывай только host/IP без пути: $backend_host"
+    [[ ! "$backend_host" =~ [[:space:]] ]] || fail "Для mode=onlyadmin host/IP не должен содержать пробелы: $backend_host"
+}
+
+configure_admin_online_env() {
+    local svc_dir="$1"
+    local explicit_backend_host="${2:-}"
+    local env_file="$svc_dir/.env"
+    local env_example="$svc_dir/.env.example"
+
+    if [[ ! -f "$env_file" ]]; then
+        [[ -f "$env_example" ]] || fail "[microservice_admin] .env.example не найден — не можем настроить admin-online."
+        cp "$env_example" "$env_file"
+    fi
+
+    local current_backend_host backend_host
+    current_backend_host="$(get_env_value "$env_file" "ONLINE_BACKEND_HOST")"
+
+    if [[ -n "$explicit_backend_host" ]]; then
+        backend_host="$explicit_backend_host"
+    elif [[ -t 0 ]]; then
+        if [[ -n "$current_backend_host" ]]; then
+            read -rp "[microservice_admin] Backend host/IP для admin-online [$current_backend_host]: " backend_host
+            backend_host="${backend_host:-$current_backend_host}"
+        else
+            while [[ -z "$backend_host" ]]; do
+                read -rp "[microservice_admin] Backend host/IP для admin-online: " backend_host
+                [[ -z "$backend_host" ]] && warn "Backend host/IP не может быть пустым."
+            done
+        fi
+    elif [[ -n "$current_backend_host" ]]; then
+        backend_host="$current_backend_host"
+    else
+        fail "Для mode=onlyadmin укажи backend host/IP третьим аргументом или сохрани ONLINE_BACKEND_HOST в microservice_admin/.env"
+    fi
+
+    validate_backend_host "$backend_host"
+
+    set_env_value "$env_file" "ONLINE_BACKEND_HOST" "$backend_host"
+    set_env_value "$env_file" "ONLINE_KAFKA_BOOTSTRAP_SERVERS" "$backend_host:9092"
+    set_env_value "$env_file" "ONLINE_REDPANDA_ADMIN_URL" "$backend_host:9644"
+    set_env_value "$env_file" "ONLINE_ACCOUNT_URL" "$backend_host:7510"
+    set_env_value "$env_file" "ONLINE_GATEWAY_URL" "$backend_host:7520"
+    set_env_value "$env_file" "ONLINE_MINIO_URL" "$backend_host:9000"
+
+    success "[microservice_admin] ONLINE_* настроены на backend-host $backend_host."
 }
 
 # ── git pull (выполняется один раз на весь репозиторий) ────────────────────
@@ -156,6 +227,7 @@ restart_service() {
     case "$mode" in
         onlyadmin)
             [[ "$name" == "microservice_admin" ]] || fail "[$name] mode=onlyadmin поддерживается только для microservice_admin"
+            configure_admin_online_env "$svc_dir" "${BACKEND_HOST:-}"
             docker compose --profile online up -d --build admin-online
             ;;
         deps)
@@ -219,6 +291,7 @@ restart_service() {
 
 TARGET="${1:-all}"
 MODE="${2:-core}"
+BACKEND_HOST="${3:-}"
 
 do_git_pull
 

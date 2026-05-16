@@ -6,9 +6,9 @@
 # Использование:
 #   .\start.ps1                                          — все сервисы (core)
 #   .\start.ps1 -Mode noadmin                            — все сервисы, кроме admin
-#   .\start.ps1 -Mode onlyadmin                          — только admin-head в online mode
+#   .\start.ps1 -Mode onlyadmin -BackendHost 10.44.0.1   — только admin-head в online mode
 #   .\start.ps1 -Service microservice_analitic           — конкретный сервис
-#   .\start.ps1 -Service microservice_admin -Mode onlyadmin — только admin-head в online mode
+#   .\start.ps1 -Service microservice_admin -Mode onlyadmin -BackendHost 10.44.0.1 — только admin-head в online mode
 #   .\start.ps1 -Service microservice_analitic -Mode full    — core + scheduler
 #   .\start.ps1 -Service microservice_analitic -Mode build   — пересборка + запуск
 #   .\start.ps1 -Service microservice_analitic -Mode logs    — live-логи
@@ -18,6 +18,7 @@ param(
     [string]$Service = "all",
     [ValidateSet("core","full","scheduler","build","logs","noadmin","onlyadmin","")]
     [string]$Mode = "core",
+    [string]$BackendHost = "",
     [string]$ResultFile = ""
 )
 
@@ -65,24 +66,106 @@ function Initialize-Env {
     Write-Info "[$Name] Первый запуск — настройка .env..."
     $content = Get-Content $envExample -Raw
 
-    # Запрашиваем пароль PostgreSQL
-    $pgPass = ""
-    while ($pgPass -eq "") {
-        $s = Read-Host "[$Name] Введите пароль PostgreSQL (PGPASSWORD / POSTGRES_PASSWORD)" -AsSecureString
-        $pgPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
-        if ($pgPass -eq "") { Write-Warn "Пароль не может быть пустым." }
-    }
+    if ($content -match '(?m)^(PGPASSWORD\s*=|POSTGRES_PASSWORD\s*=)|Password=your_strong_password_here|Password=your_password_here') {
+        # Запрашиваем пароль PostgreSQL только если он действительно нужен в .env.example
+        $pgPass = ""
+        while ($pgPass -eq "") {
+            $s = Read-Host "[$Name] Введите пароль PostgreSQL (PGPASSWORD / POSTGRES_PASSWORD)" -AsSecureString
+            $pgPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
+            if ($pgPass -eq "") { Write-Warn "Пароль не может быть пустым." }
+        }
 
-    # Применяем пароль ко всем ключам, которые используют заглушку
-    $content = $content -replace '(?m)^(PGPASSWORD\s*=\s*).*$',          "`${1}$pgPass"
-    $content = $content -replace '(?m)^(POSTGRES_PASSWORD\s*=\s*).*$',   "`${1}$pgPass"
-    # Если DATABASE_URL содержит заглушку — подставляем пароль
-    $content = $content -replace 'Password=your_strong_password_here',    "Password=$pgPass"
-    $content = $content -replace 'Password=your_password_here',           "Password=$pgPass"
+        # Применяем пароль ко всем ключам, которые используют заглушку
+        $content = $content -replace '(?m)^(PGPASSWORD\s*=\s*).*$',          "`${1}$pgPass"
+        $content = $content -replace '(?m)^(POSTGRES_PASSWORD\s*=\s*).*$',   "`${1}$pgPass"
+        $content = $content -replace 'Password=your_strong_password_here',    "Password=$pgPass"
+        $content = $content -replace 'Password=your_password_here',           "Password=$pgPass"
+    }
 
     [System.IO.File]::WriteAllText($envFile, $content, [System.Text.Encoding]::UTF8)
     Write-Ok "[$Name] .env создан."
+}
+
+function Get-EnvValue {
+    param([string]$EnvFile, [string]$Key)
+    if (-not (Test-Path $EnvFile)) { return "" }
+    $pattern = '^' + [regex]::Escape($Key) + '=(.*)$'
+    foreach ($line in Get-Content $EnvFile) {
+        if ($line -match $pattern) { return $Matches[1] }
+    }
+    return ""
+}
+
+function Set-EnvValue {
+    param([string]$EnvFile, [string]$Key, [string]$Value)
+    $lines = if (Test-Path $EnvFile) { @(Get-Content $EnvFile) } else { @() }
+    $pattern = '^' + [regex]::Escape($Key) + '='
+    $updated = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match $pattern) {
+            $lines[$i] = "${Key}=${Value}"
+            $updated = $true
+            break
+        }
+    }
+    if (-not $updated) { $lines += "${Key}=${Value}" }
+    [System.IO.File]::WriteAllText($EnvFile, (($lines -join "`r`n") + "`r`n"), [System.Text.Encoding]::UTF8)
+}
+
+function Test-BackendHost {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        Write-Fail "Для mode=onlyadmin backend host/IP не может быть пустым."
+    }
+    if ($Value.Contains('://')) {
+        Write-Fail "Для mode=onlyadmin указывай только host/IP без схемы: $Value"
+    }
+    if ($Value.Contains('/')) {
+        Write-Fail "Для mode=onlyadmin указывай только host/IP без пути: $Value"
+    }
+    if ($Value -match '\s') {
+        Write-Fail "Для mode=onlyadmin host/IP не должен содержать пробелы: $Value"
+    }
+}
+
+function Configure-AdminOnlineEnv {
+    param([string]$SvcDir, [string]$ExplicitBackendHost)
+    $envFile = Join-Path $SvcDir ".env"
+    $envExample = Join-Path $SvcDir ".env.example"
+    if (-not (Test-Path $envFile)) {
+        if (-not (Test-Path $envExample)) {
+            Write-Fail "[microservice_admin] .env.example не найден — не можем настроить admin-online."
+        }
+        Copy-Item $envExample $envFile
+    }
+
+    $currentBackendHost = Get-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST"
+    $resolvedBackendHost = $ExplicitBackendHost
+    if ([string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
+        if (-not [string]::IsNullOrWhiteSpace($currentBackendHost)) {
+            $answer = Read-Host "[microservice_admin] Backend host/IP для admin-online [$currentBackendHost]"
+            $resolvedBackendHost = if ([string]::IsNullOrWhiteSpace($answer)) { $currentBackendHost } else { $answer.Trim() }
+        } else {
+            do {
+                $resolvedBackendHost = (Read-Host "[microservice_admin] Backend host/IP для admin-online").Trim()
+                if ([string]::IsNullOrWhiteSpace($resolvedBackendHost)) {
+                    Write-Warn "Backend host/IP не может быть пустым."
+                }
+            } while ([string]::IsNullOrWhiteSpace($resolvedBackendHost))
+        }
+    }
+
+    Test-BackendHost -Value $resolvedBackendHost
+
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST" -Value $resolvedBackendHost
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_KAFKA_BOOTSTRAP_SERVERS" -Value "${resolvedBackendHost}:9092"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_REDPANDA_ADMIN_URL" -Value "${resolvedBackendHost}:9644"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_ACCOUNT_URL" -Value "${resolvedBackendHost}:7510"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_GATEWAY_URL" -Value "${resolvedBackendHost}:7520"
+    Set-EnvValue -EnvFile $envFile -Key "ONLINE_MINIO_URL" -Value "${resolvedBackendHost}:9000"
+
+    Write-Ok "[microservice_admin] ONLINE_* настроены на backend-host $resolvedBackendHost."
 }
 
 # ── Очистка dangling-образов после сборки ────────────────────────────────────
@@ -205,6 +288,7 @@ function Start-Microservice {
             if ($Name -ne "microservice_admin") {
                 Write-Fail "mode=onlyadmin поддерживается только для microservice_admin"
             }
+            Configure-AdminOnlineEnv -SvcDir $SvcDir -ExplicitBackendHost $BackendHost
             docker compose --profile online up -d admin-online
         }
         default     { docker compose up -d }

@@ -171,6 +171,7 @@ export interface InfraServiceHealth {
 }
 
 export interface InfraHealthResponse {
+  connectionTarget: string;
   redpanda: InfraServiceHealth;
   minio:    InfraServiceHealth;
   account:  InfraServiceHealth;

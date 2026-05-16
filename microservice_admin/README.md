@@ -34,6 +34,17 @@ registry `cgr.dev` может быть недоступен, а `docker compose 
 - внешние адреса берутся из namespace `ONLINE_*`: `ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`
 - для split deployment эти `ONLINE_*` должны указывать на приватный WG/private DNS адрес backend-хоста, а не на `localhost`; рекомендуемая схема описана в `microservice_infra/WG_WSTUNNEL.md`
 
+Практически это означает следующее: если admin-head живёт на одном сервере, а backend на другом, пустые `ONLINE_*` оставлять нельзя. Иначе `admin-online` будет пытаться ходить в локальные `localhost:*`, а dashboard покажет `fetch failed` / `unreachable`. Для published backend ports дефолты у `admin-online` такие:
+
+- `ONLINE_ACCOUNT_URL` → `localhost:7510`
+- `ONLINE_GATEWAY_URL` → `localhost:7520`
+
+Но при реальном split deployment их нужно переопределять на адрес backend-хоста, например `95.165.27.159:7510` и `95.165.27.159:7520` или на WG/private address.
+
+Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST` и автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`.
+
+Dashboard на главной странице теперь явно показывает, к какому backend host/IP подключён текущий admin. Источник один и предсказуемый: compose кладёт в runtime `BACKEND_CONNECTION_TARGET`, где local stack всегда показывает `localhost`, а `admin-online` берёт значение из `ONLINE_BACKEND_HOST`.
+
 В обоих режимах admin остаётся Kafka-driven UI-слоем без собственного job-runner'а.
 
 ## Документация для агентов

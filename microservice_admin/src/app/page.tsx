@@ -2,7 +2,7 @@
 import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cacheRead, cacheWrite } from '@/lib/cacheClient';
-import { RefreshCw, Table2, Rows, CalendarClock, GitMerge } from 'lucide-react';
+import { RefreshCw, Table2, Rows, CalendarClock, GitMerge, Server } from 'lucide-react';
 import { kafkaCall } from '@/lib/kafkaClient';
 import { fetchInfraHealth } from '@/lib/healthClient';
 import { Topics } from '@/lib/topics';
@@ -150,6 +150,7 @@ export default function DashboardPage() {
   const [tables,          setTables]          = useState<string[]>([]);
   const [coverage,        setCoverage]        = useState<Record<string, TableCoverage>>({});
   const [modelCount,      setModelCount]      = useState<number | null>(null);
+  const [connectionTarget, setConnectionTarget] = useState<string>('localhost');
 
   const [analiticHealth, setAnaliticHealth] = useState<ServiceHealth | null>(null);
   const [redpandaInfra,  setRedpandaInfra]  = useState<InfraServiceHealth | null>(null);
@@ -266,6 +267,7 @@ export default function DashboardPage() {
     fetchInfraHealth()
       .then(infra => {
         const now = new Date();
+        setConnectionTarget(infra.connectionTarget || 'localhost');
         setRedpandaInfra(infra.redpanda);
         setMinioInfra(infra.minio);
         setAccountInfra(infra.account);
@@ -339,8 +341,14 @@ export default function DashboardPage() {
     <div className="flex flex-col gap-4 sm:gap-6 w-full">
 
       {/* в”Ђв”Ђ Header в”Ђв”Ђ */}
-      <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight">{t('dashboard.title')}</h1>
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-2">
+          <h1 className="text-2xl font-bold tracking-tight">{t('dashboard.title')}</h1>
+          <Badge variant="secondary" className="gap-1.5 px-2.5 py-1 text-xs font-medium">
+            <Server className="h-3.5 w-3.5" />
+            {t('dashboard.connectedTo')}: {connectionTarget}
+          </Badge>
+        </div>
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-xs text-muted-foreground hidden sm:block">

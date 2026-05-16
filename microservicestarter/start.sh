@@ -7,9 +7,9 @@
 # Использование:
 #   ./start.sh                                — запустить все сервисы (core)
 #   ./start.sh all noadmin                    — запустить всё, кроме admin
-#   ./start.sh all onlyadmin                  — запустить только admin-head
+#   ./start.sh all onlyadmin [backend-host]   — запустить только admin-head
 #   ./start.sh microservice_analitic          — запустить конкретный сервис
-#   ./start.sh microservice_admin onlyadmin   — запустить только admin-head
+#   ./start.sh microservice_admin onlyadmin [backend-host] — запустить только admin-head
 #   ./start.sh microservice_analitic full     — core + scheduler
 #   ./start.sh microservice_analitic build    — пересобрать образы и запустить
 #   ./start.sh microservice_analitic logs     — live-логи
@@ -53,19 +53,92 @@ initialize_env() {
     local content
     content=$(cat "$svc_dir/.env.example")
 
-    local pg_pass=""
-    while [[ -z "$pg_pass" ]]; do
-        read -rsp "[$name] Введите пароль PostgreSQL: " pg_pass; echo
-        [[ -z "$pg_pass" ]] && warn "Пароль не может быть пустым."
-    done
+    if grep -qE '(^PGPASSWORD[[:space:]]*=|^POSTGRES_PASSWORD[[:space:]]*=|Password=your_strong_password_here|Password=your_password_here)' <<< "$content"; then
+        local pg_pass=""
+        while [[ -z "$pg_pass" ]]; do
+            read -rsp "[$name] Введите пароль PostgreSQL: " pg_pass; echo
+            [[ -z "$pg_pass" ]] && warn "Пароль не может быть пустым."
+        done
 
-    content=$(echo "$content" | sed -E "s|^(PGPASSWORD[[:space:]]*=[[:space:]]*).*|\1$pg_pass|")
-    content=$(echo "$content" | sed -E "s|^(POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*).*|\1$pg_pass|")
-    content=$(echo "$content" | sed "s|Password=your_strong_password_here|Password=$pg_pass|g")
-    content=$(echo "$content" | sed "s|Password=your_password_here|Password=$pg_pass|g")
+        content=$(echo "$content" | sed -E "s|^(PGPASSWORD[[:space:]]*=[[:space:]]*).*|\1$pg_pass|")
+        content=$(echo "$content" | sed -E "s|^(POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*).*|\1$pg_pass|")
+        content=$(echo "$content" | sed "s|Password=your_strong_password_here|Password=$pg_pass|g")
+        content=$(echo "$content" | sed "s|Password=your_password_here|Password=$pg_pass|g")
+    fi
 
     echo "$content" > "$svc_dir/.env"
     success "[$name] .env создан."
+}
+
+get_env_value() {
+    local env_file="$1"
+    local key="$2"
+    [[ -f "$env_file" ]] || return 0
+    grep -m1 -E "^${key}=" "$env_file" | sed -E "s|^${key}=||"
+}
+
+set_env_value() {
+    local env_file="$1"
+    local key="$2"
+    local value="$3"
+    if grep -q -E "^${key}=" "$env_file" 2>/dev/null; then
+        sed -i.bak -E "s|^${key}=.*$|${key}=${value}|" "$env_file"
+        rm -f "$env_file.bak"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    fi
+}
+
+validate_backend_host() {
+    local backend_host="$1"
+    [[ -n "$backend_host" ]] || fail "Для mode=onlyadmin backend host/IP не может быть пустым."
+    [[ "$backend_host" != *"://"* ]] || fail "Для mode=onlyadmin указывай только host/IP без схемы: $backend_host"
+    [[ "$backend_host" != */* ]] || fail "Для mode=onlyadmin указывай только host/IP без пути: $backend_host"
+    [[ ! "$backend_host" =~ [[:space:]] ]] || fail "Для mode=onlyadmin host/IP не должен содержать пробелы: $backend_host"
+}
+
+configure_admin_online_env() {
+    local svc_dir="$1"
+    local explicit_backend_host="${2:-}"
+    local env_file="$svc_dir/.env"
+    local env_example="$svc_dir/.env.example"
+
+    if [[ ! -f "$env_file" ]]; then
+        [[ -f "$env_example" ]] || fail "[microservice_admin] .env.example не найден — не можем настроить admin-online."
+        cp "$env_example" "$env_file"
+    fi
+
+    local current_backend_host backend_host
+    current_backend_host="$(get_env_value "$env_file" "ONLINE_BACKEND_HOST")"
+
+    if [[ -n "$explicit_backend_host" ]]; then
+        backend_host="$explicit_backend_host"
+    elif [[ -t 0 ]]; then
+        if [[ -n "$current_backend_host" ]]; then
+            read -rp "[microservice_admin] Backend host/IP для admin-online [$current_backend_host]: " backend_host
+            backend_host="${backend_host:-$current_backend_host}"
+        else
+            while [[ -z "$backend_host" ]]; do
+                read -rp "[microservice_admin] Backend host/IP для admin-online: " backend_host
+                [[ -z "$backend_host" ]] && warn "Backend host/IP не может быть пустым."
+            done
+        fi
+    elif [[ -n "$current_backend_host" ]]; then
+        backend_host="$current_backend_host"
+    else
+        fail "Для mode=onlyadmin укажи backend host/IP третьим аргументом или сохрани ONLINE_BACKEND_HOST в microservice_admin/.env"
+    fi
+
+    validate_backend_host "$backend_host"
+
+    set_env_value "$env_file" "ONLINE_BACKEND_HOST" "$backend_host"
+    set_env_value "$env_file" "ONLINE_KAFKA_BOOTSTRAP_SERVERS" "$backend_host:9092"
+    set_env_value "$env_file" "ONLINE_REDPANDA_ADMIN_URL" "$backend_host:9644"
+    set_env_value "$env_file" "ONLINE_ACCOUNT_URL" "$backend_host:7510"
+    set_env_value "$env_file" "ONLINE_GATEWAY_URL" "$backend_host:7520"
+    set_env_value "$env_file" "ONLINE_MINIO_URL" "$backend_host:9000"
+
+    success "[microservice_admin] ONLINE_* настроены на backend-host $backend_host."
 }
 
 # ── Очистка dangling-образов ──────────────────────────────────────────────────
@@ -189,6 +262,7 @@ start_service() {
         logs)      docker compose logs -f ;;
         onlyadmin)
             [[ "$name" == "microservice_admin" ]] || fail "[$name] mode=onlyadmin поддерживается только для microservice_admin"
+            configure_admin_online_env "$svc_dir" "${BACKEND_HOST:-}"
             docker compose --profile online up -d admin-online
             ;;
         core|"")   docker compose up -d ;;
@@ -201,6 +275,7 @@ start_service() {
 
 TARGET="${1:-all}"
 MODE="${2:-core}"
+BACKEND_HOST="${3:-}"
 
 if [[ "$MODE" == "onlyadmin" ]]; then
     [[ "$TARGET" == "all" || "$TARGET" == "microservice_admin" ]] || fail "mode=onlyadmin поддерживается только для microservice_admin"
