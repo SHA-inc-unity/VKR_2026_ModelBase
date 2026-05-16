@@ -46,6 +46,8 @@
 
 ### 2026-05-16
 
+- Для split deployment закрыт главный сетевой gap между backend-host и remote admin-host: в `microservice_infra/docker-compose.yml` внешний advertise address Redpanda вынесен в `REDPANDA_EXTERNAL_HOST` / `REDPANDA_EXTERNAL_PORT` вместо захардкоженного `localhost:9092`. Это делает рабочей схему, где `admin-online` ходит к backend через общую приватную сеть.
+- В `microservice_infra` добавлен отдельный ops-guide `WG_WSTUNNEL.md` с рекомендуемой схемой общей сети: WireGuard over WStunnel (WSS/443), адресный план, firewall rules, backend/admin env и launch-порядок для `noadmin` + `onlyadmin`.
 - Для серверного запуска исправлен новый blocker в `microservice_admin`: build падал на registry `cgr.dev/chainguard/node:latest`. `Dockerfile` переведён на официальный `node:22-bookworm-slim` для build/runtime, а локальная проверка `docker compose build admin` прошла успешно.
 - Закрыт второй server-side build blocker в `microservice_admin`: после смены base image сборка падала на `COPY --from=build /app/public ./public`, потому что `public/` пустой и не хранится в git. В build stage добавлен `mkdir -p public`; повторная локальная сборка `docker compose build admin` проходит полностью.
 - `microservice_gateway`: закрыт весь блок ChartService + ChartRequestQueue. Исправлен ingest lock (снимается и при ошибке), window-scoped coverage, отдельная обработка `claim_check` large-payload сценария в DataServiceClient. Добавлены `ChartRequestQueue` (coalescing + CT-isolation), 4 queue-поля в `MarketSettings`, 4 deploy-скрипта, интеграционные тесты (3 теста). Все 117/117 тестов проходят. Docs синхронизированы.

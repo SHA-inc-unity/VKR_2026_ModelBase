@@ -32,6 +32,7 @@ registry `cgr.dev` может быть недоступен, а `docker compose 
 - не требует `modelline_net`
 - используется в split deployment, когда backend-хост поднят в режиме `noadmin`, а admin живёт отдельно
 - внешние адреса берутся из namespace `ONLINE_*`: `ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`
+- для split deployment эти `ONLINE_*` должны указывать на приватный WG/private DNS адрес backend-хоста, а не на `localhost`; рекомендуемая схема описана в `microservice_infra/WG_WSTUNNEL.md`
 
 В обоих режимах admin остаётся Kafka-driven UI-слоем без собственного job-runner'а.
 

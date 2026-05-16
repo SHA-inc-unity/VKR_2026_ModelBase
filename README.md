@@ -83,6 +83,10 @@ data, analitic, account и gateway, но без `microservice_admin`. Отдел
 `/admin` и работает против внешних Kafka/HTTP endpoints через namespace
 переменных `ONLINE_*`.
 
+Рекомендуемый transport для общей приватной сети между этими двумя машинами — **WireGuard over WStunnel (WSS/443)**. Подробная схема есть в [microservice_infra/WG_WSTUNNEL.md](microservice_infra/WG_WSTUNNEL.md).
+
+Критичный technical detail для split deployment: backend Kafka broker не должен advertise'ить `localhost:9092`. В `microservice_infra/docker-compose.yml` внешний advertise address теперь configurable через `REDPANDA_EXTERNAL_HOST` и `REDPANDA_EXTERNAL_PORT`; для remote admin-head туда нужно подставлять WG IP или private DNS backend-хоста.
+
 В split deployment download path остаётся прямым и zero-byte для admin:
 remote admin-head получает `presigned_url` от data-сервиса и браузер
 качает CSV/ZIP напрямую с backend ingress-а, заданного через

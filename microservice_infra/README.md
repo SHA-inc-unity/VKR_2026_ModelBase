@@ -16,6 +16,7 @@
 ## Документация для агентов
 
 - [STRUCTURE.md](STRUCTURE.md) — карта инфраструктурных компонентов и compose-слоя
+- [WG_WSTUNNEL.md](WG_WSTUNNEL.md) — рекомендуемая split-deployment схема: backend-host + remote admin-host через WireGuard over WStunnel
 - [../docs/agents/services/microservice_infra.md](../docs/agents/services/microservice_infra.md) — профиль сервиса для agent workflow
 - [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
 
@@ -51,6 +52,22 @@ docker-compose публикуется как host-порт **`8501`** (override 
 **HTTPS:** добавить certbot + смонтировать ssl.conf в
 `/etc/nginx/conf.d/`; открыть на хосте `:443`.
 
+## Split deployment через WG + WStunnel
+
+Для сценария `backend-host` + `remote admin-host` рекомендуемая общая сеть — **WireGuard over WStunnel**. Подробная пошаговая схема есть в [WG_WSTUNNEL.md](WG_WSTUNNEL.md).
+
+Критичное требование для этого сценария: Kafka broker на backend-хосте должен advertise'ить не `localhost`, а приватный WG-адрес или private DNS backend-хоста. Для этого в `docker-compose.yml` введены переменные:
+
+- `REDPANDA_EXTERNAL_HOST`
+- `REDPANDA_EXTERNAL_PORT`
+- `REDPANDA_ADMIN_PORT`
+- `REDPANDA_CONSOLE_PORT`
+- `MINIO_API_PORT`
+- `MINIO_CONSOLE_PORT`
+- `NGINX_PORT`
+
+Для local/full stack default остаётся прежним: `REDPANDA_EXTERNAL_HOST=localhost`. Для split deployment задай, например, `REDPANDA_EXTERNAL_HOST=10.44.0.1`.
+
 ## Запуск
 
 ```powershell
@@ -81,6 +98,10 @@ volumes, а в каталоге репозитория:
 - `KAFKA_BOOTSTRAP_SERVERS=redpanda:29092`
 - `S3_ENDPOINT_URL=http://minio:9000`
 - S3 bucket для блобов: **`modelline-blobs`** (создаётся `minio-init`)
+
+## External endpoint override
+
+По умолчанию внешний Kafka endpoint для single-host/local сценария остаётся `localhost:9092`. Для split deployment его нужно переопределить через `REDPANDA_EXTERNAL_HOST` так, чтобы remote admin-head видел в broker metadata WG/private address backend-хоста, а не loopback.
 
 ## Архитектурное правило
 

@@ -38,14 +38,14 @@ services:
       - --kafka-addr
       - PLAINTEXT://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
       - --advertise-kafka-addr
-      - PLAINTEXT://redpanda:29092,EXTERNAL://localhost:9092
+      - PLAINTEXT://redpanda:29092,EXTERNAL://${REDPANDA_EXTERNAL_HOST:-localhost}:${REDPANDA_EXTERNAL_PORT:-9092}
       - --rpc-addr
       - 0.0.0.0:33145
       - --advertise-rpc-addr
       - redpanda:33145
     ports:
-      - "9092:9092"
-      - "9644:9644"
+      - "${REDPANDA_EXTERNAL_PORT:-9092}:9092"
+      - "${REDPANDA_ADMIN_PORT:-9644}:9644"
     volumes:
       - type: bind
         source: ../.runtime-data/microservice_infra/redpanda
@@ -138,7 +138,7 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:29092
     ports:
-      - "8080:8080"
+      - "${REDPANDA_CONSOLE_PORT:-8080}:8080"
     depends_on:
       redpanda:
         condition: service_healthy
@@ -154,8 +154,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-modelline_secret}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - type: bind
         source: ../.runtime-data/microservice_infra/minio
