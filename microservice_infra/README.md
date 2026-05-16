@@ -16,7 +16,8 @@
 ## Документация для агентов
 
 - [STRUCTURE.md](STRUCTURE.md) — карта инфраструктурных компонентов и compose-слоя
-- [WG_WSTUNNEL.md](WG_WSTUNNEL.md) — рекомендуемая split-deployment схема: backend-host + remote admin-host через WireGuard over WStunnel
+- [VPN_CONTAINERIZED.md](VPN_CONTAINERIZED.md) — **рекомендуемый** split-deployment: backend-host + admin-host через containerized WireGuard (без ручных хостовых настроек)
+- [WG_WSTUNNEL.md](WG_WSTUNNEL.md) — fallback: ручная схема WireGuard over WStunnel
 - [../docs/agents/services/microservice_infra.md](../docs/agents/services/microservice_infra.md) — профиль сервиса для agent workflow
 - [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
 
@@ -52,9 +53,10 @@ docker-compose публикуется как host-порт **`8501`** (override 
 **HTTPS:** добавить certbot + смонтировать ssl.conf в
 `/etc/nginx/conf.d/`; открыть на хосте `:443`.
 
-## Split deployment через WG + WStunnel
+## Split deployment через containerized VPN
 
-Для сценария `backend-host` + `remote admin-host` рекомендуемая общая сеть — **WireGuard over WStunnel**. Подробная пошаговая схема есть в [WG_WSTUNNEL.md](WG_WSTUNNEL.md).
+Для сценария `backend-host` + `remote admin-host` **рекомендуемый** способ — containerized WireGuard. Подробная инструкция: [VPN_CONTAINERIZED.md](VPN_CONTAINERIZED.md).  
+Manual fallback через wg-quick + WStunnel описан в [WG_WSTUNNEL.md](WG_WSTUNNEL.md).
 
 Критичное требование для этого сценария: Kafka broker на backend-хосте должен advertise'ить не `localhost`, а приватный WG-адрес или private DNS backend-хоста. Для этого в `docker-compose.yml` введены переменные:
 

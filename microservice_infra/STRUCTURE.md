@@ -16,8 +16,10 @@
 | ---- | -------- |
 | `docker-compose.yml` | Запускает: Redpanda, Redpanda Console, MinIO, MinIO Console + init и **nginx** (всегда, без profile-флагов) — ingress/download endpoint backend/full-стека на host-порте 8501 (override через `NGINX_PORT`). `nginx` проксирует `/admin/*` → `admin:3000` и `/modelline-blobs/*` → `minio:9000`. Данные Redpanda и MinIO хранятся в repo-local bind mounts `../.runtime-data/microservice_infra/{redpanda,minio}`. В split deployment Redpanda external advertise address и host-порты configurable через `REDPANDA_EXTERNAL_HOST`, `REDPANDA_EXTERNAL_PORT`, `REDPANDA_ADMIN_PORT`, `REDPANDA_CONSOLE_PORT`, `MINIO_API_PORT`, `MINIO_CONSOLE_PORT`. |
 | `nginx/nginx.conf` | Конфиг nginx: `default_server`, `/admin/*` → admin:3000 (включая `/admin/api/events` SSE), `/modelline-blobs/*` → minio:9000 без буферизации (`proxy_buffering off`, `proxy_request_buffering off`, `proxy_read_timeout 3600s`, `client_max_body_size 0` — для многогигабайтных CSV/ZIP экспортов). В `noadmin` deployment этот nginx остаётся download ingress-ом backend-хоста, а отдельная remote admin-head не обязана ходить через локальный `/admin/*`. |
+| `vpn/server-entrypoint.sh` | Entrypoint для compose-сервиса `vpn` (profile `vpn`): генерирует WireGuard ключи, пишет `wg0-server.conf` + `client.conf`, поднимает интерфейс `wg0` (`10.44.0.1/24`), пишет `.ready` маркер. |
 | `.env.example` | Базовые infra/env defaults: `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `REDPANDA_EXTERNAL_HOST`, `REDPANDA_EXTERNAL_PORT`, `REDPANDA_ADMIN_PORT`, `REDPANDA_CONSOLE_PORT`, `MINIO_API_PORT`, `MINIO_CONSOLE_PORT`, `NGINX_PORT` |
-| `WG_WSTUNNEL.md` | Пошаговая split-deployment схема для backend-host + remote admin-host: WireGuard over WStunnel, адресный план, firewall rules, `ONLINE_*` и `REDPANDA_EXTERNAL_HOST` |
+| `VPN_CONTAINERIZED.md` | **Рекомендуемый** split-deployment: containerized WireGuard без ручных хостовых настроек, join token UX, wg0 через docker container |
+| `WG_WSTUNNEL.md` | Fallback: ручная split-deployment схема WireGuard over WStunnel, адресный план, firewall rules, `ONLINE_*` и `REDPANDA_EXTERNAL_HOST` |
 | `README.md` | Описание, порты, правила использования |
 
 ---

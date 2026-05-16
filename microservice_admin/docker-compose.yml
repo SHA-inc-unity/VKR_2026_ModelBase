@@ -64,6 +64,40 @@ services:
     ports:
       - "${ADMIN_PORT:-443}:3000"
 
+  # ── VPN client (WireGuard) ───────────────────────────────────────────────────
+  # Profile: vpn.  Only active in split deployment (onlyadmin with join token).
+  # Brings up wg0 on the HOST so admin-online (Docker bridge network) can reach
+  # the backend's WireGuard IP (10.44.0.1) via host routing — no changes to the
+  # admin-online container or its network attachment are required.
+  #
+  # Runtime contract: same as vpn-server (NET_ADMIN, SYS_MODULE, /dev/net/tun).
+  #
+  # wg0.conf is written by the launcher when a join token is provided:
+  #   .runtime-data/microservice_admin/vpn/wg0.conf
+  vpn-client:
+    profiles: ["vpn"]
+    image: alpine:3.19
+    container_name: modelline-vpn-client
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    network_mode: host
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - type: bind
+        source: ../.runtime-data/microservice_admin/vpn
+        target: /vpn/state
+      - type: bind
+        source: ./vpn/client-entrypoint.sh
+        target: /entrypoint.sh
+        read_only: true
+      - /lib/modules:/lib/modules:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - "apk add --no-cache wireguard-tools 2>/dev/null; sh /entrypoint.sh"
+    restart: unless-stopped
+
 networks:
   modelline_net:
     name: modelline_net

@@ -10,6 +10,24 @@
 
 ## Текущий контекст
 
+### 2026-05-18 — Containerized VPN Transport
+
+Реализован полный containerized VPN transport для split deployment:
+
+**Сделано:**
+- `microservice_infra/vpn/server-entrypoint.sh` и `microservice_admin/vpn/client-entrypoint.sh` — WireGuard entrypoints в контейнере (`alpine:3.19`, `network_mode: host`).
+- Compose: добавлен сервис `vpn` (profile `vpn`) в infra и `vpn-client` в admin.
+- `start.sh` и `restart.sh`: VPN helper-функции + обновлённый dispatch для noadmin (auto print join token) и onlyadmin (детект join token / existing wg0.conf / plain IP).
+- `microservice_infra/VPN_CONTAINERIZED.md` — основная документация split-deployment.
+- `WG_WSTUNNEL.md` → помечен как fallback. README/STRUCTURE всех сервисов обновлены.
+
+**Join token flow:**
+- Backend: `start.sh all noadmin` с `VPN_SERVER_URL` в `.env` → поднимает `modelline-vpn-server` → печатает base64 join token.
+- Admin первый запуск: `start.sh all onlyadmin <TOKEN>` → декодирует wg0.conf → поднимает vpn-client → ждёт туннеля → auto ONLINE_*=10.44.0.1:*.
+- Admin последующие: `start.sh all onlyadmin` без токена → reuses existing wg0.conf.
+
+**Осталось:** проверить реальным запуском на Linux (ядро ≥ 5.6, UDP/51820 открыт).
+
 ### 2026-05-17
 
 - Для split deployment default host port `admin-online` перенесён на `443`: compose теперь публикует `${ADMIN_PORT:-443}:3000`, а канонический URL панели на отдельном admin-host — `http://<admin-host>:443/admin/`. Local/full stack через infra-nginx на `8501` сохранён без изменений.

@@ -62,6 +62,14 @@ UI живёт только на отдельном admin-host.
 
 Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST` и автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`.
 
+**Containerized VPN (рекомендуется):** при запуске backend в режиме `noadmin` с заданным `VPN_SERVER_URL` в `microservice_infra/.env`, launcher автоматически поднимает WireGuard-сервер и печатает **join token** (base64-строку). На admin-хосте достаточно:
+
+```bash
+./start.sh all onlyadmin <JOIN_TOKEN>
+```
+
+Launcher декодирует join token, записывает `wg0.conf`, поднимает `modelline-vpn-client`, ждёт готовности tunnel и автоматически выставляет `ONLINE_*` на `10.44.0.1:*`. При последующих перезапусках join token не нужен — `wg0.conf` сохраняется в `.runtime-data/microservice_admin/vpn/`. Подробнее: [../microservice_infra/VPN_CONTAINERIZED.md](../microservice_infra/VPN_CONTAINERIZED.md).
+
 Dashboard на главной странице теперь явно показывает, к какому backend host/IP подключён текущий admin, отдельным заметным connection-блоком над stat cards. Источник один и предсказуемый: compose кладёт в runtime `BACKEND_CONNECTION_TARGET`, где local stack всегда показывает `localhost`, а `admin-online` берёт значение из `ONLINE_BACKEND_HOST`. Тот же блок теперь показывает и реальный `KAFKA_BOOTSTRAP_SERVERS`, который использует admin, плюс текст ошибки broker connectivity, если Kafka path недоступен. Дополнительно `connectionTarget` дублируется в верхней строке dashboard, в sidebar header под логотипом и в footer sidebar, чтобы оператор видел target backend на любой странице admin-панели.
 
 В обоих режимах admin остаётся Kafka-driven UI-слоем без собственного job-runner'а.

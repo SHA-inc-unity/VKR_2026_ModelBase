@@ -4,6 +4,21 @@
 
 ## 2026-05
 
+### 2026-05-18 (Containerized VPN Transport)
+
+- `microservice_infra/vpn/server-entrypoint.sh` **создан**: entrypoint WireGuard-сервера в контейнере (`alpine:3.19`). Генерирует ключи, пишет `wg0-server.conf` + `client.conf`, поднимает `wg0` (10.44.0.1/24), пишет `.ready` маркер.
+- `microservice_admin/vpn/client-entrypoint.sh` **создан**: entrypoint WireGuard-клиента. Читает `/vpn/state/wg0.conf` (записан launcher из join token), поднимает `wg0` (10.44.0.2/32), пишет `.ready` маркер.
+- `microservice_infra/docker-compose.yml`: добавлен сервис `vpn` (profile `vpn`, `alpine:3.19`, `network_mode: host`, cap `NET_ADMIN+SYS_MODULE`). Активируется автоматически в noadmin+VPN режиме.
+- `microservice_admin/docker-compose.yml`: добавлен сервис `vpn-client` (profile `vpn`, аналогичная конфигурация). Активируется launcher в onlyadmin+VPN режиме.
+- `microservice_infra/.env.example`: добавлены `VPN_SERVER_URL` и `VPN_SERVER_PORT=51820`.
+- `microservicestarter/start.sh`: добавлены VPN helper-функции (`is_vpn_enabled`, `is_vpn_join_token`, `print_vpn_join_token`, `setup_vpn_client`, `wait_vpn_client`). Изменён `start_service()` core case для microservice_infra (добавляет `--profile vpn` при VPN). Изменён noadmin dispatch (auto-set `REDPANDA_EXTERNAL_HOST=10.44.0.1` + `print_vpn_join_token`). Изменён onlyadmin dispatch: детектирует join token vs существующий wg0.conf vs plain IP.
+- `microservicestarter/restart.sh`: те же VPN helpers и dispatch-изменения, что и в `start.sh`. `restart_service()` core case для infra также использует `--profile vpn`.
+- `microservice_infra/VPN_CONTAINERIZED.md` **создан**: основная документация split-deployment через containerized WireGuard (prerequisites, backend setup, admin setup, верификация, безопасность, troubleshooting).
+- `microservice_infra/WG_WSTUNNEL.md`: добавлен заголовок с пометкой «fallback» и ссылкой на новый VPN_CONTAINERIZED.md.
+- `microservice_infra/README.md`, `microservice_infra/STRUCTURE.md`: обновлены — VPN_CONTAINERIZED.md стал основной ссылкой split-deployment, WG_WSTUNNEL.md перенесён в fallback.
+- `microservice_admin/README.md`, `microservice_admin/STRUCTURE.md`: добавлено описание VPN join token flow и `vpn/client-entrypoint.sh`.
+- `microservicestarter/README.md`: обновлены примеры команд для `onlyadmin <TOKEN>` и noadmin VPN flow.
+
 ### 2026-05-17
 
 - `microservice_admin`: default host port для split `admin-online` перенесён с `8501` на `443` через `${ADMIN_PORT:-443}:3000`. Local/full stack не затронут: infra-nginx по-прежнему держит `8501`, а отдельный admin-host теперь использует канонический URL `http://<admin-host>:443/admin/` без TLS по умолчанию.

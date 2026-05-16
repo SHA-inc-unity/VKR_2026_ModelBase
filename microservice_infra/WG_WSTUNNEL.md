@@ -1,6 +1,13 @@
-# WG + WStunnel For Split Deployment
+# WG + WStunnel For Split Deployment (ручной / fallback)
 
-Рекомендуемая схема для split deployment ModelLine:
+> **Рекомендуемый подход (2025):** Используй [VPN_CONTAINERIZED.md](VPN_CONTAINERIZED.md) —  
+> автоматический containerized VPN transport без ручной настройки wireguard/systemd на хосте.  
+> Этот документ сохранён как **fallback** для случаев, когда kernel WireGuard  
+> (≥ 5.6) недоступен или требуется обфускация трафика через WStunnel/WSS.
+
+---
+
+Ручная схема для split deployment ModelLine:
 
 - backend-хост поднимает `microservice_infra`, `microservice_data`, `microservice_analitic`, `microservice_account`, `microservice_gateway` в режиме `noadmin`
 - отдельный admin-хост поднимает только `microservice_admin` в режиме `onlyadmin`
