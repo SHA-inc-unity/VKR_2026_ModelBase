@@ -6,7 +6,13 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY package.json package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --prefer-offline
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_PROGRESS=false \
+    NPM_CONFIG_MAXSOCKETS=1 \
+    NODE_OPTIONS=--max-old-space-size=384 \
+    npm ci --prefer-offline --no-audit --no-fund
 
 COPY . .
 RUN mkdir -p public

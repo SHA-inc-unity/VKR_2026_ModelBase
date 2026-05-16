@@ -46,6 +46,7 @@
 
 ### 2026-05-16
 
+- `microservice_admin`: после ускорения build выявился новый узкий момент на weak VPS: `npm ci` умирал с `exit 137` ещё до `next build`. Исправлено в `Dockerfile`: install stage теперь запускается в low-memory режиме (`NPM_CONFIG_MAXSOCKETS=1`, без `audit/fund/progress`, с `NODE_OPTIONS=--max-old-space-size=384`). Локальный `docker compose build admin-online` после правки прошёл успешно.
 - `microservice_admin`: добавлено безопасное ускорение Next.js build для слабого admin-host. В `Dockerfile` включён cache mount для `.next/cache` и отключена telemetry, а в `next.config.js` включено `eslint.ignoreDuringBuilds = true`. Это ускоряет повторные rebuild'ы без отключения TypeScript typecheck.
 - `microservice_admin`: найден вероятный root cause для текущего remote Kafka failure `This server does not host this topic-partition`. Reply-inbox topic в `lib/kafka.ts` создавался с `waitForLeaders: false`, а consumer сразу подписывался; для per-process reply topic это создавало race на leader election. Переведено на `waitForLeaders: true`.
 - `microservice_admin`: `connectionTarget` усилен до максимально заметного UI: теперь он виден рядом с title dashboard, под логотипом в sidebar header и в sidebar footer. Это прямой ответ на вопрос пользователя «где IP сервера в панели?».

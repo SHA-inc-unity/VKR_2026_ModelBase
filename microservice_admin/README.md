@@ -18,7 +18,11 @@ registry `cgr.dev` может быть недоступен, а `docker compose 
 использует BuildKit cache mount для `.next/cache`, telemetry Next.js
 отключена, а production build пропускает ESLint через `next.config.js`
 (`eslint.ignoreDuringBuilds = true`). TypeScript typecheck и сам `next build`
-сохраняются.
+сохраняются. Дополнительно install stage переведён в low-memory режим:
+`npm ci` запускается с отключёнными `audit/fund/progress`, с
+`NPM_CONFIG_MAXSOCKETS=1` и с ограничением heap
+`NODE_OPTIONS=--max-old-space-size=384`, чтобы weak VPS не убивал build на
+шаге установки зависимостей с `exit 137`.
 
 ## Deployment modes
 
