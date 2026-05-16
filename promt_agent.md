@@ -46,6 +46,7 @@
 
 ### 2026-05-16
 
+- Для снижения operational риска на remote admin-host исправлено поведение launcher-а в split deployment: `start.sh` / `start.ps1` больше не делают принудительный rebuild в режиме `onlyadmin`, а только поднимают `admin-online`. Пересборка остаётся в `restart ... onlyadmin`; это выравнивает split-start с обычной семантикой `start` и уменьшает шанс потерять SSH на слабом сервере во время тяжёлой Next.js сборки.
 - Для split deployment закрыт главный сетевой gap между backend-host и remote admin-host: в `microservice_infra/docker-compose.yml` внешний advertise address Redpanda вынесен в `REDPANDA_EXTERNAL_HOST` / `REDPANDA_EXTERNAL_PORT` вместо захардкоженного `localhost:9092`. Это делает рабочей схему, где `admin-online` ходит к backend через общую приватную сеть.
 - В `microservice_infra` добавлен отдельный ops-guide `WG_WSTUNNEL.md` с рекомендуемой схемой общей сети: WireGuard over WStunnel (WSS/443), адресный план, firewall rules, backend/admin env и launch-порядок для `noadmin` + `onlyadmin`.
 - Для серверного запуска исправлен новый blocker в `microservice_admin`: build падал на registry `cgr.dev/chainguard/node:latest`. `Dockerfile` переведён на официальный `node:22-bookworm-slim` для build/runtime, а локальная проверка `docker compose build admin` прошла успешно.

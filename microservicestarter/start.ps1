@@ -205,7 +205,7 @@ function Start-Microservice {
             if ($Name -ne "microservice_admin") {
                 Write-Fail "mode=onlyadmin поддерживается только для microservice_admin"
             }
-            docker compose --profile online up -d --build admin-online
+            docker compose --profile online up -d admin-online
         }
         default     { docker compose up -d }
     }

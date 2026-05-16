@@ -189,7 +189,7 @@ start_service() {
         logs)      docker compose logs -f ;;
         onlyadmin)
             [[ "$name" == "microservice_admin" ]] || fail "[$name] mode=onlyadmin поддерживается только для microservice_admin"
-            docker compose --profile online up -d --build admin-online
+            docker compose --profile online up -d admin-online
             ;;
         core|"")   docker compose up -d ;;
         *)         fail "[$name] Неизвестный режим: $mode" ;;
