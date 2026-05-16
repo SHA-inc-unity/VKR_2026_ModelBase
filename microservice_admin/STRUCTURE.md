@@ -85,7 +85,7 @@
 | `tsconfig.json` | TypeScript-конфиг (`@/` → `src/`) |
 | `tailwind.config.js` | Tailwind CSS конфиг: `darkMode: ['class']`, shadcn CSS var tokens, keyframes pulse-dot/shimmer/accordion. Кастомные экраны: `xs: '480px'` (phone landscape / small portrait), `3xl: '1920px'` (Full HD), `4xl: '2560px'` (4K) |
 | `postcss.config.js` | PostCSS конфиг (CommonJS): регистрирует `tailwindcss` и `autoprefixer` как PostCSS плагины. **Критичен** — без него Next.js не обрабатывает директивы `@tailwind` в `globals.css` и utility-классы не генерируются (CSS bundle ~4 KB вместо ~26 KB). |
-| `Dockerfile` | Multi-stage build на `cgr.dev/chainguard/node:latest` и runtime на `cgr.dev/chainguard/node:latest-slim`; standalone Next.js image с отдельным non-root runtime user |
+| `Dockerfile` | Multi-stage build и runtime на официальном `node:22-bookworm-slim` (Docker Hub); standalone Next.js image с отдельным non-root runtime user. Выбор образа убирает зависимость сборки от `cgr.dev` на Linux-серверах |
 | `docker-compose.yml` | Поддерживает **два режима**. `admin` — local-stack service: `expose: ["3000"]`, подключён к `modelline_net`, наружу не публикуется, browser-facing вход даёт nginx из `microservice_infra` на `8501/admin/*`. `admin-online` — profile `online`, отдельная online-head нода для split deployment: публикует `${ADMIN_PORT:-8501}:3000`, не требует `modelline_net` и читает внешние адреса из `ONLINE_*` namespace (`ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`). В обоих случаях Admin не ходит в MinIO напрямую и остаётся zero-byte для dataset export. |
 
 ---

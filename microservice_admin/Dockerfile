@@ -1,17 +1,17 @@
 # syntax=docker/dockerfile:1
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM cgr.dev/chainguard/node:latest AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
-COPY --chown=node:node package.json package-lock.json* ./
-RUN --mount=type=cache,target=/home/node/.npm \
+COPY package.json package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline
 
-COPY --chown=node:node . .
+COPY . .
 RUN npm run build
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM cgr.dev/chainguard/node:latest-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 

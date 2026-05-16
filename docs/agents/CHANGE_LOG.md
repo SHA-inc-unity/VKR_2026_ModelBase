@@ -6,6 +6,8 @@
 
 ### 2026-05-16
 
+- `microservice_admin`: Dockerfile переведён с `cgr.dev/chainguard/node:*` на официальный `node:22-bookworm-slim` для build и runtime. Причина — серверный `docker compose up --build` падал на `load metadata for cgr.dev/chainguard/node:latest`, из-за чего весь launcher завершался ошибкой на шаге `microservice_admin`. Локальная проверка `docker compose build admin` проходит успешно.
+
 - `microservice_gateway`: доработан и закрыт блок ChartService + ChartRequestQueue. Зафиксированные изменения: (1) `ChartService` — ingest lock/marker снимается и при ошибке, а не только при успехе (`IngestErrorCooldownSeconds`); window-scoped coverage вместо full-table; (2) `DataServiceClient` — `claim_check` выделяется как отдельный large-payload сценарий и не трактуется как пустой результат; (3) `ChartRequestQueue` — coalescing-декоратор с `ConcurrentDictionary<string, InFlightEntry>` + `TaskCompletionSource` + `WaitAsync(callerCt)` для изоляции CT-ов; workCts независим от caller CT; (4) `MarketSettings` — 4 новых queue-поля; (5) 4 deploy-скрипта в `deploy/`; (6) интеграционные тесты `MarketQueueIntegrationTests` (3 теста: coalescing, independent keys, waiter cancellation). Итог: 117/117 тестов проходят (78 unit + 31 integration + 4 smoke + 4 contract).
 
 ### 2026-05-15

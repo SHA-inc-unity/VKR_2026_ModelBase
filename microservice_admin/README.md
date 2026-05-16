@@ -6,6 +6,14 @@
 **Конфиги:** `tailwind.config.js` + `postcss.config.js` (последний критичен — регистрирует `tailwindcss` и `autoprefixer` как PostCSS плагины, без него `@tailwind` директивы не обрабатываются)  
 **Base path:** `/admin` — приложение обслуживается по пути `/admin` (настроено через `basePath` и `assetPrefix` в `next.config.js`). Next.js **не** применяет `basePath` автоматически к `fetch()` и `EventSource` — все клиентские обращения к API используют `process.env.NEXT_PUBLIC_BASE_PATH ?? ''` как префикс (`healthClient.ts`, `kafkaClient.ts`, `useEvents.ts`).
 
+## Docker image base
+
+`microservice_admin/Dockerfile` использует официальный образ Docker Hub
+`node:22-bookworm-slim` и для build stage, и для runtime stage. Это убирает
+зависимость сборки от `cgr.dev`, что критично для Linux-серверов, где
+registry `cgr.dev` может быть недоступен, а `docker compose up --build`
+должен работать штатно.
+
 ## Deployment modes
 
 ### 1. Local stack (`admin`)
