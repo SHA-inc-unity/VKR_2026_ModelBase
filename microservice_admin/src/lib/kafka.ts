@@ -84,14 +84,16 @@ function ensureStarted(): Promise<void> {
 
     // Create the reply-inbox topic explicitly. KafkaJS+Redpanda v24 returns
     // INVALID_PARTITIONS for non-existent topics on consumer subscribe, so
-    // we cannot rely on auto-create. Idempotent.
+    // we cannot rely on auto-create. Unlike EVT_* topics, the reply inbox is
+    // created per Admin process, so wait for leaders here to avoid a
+    // create->subscribe race on remote/external listeners.
     const admin = k.admin();
     try {
       await admin.connect();
       try {
         await admin.createTopics({
           topics: [{ topic: REPLY_INBOX, numPartitions: 1, replicationFactor: 1 }],
-          waitForLeaders: false,
+          waitForLeaders: true,
         });
       } catch (err) {
         const e = err as { type?: string; code?: number; message?: string };
