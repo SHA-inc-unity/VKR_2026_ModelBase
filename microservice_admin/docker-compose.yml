@@ -71,6 +71,7 @@ services:
     restart: unless-stopped
     network_mode: host
     command:
+      - /home/app/wstunnel
       - client
       - --http-upgrade-path-prefix
       - "${VPN_WS_PATH:-modelline-wg}"
