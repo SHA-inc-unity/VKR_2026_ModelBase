@@ -498,7 +498,7 @@ if [[ "$MODE" == "onlyadmin" ]]; then
         rm -f "$REPO_ROOT/.runtime-data/microservice_admin/vpn/.ready"
         pushd "$admin_svc_dir" > /dev/null
         initialize_env "microservice_admin" "$admin_svc_dir"
-        docker compose --profile vpn up -d vpn-client
+        docker compose --profile vpn up -d --force-recreate vpn-client
         popd > /dev/null
         wait_vpn_client
     elif [[ -f "$REPO_ROOT/.runtime-data/microservice_admin/vpn/wg0.conf" ]]; then
@@ -508,7 +508,7 @@ if [[ "$MODE" == "onlyadmin" ]]; then
         rm -f "$REPO_ROOT/.runtime-data/microservice_admin/vpn/.ready"
         pushd "$admin_svc_dir" > /dev/null
         initialize_env "microservice_admin" "$admin_svc_dir"
-        docker compose --profile vpn up -d vpn-client
+        docker compose --profile vpn up -d --force-recreate vpn-client
         popd > /dev/null
         wait_vpn_client
     else
