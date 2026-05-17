@@ -6,6 +6,8 @@
 
 ### 2026-05-18 (Containerized VPN Transport)
 
+- `microservice_infra/docker-compose.yml` и `microservice_admin/docker-compose.yml`: исправлен containerized VPN bootstrap для clean Linux-host. Оба compose-сервиса теперь ставят `iproute2-minimal` и `kmod` вместе с `wireguard-tools` перед запуском entrypoint, а затем делают `exec sh /entrypoint.sh`. Это закрывает crash-loop, где `modelline-vpn-server` / `modelline-vpn-client` имели `wg`, но не имели `ip` или `modprobe`, поэтому не могли поднять `wg0`.
+- `microservice_infra/VPN_CONTAINERIZED.md`, `microservice_infra/README.md`, `microservice_infra/STRUCTURE.md`, `microservice_admin/README.md`, `microservice_admin/STRUCTURE.md`: добавлены краткие пояснения про runtime bootstrap-пакетов и новый первый troubleshooting step (`docker logs ...`) для VPN restart-loop.
 - `microservice_infra/vpn/server-entrypoint.sh` **создан**: entrypoint WireGuard-сервера в контейнере (`alpine:3.19`). Генерирует ключи, пишет `wg0-server.conf` + `client.conf`, поднимает `wg0` (10.44.0.1/24), пишет `.ready` маркер.
 - `microservice_admin/vpn/client-entrypoint.sh` **создан**: entrypoint WireGuard-клиента. Читает `/vpn/state/wg0.conf` (записан launcher из join token), поднимает `wg0` (10.44.0.2/32), пишет `.ready` маркер.
 - `microservice_infra/docker-compose.yml`: добавлен сервис `vpn` (profile `vpn`, `alpine:3.19`, `network_mode: host`, cap `NET_ADMIN+SYS_MODULE`). Активируется автоматически в noadmin+VPN режиме.

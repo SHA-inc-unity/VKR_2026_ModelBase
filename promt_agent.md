@@ -10,11 +10,18 @@
 
 ## Текущий контекст
 
+### 2026-05-18 — VPN crash-loop follow-up
+
+- На реальном backend-хосте подтверждён следующий этап после включения `VPN_SERVER_URL`: `modelline-vpn-server` действительно создавался, но уходил в restart-loop ещё до `wg show`.
+- Root cause закрыт в compose: оба VPN-сервиса (`microservice_infra` server и `microservice_admin` client) раньше ставили только `wireguard-tools`, хотя entrypoint'ы реально используют ещё и `ip`/`modprobe`. Теперь перед entrypoint bootstrap-ятся `wireguard-tools`, `iproute2-minimal`, `kmod`, а запуск идёт через `exec sh /entrypoint.sh`.
+- `microservice_infra/VPN_CONTAINERIZED.md`, infra/admin README и STRUCTURE дополнены коротким troubleshooting: если restart-loop останется после этой правки, следующая проверка уже host-level (`docker logs`, `/dev/net/tun`, `modinfo wireguard`, capabilities/UDP 51820`).
+
 ### 2026-05-18 — Containerized VPN Transport
 
 Реализован полный containerized VPN transport для split deployment:
 
 **Сделано:**
+
 - `microservice_infra/vpn/server-entrypoint.sh` и `microservice_admin/vpn/client-entrypoint.sh` — WireGuard entrypoints в контейнере (`alpine:3.19`, `network_mode: host`).
 - Compose: добавлен сервис `vpn` (profile `vpn`) в infra и `vpn-client` в admin.
 - `start.sh` и `restart.sh`: VPN helper-функции + обновлённый dispatch для noadmin (auto print join token) и onlyadmin (детект join token / existing wg0.conf / plain IP).
@@ -22,6 +29,7 @@
 - `WG_WSTUNNEL.md` → помечен как fallback. README/STRUCTURE всех сервисов обновлены.
 
 **Join token flow:**
+
 - Backend: `start.sh all noadmin` с `VPN_SERVER_URL` в `.env` → поднимает `modelline-vpn-server` → печатает base64 join token.
 - Admin первый запуск: `start.sh all onlyadmin <TOKEN>` → декодирует wg0.conf → поднимает vpn-client → ждёт туннеля → auto ONLINE_*=10.44.0.1:*.
 - Admin последующие: `start.sh all onlyadmin` без токена → reuses existing wg0.conf.

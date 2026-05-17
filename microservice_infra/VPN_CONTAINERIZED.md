@@ -10,11 +10,11 @@
 
 ## Как это работает
 
-```
+```text
 backend-хост                          admin-хост
 ─────────────────────────────         ─────────────────────────────
 modelline-vpn-server                  modelline-vpn-client
-  alpine:3.19 + wireguard-tools         alpine:3.19 + wireguard-tools
+  alpine:3.19 + runtime apk bootstrap   alpine:3.19 + runtime apk bootstrap
   network_mode: host                    network_mode: host
   wg0 → 10.44.0.1/24                   wg0 → 10.44.0.2/32
         ↕  WireGuard UDP/51820  ↕
@@ -26,6 +26,9 @@ modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
 - VPN-контейнер работает с `network_mode: host` → интерфейс `wg0` появляется  
   на самом хосте, все Docker-контейнеры (в bridge-сети) достигают `10.44.0.1`  
   через таблицу маршрутизации хоста.
+- Перед запуском entrypoint compose доустанавливает `wireguard-tools`,
+  `iproute2-minimal` и `kmod`, чтобы внутри контейнера были доступны `wg`,
+  `ip` и `modprobe`.
 - Ключи генерируются один раз при первом запуске и сохраняются в  
   `.runtime-data/microservice_infra/vpn/` (на backend-хосте) и  
   `.runtime-data/microservice_admin/vpn/` (на admin-хосте).
@@ -37,7 +40,7 @@ modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
 ## Предварительные требования
 
 | Требование | Backend-хост | Admin-хост |
-|---|---|---|
+| --- | --- | --- |
 | Docker Engine 24+ | ✅ | ✅ |
 | Linux-ядро ≥ 5.6 (модуль `wireguard`) | ✅ | ✅ |
 | Открытый UDP-порт **51820** | ✅ (входящий) | — |
@@ -66,12 +69,14 @@ VPN_SERVER_PORT=51820   # опционально, по умолчанию 51820
 ```
 
 Launcher автоматически:
+
 - Поднимет `modelline-vpn-server` с профилем `vpn` вместе с microservice_infra.
 - Установит `REDPANDA_EXTERNAL_HOST=10.44.0.1` в `.env`.
 - Дождётся генерации ключей и распечатает **join token** в консоль.
 
 Пример вывода:
-```
+
+```text
 ╔══════════════════════════════════════════════════════════════════╗
 ║         VPN JOIN TOKEN — скопируй на admin-хост                 ║
 ╠══════════════════════════════════════════════════════════════════╣
@@ -97,6 +102,7 @@ Launcher автоматически:
 ```
 
 Launcher автоматически:
+
 - Декодирует join token и записывает `wg0.conf` в  
   `.runtime-data/microservice_admin/vpn/wg0.conf`.
 - Поднимет `modelline-vpn-client` (WireGuard клиент).
@@ -172,7 +178,8 @@ MINIO_BIND_ADDR=10.44.0.1
 ## Устранение проблем
 
 | Проблема | Что проверить |
-|---|---|
+| --- | --- |
+| `modelline-vpn-server` / `modelline-vpn-client` уходит в restart-loop | `docker logs modelline-vpn-server --tail 50` или `docker logs modelline-vpn-client --tail 50`; после фикса bootstrap-пакетов типовые оставшиеся причины уже host-level: нет `/dev/net/tun`, нет модуля `wireguard`, нет прав `NET_ADMIN` / `SYS_MODULE` |
 | Join token не появляется | `docker logs modelline-vpn-server` |
 | `wg0` не появился на хосте | `modinfo wireguard`; убедись что `/dev/net/tun` есть |
 | Ping 10.44.0.1 не проходит | UDP 51820 открыт на backend? `wg show` на обоих хостах |
@@ -183,7 +190,7 @@ MINIO_BIND_ADDR=10.44.0.1
 
 ## Файловая структура состояния
 
-```
+```text
 .runtime-data/
   microservice_infra/vpn/
     server.key          # приватный ключ сервера (не передавай!)

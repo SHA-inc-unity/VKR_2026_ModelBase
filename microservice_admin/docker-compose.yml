@@ -95,7 +95,7 @@ services:
       - /lib/modules:/lib/modules:ro
     entrypoint: ["sh", "-c"]
     command:
-      - "apk add --no-cache wireguard-tools 2>/dev/null; sh /entrypoint.sh"
+      - "apk add --no-cache wireguard-tools iproute2-minimal kmod && exec sh /entrypoint.sh"
     restart: unless-stopped
 
 networks:
