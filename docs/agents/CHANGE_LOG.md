@@ -6,6 +6,8 @@
 
 ### 2026-05-18 (Containerized VPN Transport)
 
+- `microservice_admin/vpn/client-entrypoint.sh` и `microservice_admin/docker-compose.yml`: admin VPN client теперь bootstrap-ит `iptables` и после подъёма `wg0` вставляет idempotent allow-правила в `INPUT` и `DOCKER-USER`. Это закрывает кейс, когда backend уже отвечает по `wg0`, но ответный трафик режется host firewall/forwarding на admin-хосте.
+- `microservice_admin/README.md`, `microservice_admin/STRUCTURE.md`, `microservice_infra/VPN_CONTAINERIZED.md`: синхронизированы под новый client-side wg0 firewall bootstrap.
 - `microservice_infra/vpn/server-entrypoint.sh` и `microservice_infra/docker-compose.yml`: backend VPN server теперь bootstrap-ит `iptables` и после подъёма `wg0` вставляет idempotent allow-правила для private backend TCP-портов (`9092`, `9644`, `7510`, `7520`, `9000`) и ICMP по интерфейсу `wg0`. Это переводит backend-side firewall fix в repo-managed containerized VPN path и закрывает кейс «handshake есть, bind на 10.44.0.1 есть, но host firewall всё ещё режет трафик». 
 - `microservice_infra/VPN_CONTAINERIZED.md`, `microservice_infra/README.md`, `microservice_infra/STRUCTURE.md`, `README.md`: синхронизированы под новый wg0 firewall bootstrap в `modelline-vpn-server`.
 - `microservicestarter/start.sh` и `microservicestarter/restart.sh`: в `noadmin + VPN` shell launcher теперь заранее прописывает `REDPANDA_EXTERNAL_HOST=10.44.0.1`, `REDPANDA_BIND_ADDR=10.44.0.1`, `MINIO_BIND_ADDR=10.44.0.1`, `ACCOUNT_BIND_ADDR=10.44.0.1`, `GATEWAY_BIND_ADDR=10.44.0.1` до рестарта backend-сервисов. Это переводит WG/private binding в repo-managed env и снижает зависимость split deployment от ручной host firewall-конфигурации.

@@ -41,6 +41,10 @@ modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
   `AllowedIPs` на `wg0`, потому что `wg setconf` сам их не добавляет.
   Иначе можно получить успешный handshake, но нулевую связность до
   `10.44.0.1:*`.
+- На admin-host client entrypoint также вставляет idempotent `iptables`
+  allow-правила для `wg0` в `INPUT` и `DOCKER-USER`, чтобы ответный трафик
+  backend -> admin не зависел от ручного `ufw allow in on wg0` или других
+  host firewall-правил на admin-хосте.
 - Ключи генерируются один раз при первом запуске и сохраняются в  
   `.runtime-data/microservice_infra/vpn/` (на backend-хосте) и  
   `.runtime-data/microservice_admin/vpn/` (на admin-хосте).
@@ -193,7 +197,7 @@ MINIO_BIND_ADDR=10.44.0.1
 
 | Проблема | Что проверить |
 | --- | --- |
-| `latest handshake` есть, но `ping 10.44.0.1` и `10.44.0.1:<port>` не работают | На admin-host проверь `ip route get 10.44.0.1`; корректный путь должен идти через `dev wg0`. На backend-host после обновления кода нужен новый `./restart.sh all noadmin`, потому что актуальный `vpn-server` теперь сам добавляет `iptables` allow для `wg0`, а `vpn-client` уже ставит route-ы из `AllowedIPs`. После этого повтори `./restart.sh all onlyadmin` на admin-host |
+| `latest handshake` есть, но `ping 10.44.0.1` и `10.44.0.1:<port>` не работают | На admin-host проверь `ip route get 10.44.0.1`; корректный путь должен идти через `dev wg0`. После обновления кода нужен новый `./restart.sh all onlyadmin`, потому что актуальный `vpn-client` теперь сам ставит route-ы из `AllowedIPs` и добавляет `iptables` allow для `wg0`. Если backend-host ещё не обновлялся под server-side firewall bootstrap, отдельно выполни `./restart.sh all noadmin` |
 | В логах `Line unrecognized: \`Address=...\`` | На хосте ещё старая версия entrypoint/compose. Обнови код и заново выполни `./restart.sh all noadmin` или `./restart.sh all onlyadmin`; актуальная версия прогоняет конфиг через `wg-quick strip` перед `wg setconf` |
 | `modelline-vpn-server` / `modelline-vpn-client` уходит в restart-loop | `docker logs modelline-vpn-server --tail 50` или `docker logs modelline-vpn-client --tail 50`; после фикса bootstrap-пакетов типовые оставшиеся причины уже host-level: нет `/dev/net/tun`, нет модуля `wireguard`, нет прав `NET_ADMIN` / `SYS_MODULE` |
 | Join token не появляется | `docker logs modelline-vpn-server` |

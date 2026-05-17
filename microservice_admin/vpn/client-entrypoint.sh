@@ -12,6 +12,29 @@ set -e
 
 STATE=/vpn/state
 
+ensure_iptables_rule() {
+    local chain="$1"
+    shift
+    if ! command -v iptables >/dev/null 2>&1; then
+        echo "[vpn-client] WARNING: iptables не найден — пропускаем firewall bootstrap."
+        return 0
+    fi
+
+    if iptables -C "$chain" "$@" 2>/dev/null; then
+        return 0
+    fi
+
+    iptables -I "$chain" 1 "$@"
+}
+
+allow_wg_firewall_input() {
+    ensure_iptables_rule INPUT -i wg0 -j ACCEPT
+
+    if iptables -S DOCKER-USER >/dev/null 2>&1; then
+        ensure_iptables_rule DOCKER-USER -i wg0 -j ACCEPT
+    fi
+}
+
 # Load the WireGuard kernel module if available.
 modprobe wireguard 2>/dev/null || true
 
@@ -46,6 +69,7 @@ ip link add dev wg0 type wireguard
 ip address add "$CLIENT_IP" dev wg0
 wg setconf wg0 "$RUNTIME_CONF"
 ip link set wg0 up
+allow_wg_firewall_input
 
 if [ -n "$ALLOWED_IPS" ]; then
     printf '%s\n' "$ALLOWED_IPS" | tr ',' '\n' | while IFS= read -r route; do
@@ -57,6 +81,7 @@ fi
 
 echo "[vpn-client] WireGuard interface wg0 is UP."
 echo "[vpn-client]   Client IP : ${CLIENT_IP}"
+echo "[vpn-client]   Host firewall : allow INPUT/DOCKER-USER via wg0"
 
 # Signal the launcher that the tunnel is configured.
 touch "$STATE/.ready"

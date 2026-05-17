@@ -71,14 +71,17 @@ UI живёт только на отдельном admin-host.
 Launcher декодирует join token, записывает `wg0.conf`, поднимает `modelline-vpn-client`, ждёт готовности tunnel и автоматически выставляет `ONLINE_*` на `10.44.0.1:*`. При последующих перезапусках join token не нужен — `wg0.conf` сохраняется в `.runtime-data/microservice_admin/vpn/`. Подробнее: [../microservice_infra/VPN_CONTAINERIZED.md](../microservice_infra/VPN_CONTAINERIZED.md).
 
 Compose-сервис `vpn-client` перед запуском entrypoint теперь доустанавливает
-`wireguard-tools`, `iproute2-minimal` и `kmod`, чтобы `wg`, `ip` и
-`modprobe` были доступны даже на clean Linux-host без отдельной подготовки
-VPN-образа. Сам клиентский entrypoint перед `wg setconf` прогоняет
+`wireguard-tools`, `iproute2-minimal`, `kmod` и `iptables`, чтобы `wg`, `ip`,
+`modprobe` и client-side firewall bootstrap были доступны даже на clean
+Linux-host без отдельной подготовки VPN-образа. Сам клиентский entrypoint перед `wg setconf` прогоняет
 `wg0.conf` через `wg-quick strip`, поэтому join token по-прежнему хранит
 полный wg-quick-конфиг и не падает на строках `Address` / `MTU`. После
 подъёма интерфейса entrypoint также ставит route-ы из `AllowedIPs` на `wg0`,
 иначе handshake был бы успешным, но трафик к `10.44.0.1:*` продолжал бы идти
-в default route хоста вместо туннеля.
+в default route хоста вместо туннеля. Дополнительно `vpn-client` теперь
+вставляет idempotent `iptables` allow для `wg0` в `INPUT` и `DOCKER-USER`,
+чтобы ответный трафик backend -> admin не зависел от ручной host firewall/UFW
+на admin-хосте.
 
 Dashboard на главной странице теперь явно показывает, к какому backend host/IP подключён текущий admin, отдельным заметным connection-блоком над stat cards. Источник один и предсказуемый: compose кладёт в runtime `BACKEND_CONNECTION_TARGET`, где local stack всегда показывает `localhost`, а `admin-online` берёт значение из `ONLINE_BACKEND_HOST`. Тот же блок теперь показывает и реальный `KAFKA_BOOTSTRAP_SERVERS`, который использует admin, плюс текст ошибки broker connectivity, если Kafka path недоступен. Дополнительно `connectionTarget` дублируется в верхней строке dashboard, в sidebar header под логотипом и в footer sidebar, чтобы оператор видел target backend на любой странице admin-панели.
 
