@@ -37,10 +37,23 @@ RUNTIME_CONF="$(mktemp)"
 trap 'rm -f "$RUNTIME_CONF"' EXIT
 wg-quick strip "$CONF" > "$RUNTIME_CONF"
 
+# `wg setconf` does not install routes from AllowedIPs; `wg-quick` normally
+# does that part. We mirror that behavior explicitly so admin-online traffic to
+# 10.44.0.1:* actually goes via wg0 instead of the host default route.
+ALLOWED_IPS=$(awk '/^\[Peer\]/{p=1} p && /^AllowedIPs[[:space:]]*=/{gsub(/.*=[[:space:]]*/,""); print; exit}' "$CONF")
+
 ip link add dev wg0 type wireguard
 ip address add "$CLIENT_IP" dev wg0
 wg setconf wg0 "$RUNTIME_CONF"
 ip link set wg0 up
+
+if [ -n "$ALLOWED_IPS" ]; then
+    printf '%s\n' "$ALLOWED_IPS" | tr ',' '\n' | while IFS= read -r route; do
+        route=$(printf '%s' "$route" | xargs)
+        [ -n "$route" ] || continue
+        ip route replace "$route" dev wg0
+    done
+fi
 
 echo "[vpn-client] WireGuard interface wg0 is UP."
 echo "[vpn-client]   Client IP : ${CLIENT_IP}"
