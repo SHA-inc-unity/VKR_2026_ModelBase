@@ -85,7 +85,11 @@ get_env_value() {
     local env_file="$1"
     local key="$2"
     [[ -f "$env_file" ]] || return 0
-    grep -m1 -E "^${key}=" "$env_file" | sed -E "s|^${key}=||" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+    grep -m1 -E "^${key}=" "$env_file" 2>/dev/null \
+        | sed -E "s|^${key}=||" \
+        | tr -d '\r' \
+        | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+        || true
 }
 
 set_env_value() {
@@ -284,7 +288,8 @@ get_wg_conf_meta() {
     grep -m1 -E "^# ${key}=" "$conf_file" 2>/dev/null \
         | sed -E "s|^# ${key}=||" \
         | tr -d '\r' \
-        | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+    || true
 }
 
 configure_vpn_transport_env_from_conf() {

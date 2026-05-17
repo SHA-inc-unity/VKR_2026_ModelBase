@@ -12,6 +12,7 @@
 
 ### 2026-05-18 — VPN crash-loop follow-up
 
+- На admin-host найден ещё один shell-дефект при повторном `onlyadmin` без нового join token: если `wg0.conf` был сохранён ещё до появления `# VPN_*` metadata-комментариев, `start.sh`/`restart.sh` выходили молча под `set -e` уже на первом optional lookup. `get_wg_conf_meta` и `get_env_value` сделаны tolerant к отсутствующим ключам, поэтому launcher теперь доходит до fallback по старому peer `Endpoint`, переписывает его на `127.0.0.1:<VPN_CLIENT_LOCAL_PORT>` и реально поднимает `wstunnel-client` + `vpn-client`.
 - На реальном backend-хосте подтверждён следующий этап после включения `VPN_SERVER_URL`: `modelline-vpn-server` действительно создавался, но уходил в restart-loop ещё до `wg show`.
 - Root cause закрыт в compose: оба VPN-сервиса (`microservice_infra` server и `microservice_admin` client) раньше ставили только `wireguard-tools`, хотя entrypoint'ы реально используют ещё и `ip`/`modprobe`. Теперь перед entrypoint bootstrap-ятся `wireguard-tools`, `iproute2-minimal`, `kmod`, а запуск идёт через `exec sh /entrypoint.sh`.
 - На живом логе найден и второй runtime-дефект: `wg setconf` получал полный wg-quick-конфиг и падал на `Line unrecognized: 'Address=10.44.0.1/24'`. Оба entrypoint'а переведены на `wg-quick strip` перед `wg setconf`, сохраняя при этом join token в прежнем полном формате.
