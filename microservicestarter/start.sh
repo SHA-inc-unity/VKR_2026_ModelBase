@@ -89,6 +89,42 @@ set_env_value() {
     fi
 }
 
+ensure_env_file() {
+    local svc_dir="$1"
+    local env_file="$svc_dir/.env"
+    local env_example="$svc_dir/.env.example"
+    if [[ ! -f "$env_file" && -f "$env_example" ]]; then
+        cp "$env_example" "$env_file"
+    fi
+    printf '%s' "$env_file"
+}
+
+configure_backend_vpn_env() {
+    local wg_ip="10.44.0.1"
+    local infra_svc_dir infra_env
+    infra_svc_dir="$(get_service_directory "microservice_infra")"
+    if ! is_vpn_enabled "$infra_svc_dir"; then
+        return 1
+    fi
+
+    infra_env="$(ensure_env_file "$infra_svc_dir")"
+    set_env_value "$infra_env" "REDPANDA_EXTERNAL_HOST" "$wg_ip"
+    set_env_value "$infra_env" "REDPANDA_BIND_ADDR" "$wg_ip"
+    set_env_value "$infra_env" "MINIO_BIND_ADDR" "$wg_ip"
+
+    local account_svc_dir account_env
+    account_svc_dir="$(get_service_directory "microservice_account")"
+    account_env="$(ensure_env_file "$account_svc_dir")"
+    set_env_value "$account_env" "ACCOUNT_BIND_ADDR" "$wg_ip"
+
+    local gateway_svc_dir gateway_env
+    gateway_svc_dir="$(get_service_directory "microservice_gateway")"
+    gateway_env="$(ensure_env_file "$gateway_svc_dir")"
+    set_env_value "$gateway_env" "GATEWAY_BIND_ADDR" "$wg_ip"
+
+    success "[vpn-server] Backend bind env настроены на WG IP $wg_ip."
+}
+
 validate_backend_host() {
     local backend_host="$1"
     [[ -n "$backend_host" ]] || fail "Для mode=onlyadmin backend host/IP не может быть пустым."
@@ -535,13 +571,15 @@ else
 
     if [[ ${#selected_services[@]} -gt 1 && "$dispatch_mode" != "logs" ]]; then
         if [[ " ${selected_services[*]} " == *" microservice_infra "* ]]; then
+            if [[ "$MODE" == "noadmin" ]]; then
+                configure_backend_vpn_env || true
+            fi
             start_service "microservice_infra" "$dispatch_mode"
 
-            # In noadmin+vpn mode: auto-set REDPANDA_EXTERNAL_HOST and print join token.
+            # In noadmin+vpn mode: print join token after infra/VPN startup.
             if [[ "$MODE" == "noadmin" ]]; then
                 infra_svc_dir="$(get_service_directory "microservice_infra")"
                 if is_vpn_enabled "$infra_svc_dir"; then
-                    set_env_value "$infra_svc_dir/.env" "REDPANDA_EXTERNAL_HOST" "10.44.0.1"
                     print_vpn_join_token
                 fi
             fi

@@ -79,6 +79,14 @@ wg-quick-поля вроде `Address` не ломали `wg setconf`.
 
 Для local/full stack default остаётся прежним: `REDPANDA_EXTERNAL_HOST=localhost`. Для split deployment задай, например, `REDPANDA_EXTERNAL_HOST=10.44.0.1`.
 
+Если backend поднимается через shell launcher в режиме `noadmin` и VPN включён,
+launcher теперь сам выставляет `REDPANDA_EXTERNAL_HOST=10.44.0.1`,
+`REDPANDA_BIND_ADDR=10.44.0.1` и `MINIO_BIND_ADDR=10.44.0.1` до рестарта
+infra. Аналогично для `microservice_account` и `microservice_gateway`
+launcher прописывает `ACCOUNT_BIND_ADDR=10.44.0.1` и
+`GATEWAY_BIND_ADDR=10.44.0.1`, чтобы WG/private binding оставался
+repo-managed, а не ручным.
+
 ## Запуск
 
 ```powershell

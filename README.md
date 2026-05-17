@@ -150,6 +150,7 @@ Host-specific настройки хранятся в `.env` конкретног
 - в split deployment private backend ports `9092`, `9644`, `7510`, `7520`, `9000` должны смотреть в WG/private IP, а не в публичный интерфейс
 - для backend-host `REDPANDA_EXTERNAL_HOST` должен совпадать с тем WG/private адресом, который использует admin-host для `ONLINE_KAFKA_BOOTSTRAP_SERVERS`
 - для ограничения publish-ed private ports на backend-host используй bind-address переменные `REDPANDA_BIND_ADDR`, `MINIO_BIND_ADDR`, `ACCOUNT_BIND_ADDR`, `GATEWAY_BIND_ADDR`
+- в контейнерном VPN-сценарии shell launcher `noadmin` теперь сам выставляет `REDPANDA_EXTERNAL_HOST` и эти `*_BIND_ADDR` на `10.44.0.1` до рестарта backend-сервисов
 - самый безопасный путь для admin-host — передавать backend адрес аргументом launcher-а (`./start.sh all onlyadmin 10.44.0.1` / `./restart.sh all onlyadmin 10.44.0.1`), а не редактировать все `ONLINE_*` вручную
 
 ## Документация для агентов
