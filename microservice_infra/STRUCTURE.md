@@ -37,7 +37,7 @@
 | `minio-init` | `minio/mc` | — | One-shot контейнер: создаёт bucket `modelline-blobs` после старта MinIO |
 | `nginx` | `nginx:1.27-alpine` | host `8501` → container `80` | Browser-facing ingress local/full стека и download ingress backend-host'а в split deployment: `/admin/*` → admin:3000 (если локальный admin поднят), `/modelline-blobs/*` → minio:9000 без ломания signed path/query. Поднимается всегда, без profile-флага. |
 | `vpn` | `alpine:3.19` | host network, local UDP `51820` | WireGuard server: поднимает `wg0=10.44.0.1/24`, генерирует join token, добавляет firewall allow для `wg0`. |
-| `wstunnel-server` | `ghcr.io/erebe/wstunnel` | host `VPN_WS_PORT` TCP (`8443` default) | WebSocket/TCP transport для WireGuard: принимает `ws://0.0.0.0:<VPN_WS_PORT>` и прокидывает в локальный UDP `127.0.0.1:51820`. |
+| `wstunnel-server` | `ghcr.io/erebe/wstunnel` | host `VPN_WS_PORT` TCP (`8443` default, auto-fallback в shell launcher при занятом порте) | WebSocket/TCP transport для WireGuard: принимает `ws://0.0.0.0:<VPN_WS_PORT>` и прокидывает в локальный UDP `127.0.0.1:51820`. |
 
 ---
 

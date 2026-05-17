@@ -103,6 +103,69 @@ ensure_env_file() {
     printf '%s' "$env_file"
 }
 
+is_valid_tcp_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
+}
+
+is_tcp_port_listening() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"
+        return $?
+    fi
+    return 2
+}
+
+configure_vpn_ws_port_env() {
+    local infra_env="$1"
+    local current_port selected_port candidate status candidates seen_candidates=" "
+
+    current_port="$(get_env_value "$infra_env" "VPN_WS_PORT")"
+    current_port="${current_port:-8443}"
+    if ! is_valid_tcp_port "$current_port"; then
+        warn "[vpn-server] VPN_WS_PORT='$current_port' невалиден — используем 8443."
+        current_port="8443"
+    fi
+
+    candidates="${MODELLINE_VPN_WS_PORT_CANDIDATES:-$current_port 8443 18443 28443 38443 48443 58443}"
+    for candidate in $candidates; do
+        [[ "$seen_candidates" == *" $candidate "* ]] && continue
+        seen_candidates+="$candidate "
+
+        if ! is_valid_tcp_port "$candidate"; then
+            continue
+        fi
+
+        if is_tcp_port_listening "$candidate"; then
+            warn "[vpn-server] TCP port $candidate занят на backend-host — пробуем следующий порт."
+            continue
+        else
+            status=$?
+            if [[ $status -eq 2 ]]; then
+                warn "[vpn-server] Не найден ss/netstat — не могу проверить занятость VPN_WS_PORT=$current_port заранее."
+                selected_port="$current_port"
+                break
+            fi
+            selected_port="$candidate"
+            break
+        fi
+    done
+
+    [[ -n "${selected_port:-}" ]] || fail "[vpn-server] Все candidate-порты VPN_WS_PORT заняты: $candidates. Проверь: ss -ltnp"
+
+    set_env_value "$infra_env" "VPN_WS_PORT" "$selected_port"
+    if [[ "$selected_port" != "$current_port" ]]; then
+        success "[vpn-server] VPN_WS_PORT переключён с $current_port на свободный TCP $selected_port."
+    else
+        success "[vpn-server] VPN_WS_PORT=$selected_port готов."
+    fi
+}
+
 configure_backend_vpn_env() {
     local wg_ip="10.44.0.1"
     local infra_svc_dir infra_env
@@ -112,6 +175,7 @@ configure_backend_vpn_env() {
     fi
 
     infra_env="$(ensure_env_file "$infra_svc_dir")"
+    configure_vpn_ws_port_env "$infra_env"
     set_env_value "$infra_env" "REDPANDA_EXTERNAL_HOST" "$wg_ip"
     set_env_value "$infra_env" "REDPANDA_BIND_ADDR" "$wg_ip"
     set_env_value "$infra_env" "MINIO_BIND_ADDR" "$wg_ip"
@@ -257,12 +321,15 @@ print_vpn_join_token() {
     local server_ip
     server_ip="$(grep -m1 'Address' "$state_dir/wg0-server.conf" 2>/dev/null \
                  | sed -E 's|.*=[[:space:]]*||; s|/.*||' || true)"
+    local ws_port
+    ws_port="$(get_wg_conf_meta "$client_conf" "VPN_WS_PORT")"
 
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════╗"
     echo "║         VPN JOIN TOKEN — скопируй на admin-хост                 ║"
     echo "╠══════════════════════════════════════════════════════════════════╣"
     echo "║  Backend WG IP : ${server_ip:-10.44.0.1}                                  ║"
+    echo "║  WebSocket TCP : ${ws_port:-8443}                                      ║"
     echo "║                                                                  ║"
     echo "║  На admin-хосте запусти:                                         ║"
     echo "║  ./start.sh all onlyadmin <JOIN_TOKEN>                           ║"
@@ -302,7 +369,7 @@ configure_vpn_transport_env_from_conf() {
     client_local_port="$(get_wg_conf_meta "$conf_file" "VPN_CLIENT_LOCAL_PORT")"
 
     server_port="${server_port:-51820}"
-    ws_port="${ws_port:-443}"
+    ws_port="${ws_port:-8443}"
     ws_path="${ws_path:-modelline-wg}"
     client_local_port="${client_local_port:-51820}"
 

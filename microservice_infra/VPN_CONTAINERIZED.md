@@ -104,6 +104,13 @@ VPN_WS_PORT=<открытый TCP-порт>
 После смены `VPN_WS_PORT` нужен новый запуск `noadmin` и новый join token,
 потому что port переносится в metadata, которую читает admin-host.
 
+Если выбранный `VPN_WS_PORT` уже занят на backend-host, shell launcher в режиме
+`noadmin + VPN` проверяет порт через `ss`/`netstat`, выбирает первый свободный
+fallback из `8443 18443 28443 38443 48443 58443`, записывает его в
+`microservice_infra/.env` и печатает выбранное значение в JOIN TOKEN-блоке.
+Список fallback-портов можно переопределить переменной окружения
+`MODELLINE_VPN_WS_PORT_CANDIDATES` перед запуском.
+
 ### 2. Запусти stack в режиме noadmin
 
 ```bash
@@ -235,7 +242,8 @@ MINIO_BIND_ADDR=10.44.0.1
 | Проблема | Что проверить |
 | --- | --- |
 | `wstunnel-server` падает с `Failed to bind ... Permission denied (os error 13)` | На хосте старая версия compose или вручную выбран privileged port без root bind. Обнови код и выполни `./restart.sh all noadmin`; актуальный default `VPN_WS_PORT=8443` избегает privileged port, а compose всё равно запускает `wstunnel-server` root-пользователем. |
-| `VPN_WS_PORT` недоступен на backend-host | Задай другой открытый TCP-порт в `microservice_infra/.env`, открой этот port в firewall/security group, выполни `./restart.sh all noadmin`, затем используй свежий join token на admin-host. |
+| `wstunnel-server` падает с `Failed to bind ... Address already in use (os error 98)` | На backend-host выбранный `VPN_WS_PORT` занят другим процессом. Обнови launcher и выполни `./restart.sh all noadmin`: актуальный shell path сам выберет свободный fallback-порт и запишет его в `microservice_infra/.env`. Выбранный порт нужно открыть во входящем firewall/security group и использовать свежий join token на admin-host. Для ручной диагностики: `ss -ltnp 'sport = :8443'`. |
+| `VPN_WS_PORT` недоступен на backend-host | Задай другой открытый TCP-порт в `microservice_infra/.env` или через `MODELLINE_VPN_WS_PORT_CANDIDATES`, открой этот port в firewall/security group, выполни `./restart.sh all noadmin`, затем используй свежий join token на admin-host. |
 | `wstunnel-client` не подключается | На backend-host должен быть открыт входящий `VPN_WS_PORT/tcp`; проверь `docker logs modelline-wstunnel-server --tail 50` и `docker logs modelline-wstunnel-client --tail 50` |
 | `latest handshake` есть, но `ping 10.44.0.1` и `10.44.0.1:<port>` не работают | На admin-host проверь `ip route get 10.44.0.1`; корректный путь должен идти через `dev wg0`. После обновления кода нужен новый `./restart.sh all onlyadmin`, потому что актуальный `vpn-client` теперь сам ставит route-ы из `AllowedIPs` и добавляет `iptables` allow для `wg0`. Если backend-host ещё не обновлялся под server-side firewall bootstrap, отдельно выполни `./restart.sh all noadmin` |
 | В логах `Line unrecognized: \`Address=...\`` | На хосте ещё старая версия entrypoint/compose. Обнови код и заново выполни `./restart.sh all noadmin` или `./restart.sh all onlyadmin`; актуальная версия прогоняет конфиг через `wg-quick strip` перед `wg setconf` |

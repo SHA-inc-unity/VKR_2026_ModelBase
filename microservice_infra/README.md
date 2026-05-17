@@ -74,6 +74,10 @@ Default `8443` оставляет backend-host `443` свободным для r
 и не требует bind на privileged port. Если нужно вернуть именно `443`, контейнер
 уже запускается root-пользователем, но такой режим снова потребует открытого
 `443/tcp` на backend-хосте и нового join token.
+Если `VPN_WS_PORT` занят на backend-host, `noadmin + VPN` shell launcher заранее
+выбирает первый свободный fallback-порт, записывает его в `microservice_infra/.env`
+и печатает выбранное значение в JOIN TOKEN-блоке. Список fallback-портов можно
+переопределить через `MODELLINE_VPN_WS_PORT_CANDIDATES`.
 Если `modelline-vpn-server` после этого всё ещё рестартует, следующая
 проверка уже host-level: `docker logs modelline-vpn-server --tail 50`,
 наличие `/dev/net/tun` и `modinfo wireguard`.
