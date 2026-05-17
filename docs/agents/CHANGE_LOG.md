@@ -4,7 +4,43 @@
 
 ## 2026-05
 
-### 2026-05-18 (Containerized VPN Transport)
+### 2026-05-XX (HTTP Admin Facade — замена VPN transport)
+
+**Цель**: заменить VPN/WireGuard/WStunnel split-deployment transport единым HTTPS-endpoint на порту 8443 (backend-хост). Admin-хосту достаточно двух переменных: `ADMIN_BACKEND_BASE_URL` + `ADMIN_BACKEND_SHARED_TOKEN`.
+
+**Gateway (новые файлы)**:
+- `microservice_gateway/src/GatewayService.API/Settings/AdminSettings.cs` — strongly-typed конфиг admin facade (`SharedToken`, `DefaultTimeoutSeconds`, `LongTimeoutSeconds`)
+- `microservice_gateway/src/GatewayService.API/Kafka/AdminTopics.cs` — 44 Kafka topic-константы (зеркало `microservice_admin/src/lib/topics.ts`)
+- `microservice_gateway/src/GatewayService.API/Filters/AdminApiKeyFilter.cs` — `IAsyncActionFilter`, проверяет `Authorization: Bearer` или `X-Admin-Api-Key`
+- `microservice_gateway/src/GatewayService.API/Controllers/AdminController.cs` — 44 `POST /api/admin/*` endpoint-а, каждый прокидывает запрос в Kafka и возвращает ответ; long-timeout (300 s) для операций типа export/import/train
+
+**Gateway (изменённые файлы)**:
+- `microservice_gateway/src/GatewayService.API/Extensions/ServiceCollectionExtensions.cs` — регистрация `AdminSettings` + `AdminApiKeyFilter`
+- `microservice_gateway/src/GatewayService.API/appsettings.json` — секция `Admin: { SharedToken, DefaultTimeoutSeconds, LongTimeoutSeconds }`
+- `microservice_gateway/.env.example` — `ADMIN_SHARED_TOKEN=`
+- `microservice_gateway/docker-compose.yml` — `Admin__SharedToken: ${ADMIN_SHARED_TOKEN:-}`
+
+**Admin (новые файлы)**:
+- `microservice_admin/src/lib/backendClient.ts` — server-only HTTP-клиент; таблица `TOPIC_PATH` (44 записи); `backendCall()`, `isSplitMode`; `BackendClientError` с HTTP-статусом
+
+**Admin (изменённые файлы)**:
+- `microservice_admin/src/app/api/kafka/route.ts` — в split-mode использует `backendCall()`; в local-mode — legacy Kafka; coalesce-логика сохранена в обоих режимах
+- `microservice_admin/src/app/api/export/csv/route.ts` — dual-mode: `backendCall` или `kafkaRequest`
+- `microservice_admin/src/app/api/upload/csv/route.ts` — dual-mode для per-batch import
+- `microservice_admin/src/app/api/health/route.ts` — split-mode: одиночный probe к `ADMIN_BACKEND_BASE_URL/health`; local-mode: без изменений
+- `microservice_admin/.env.example` — `ADMIN_BACKEND_BASE_URL=`, `ADMIN_BACKEND_SHARED_TOKEN=`; VPN-переменные помечены deprecated
+
+**Infra**:
+- `microservice_infra/nginx/nginx.conf` — новый `server { listen 8443 ssl; }` с `location /api/admin/`, `/modelline-blobs/`, `/health`
+- `microservice_infra/docker-compose.yml` — nginx: порт `${ADMIN_BACKEND_PORT:-8443}:8443` + volume `${ADMIN_BACKEND_CERTS_DIR:-./nginx/certs}:/etc/nginx/certs:ro`
+- `microservice_infra/nginx/certs/README.md` — инструкция по генерации TLS-сертификата
+- `microservice_infra/.gitignore` — `nginx/certs/tls.crt`, `nginx/certs/tls.key`
+
+**Docs**:
+- `microservice_gateway/STRUCTURE.md` — добавлены строки `Filters/`, `Settings/AdminSettings`, `Kafka/AdminTopics`
+- `microservice_admin/STRUCTURE.md` — добавлена строка `backendClient.ts`; обновлены описания `/api/kafka` и `/api/health`
+
+
 
 - `microservicestarter/start.sh`, `microservicestarter/restart.sh`, `microservicestarter/README.md`, `microservice_infra/VPN_CONTAINERIZED.md`: `noadmin + VPN` теперь заранее проверяет занятость `VPN_WS_PORT` через `ss`/`netstat`. Если default `8443` занят (`Address already in use`), launcher выбирает первый свободный fallback (`18443`, `28443`, `38443`, `48443`, `58443`), записывает его в `microservice_infra/.env` и печатает выбранный TCP-port в JOIN TOKEN-блоке. Список можно переопределить через `MODELLINE_VPN_WS_PORT_CANDIDATES`.
 - `microservice_infra/docker-compose.yml`, `microservice_admin/docker-compose.yml`, `.env.example`, root/service/starter docs: default WebSocket transport port для containerized VPN переведён с `443` на `8443`. Это оставляет backend `443` свободным и убирает зависимость от privileged-port bind; join token теперь несёт `VPN_WS_PORT=8443` при fresh backend `noadmin` запуске.

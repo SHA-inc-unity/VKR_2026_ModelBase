@@ -37,10 +37,11 @@
 | `Controllers/` | HTTP endpoints gateway |
 | `DTOs/` | Контракты ответов и ошибок |
 | `Extensions/` | Регистрация сервисов и инфраструктурных зависимостей |
-| `Kafka/` | Kafka settings, topics и request client |
+| `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade |
+| `Kafka/` | Kafka settings, topics и request client; `AdminTopics` — topic-константы admin facade |
 | `Market/` | Полный market API — см. ниже |
 | `Middleware/` | CorrelationId, exception handling и другие cross-cutting middleware |
-| `Settings/` | strongly-typed конфиги |
+| `Settings/` | strongly-typed конфиги; `AdminSettings` — конфиг admin facade (SharedToken, таймауты) |
 | `Common/` | общие типы и вспомогательные abstractions |
 | `appsettings*.json` | конфигурация окружений |
 

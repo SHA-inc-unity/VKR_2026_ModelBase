@@ -10,7 +10,35 @@
 
 ## Текущий контекст
 
+### 2026-05-XX — HTTP Admin Facade (замена VPN transport)
+
+**Что сделано**: полностью реализован переход от VPN/WireGuard/WStunnel split-deployment к единому HTTPS-endpoint на порту 8443.
+
+**Gateway** (новое):
+- `Settings/AdminSettings.cs` — SharedToken, DefaultTimeoutSeconds (15), LongTimeoutSeconds (300)
+- `Kafka/AdminTopics.cs` — 44 Kafka topic-константы, зеркало `topics.ts`
+- `Filters/AdminApiKeyFilter.cs` — IAsyncActionFilter, проверяет Authorization: Bearer или X-Admin-Api-Key
+- `Controllers/AdminController.cs` — 44 POST /api/admin/* endpoint, Forward() helper, long-timeout для export/import/train
+- `ServiceCollectionExtensions.cs`, `appsettings.json`, `.env.example`, `docker-compose.yml` — обновлены
+
+**Admin** (новое/изменено):
+- `src/lib/backendClient.ts` — TOPIC_PATH (44 маппинга), backendCall(), isSplitMode, BackendClientError
+- `src/app/api/kafka/route.ts` — dual-mode: backendCall или kafkaRequest; coalesce в обоих режимах
+- `src/app/api/export/csv/route.ts`, `upload/csv/route.ts` — dual-mode
+- `src/app/api/health/route.ts` — split-mode: probe ADMIN_BACKEND_BASE_URL/health; local-mode: без изменений
+- `.env.example` — ADMIN_BACKEND_BASE_URL, ADMIN_BACKEND_SHARED_TOKEN; VPN-переменные помечены deprecated
+
+**Infra**:
+- `nginx/nginx.conf` — новый server { listen 8443 ssl; } с /api/admin/, /modelline-blobs/, /health
+- `docker-compose.yml` — nginx: порт 8443 + volume для certs
+- `nginx/certs/README.md` + `.gitignore` для tls.crt/tls.key
+
+**Что осталось**: VPN-переменные и compose-сервисы (wireguard, wstunnel) не удалены — deprecated, но совместимы. Удаление — отдельная задача.
+
+---
+
 ### 2026-05-18 — VPN crash-loop follow-up
+
 
 - По live-логу `Failed to bind to socket on 0.0.0.0:8443 / Address already in use` добавлен автоподбор outer TCP-port в shell launcher: `noadmin + VPN` проверяет `VPN_WS_PORT` через `ss`/`netstat`, при занятом порте выбирает первый свободный fallback, сохраняет его в `microservice_infra/.env` и выводит выбранный port в JOIN TOKEN-блоке. После такого переключения всё равно нужен inbound firewall/security group allow для выбранного порта и fresh join token на admin-host.
 - По решению пользователя containerized VPN WebSocket transport переведён на default `VPN_WS_PORT=8443`. Это отделяет VPN outer transport от backend/admin `443`, оставляет `443` свободным для reverse proxy/HTTPS и требует fresh `noadmin` запуск + новый join token для admin-host.

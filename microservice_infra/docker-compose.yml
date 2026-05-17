@@ -198,8 +198,14 @@ services:
   # Поднимается всегда вместе с остальной infra. В local/full stack это
   # browser-facing ingress на :8501; в split deployment этот же nginx
   # остаётся download endpoint-ом backend-хоста для /modelline-blobs/*.
-  # HTTPS: смонтировать ssl.conf в /etc/nginx/conf.d/ и открыть :443 на
-  # хосте.
+  #
+  # Split deployment (8443):
+  #   Дополнительный TLS-сервер на порту 8443 — admin facade для удалённого
+  #   admin-хоста. Требует монтирования TLS-сертификата:
+  #     ADMIN_BACKEND_CERTS_DIR=<host-path-to-dir-with-tls.crt-and-tls.key>
+  #   Сгенерировать самоподписанный:
+  #     openssl req -x509 -newkey rsa:4096 -keyout tls.key -out tls.crt \
+  #       -days 365 -nodes -subj '/CN=modelline-backend'
   nginx:
     image: nginx:1.27-alpine
     container_name: modelline-nginx
@@ -208,8 +214,10 @@ services:
       - minio
     ports:
       - "${NGINX_PORT:-8501}:80"
+      - "${ADMIN_BACKEND_PORT:-8443}:8443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${ADMIN_BACKEND_CERTS_DIR:-./nginx/certs}:/etc/nginx/certs:ro
     networks:
       - modelline_net
 

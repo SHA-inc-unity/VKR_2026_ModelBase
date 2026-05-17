@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { kafkaRequest } from '@/lib/kafka';
 import { Topics } from '@/lib/topics';
+import { isSplitMode, backendCall } from '@/lib/backendClient';
 
 /**
  * POST /api/upload/csv
@@ -79,10 +80,10 @@ export async function POST(req: NextRequest) {
         let batch = 0;
         for (let i = 0; i < total; i += effectiveBatchSize) {
           const slice = rows.slice(i, i + effectiveBatchSize);
-          const reply = await kafkaRequest(
-            Topics.CMD_DATA_DATASET_IMPORT_CSV,
-            { table, rows: slice },
-            { timeoutMs: BATCH_TIMEOUT_MS },
+          const batchPayload = { table, rows: slice };
+          const reply = (isSplitMode
+            ? await backendCall(Topics.CMD_DATA_DATASET_IMPORT_CSV, batchPayload, { timeoutMs: BATCH_TIMEOUT_MS })
+            : await kafkaRequest(Topics.CMD_DATA_DATASET_IMPORT_CSV, batchPayload, { timeoutMs: BATCH_TIMEOUT_MS })
           ) as { rows_imported?: number; error?: string };
 
           if (reply?.error) throw new Error(String(reply.error));

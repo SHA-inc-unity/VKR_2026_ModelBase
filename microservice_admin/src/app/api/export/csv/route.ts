@@ -1,6 +1,7 @@
 import { kafkaRequest } from '@/lib/kafka';
 import { Topics } from '@/lib/topics';
 import { TIMEFRAMES, makeTableName } from '@/lib/constants';
+import { isSplitMode, backendCall } from '@/lib/backendClient';
 
 export const runtime = 'nodejs';
 
@@ -66,11 +67,11 @@ export async function GET(req: Request) {
         );
       }
       const tables = TIMEFRAMES.map(tf => makeTableName(symbol, tf));
+      const exportPayload = { tables, symbol, start_ms: startNum, end_ms: endNum };
 
-      const reply = await kafkaRequest(
-        Topics.CMD_DATA_DATASET_EXPORT,
-        { tables, symbol, start_ms: startNum, end_ms: endNum },
-        { timeoutMs: 300_000 },
+      const reply = (isSplitMode
+        ? await backendCall(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
+        : await kafkaRequest(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
       ) as { presigned_url?: string; error?: string };
 
       if (reply?.error) {
@@ -94,10 +95,10 @@ export async function GET(req: Request) {
       );
     }
 
-    const reply = await kafkaRequest(
-      Topics.CMD_DATA_DATASET_EXPORT,
-      { table, start_ms: startNum, end_ms: endNum },
-      { timeoutMs: 300_000 },
+    const exportPayload = { table, start_ms: startNum, end_ms: endNum };
+    const reply = (isSplitMode
+      ? await backendCall(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
+      : await kafkaRequest(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
     ) as { presigned_url?: string; error?: string };
 
     if (reply?.error) {

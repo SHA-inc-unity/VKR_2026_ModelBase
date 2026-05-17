@@ -1,0 +1,3 @@
+# TLS certificate files — never commit private keys
+nginx/certs/tls.crt
+nginx/certs/tls.key

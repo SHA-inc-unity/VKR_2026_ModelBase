@@ -1,12 +1,16 @@
 /**
  * GET /api/health — infrastructure health probe.
  *
- * Application services (data, analitic, account, gateway) are health-checked
- * via Kafka (cmd.*.health topics), not here. This route only probes the two
- * shared-infra services that sit in modelline_net and don't speak Kafka:
- * Redpanda's admin API and MinIO's liveness endpoint.
+ * In local / full-stack mode: probes Kafka, Redpanda admin API, MinIO,
+ * account service and gateway directly.
+ *
+ * In split-deployment mode (ADMIN_BACKEND_BASE_URL set): skips all direct
+ * backend probes and instead probes only the backend HTTPS endpoint itself,
+ * deriving the gateway/Redpanda/MinIO results from the combined backend
+ * reachability status.
  */
 import { probeKafkaConnectivity } from '@/lib/kafka';
+import { isSplitMode, ADMIN_BACKEND_BASE_URL } from '@/lib/backendClient';
 import type { InfraHealthResponse, InfraServiceHealth } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -31,6 +35,21 @@ async function probe(url: string): Promise<InfraServiceHealth> {
 }
 
 export async function GET(): Promise<Response> {
+  // ── Split-deployment: only probe the backend HTTPS endpoint ───────────────
+  if (isSplitMode) {
+    const backendProbe = await probe(`${ADMIN_BACKEND_BASE_URL}/health`);
+    const body: InfraHealthResponse = {
+      connectionTarget: ADMIN_BACKEND_BASE_URL,
+      kafka:    backendProbe.status === 'online' ? { status: 'ok' } : { status: 'error', error: backendProbe.error },
+      redpanda: backendProbe,
+      minio:    backendProbe,
+      account:  { status: 'unknown' },
+      gateway:  backendProbe,
+    };
+    return Response.json(body);
+  }
+
+  // ── Local / full-stack: probe each service directly ───────────────────────
   const kafka = await probeKafkaConnectivity();
 
   const [redpanda, minio, account, gateway] = await Promise.allSettled([
