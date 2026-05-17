@@ -38,7 +38,7 @@
        Split deployment:
              backend-host         → noadmin
              remote admin-host    → onlyadmin (admin-head на :443/admin)
-             private transport    → WireGuard over WebSocket/TCP 443
+             private transport    → WireGuard over WebSocket/TCP 8443
 ```
 
 **Правило:** межсервисная коммуникация внутри ML-платформы — только Kafka. HTTP между сервисами запрещён. `account` и `gateway` — отдельный независимый стек (REST + JWT).

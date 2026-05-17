@@ -62,7 +62,7 @@ UI живёт только на отдельном admin-host.
 
 Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST` и автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`.
 
-**Containerized VPN (рекомендуется):** при запуске backend в режиме `noadmin` с заданным `VPN_SERVER_URL` в `microservice_infra/.env`, launcher автоматически поднимает WireGuard-сервер, WebSocket/TCP transport на `443` и печатает **join token** (base64-строку). На admin-хосте достаточно:
+**Containerized VPN (рекомендуется):** при запуске backend в режиме `noadmin` с заданным `VPN_SERVER_URL` в `microservice_infra/.env`, launcher автоматически поднимает WireGuard-сервер, WebSocket/TCP transport на `8443` и печатает **join token** (base64-строку). На admin-хосте достаточно:
 
 ```bash
 ./start.sh all onlyadmin <JOIN_TOKEN>
@@ -83,7 +83,7 @@ Linux-host без отдельной подготовки VPN-образа. Са
 чтобы ответный трафик backend -> admin не зависел от ручной host firewall/UFW
 на admin-хосте.
 WireGuard client теперь использует локальный endpoint `127.0.0.1:51820`, а
-`wstunnel-client` переносит этот UDP-поток поверх `ws://<backend>:443`.
+`wstunnel-client` переносит этот UDP-поток поверх `ws://<backend>:8443`.
 
 Dashboard на главной странице теперь явно показывает, к какому backend host/IP подключён текущий admin, отдельным заметным connection-блоком над stat cards. Источник один и предсказуемый: compose кладёт в runtime `BACKEND_CONNECTION_TARGET`, где local stack всегда показывает `localhost`, а `admin-online` берёт значение из `ONLINE_BACKEND_HOST`. Тот же блок теперь показывает и реальный `KAFKA_BOOTSTRAP_SERVERS`, который использует admin, плюс текст ошибки broker connectivity, если Kafka path недоступен. Дополнительно `connectionTarget` дублируется в верхней строке dashboard, в sidebar header под логотипом и в footer sidebar, чтобы оператор видел target backend на любой странице admin-панели.
 

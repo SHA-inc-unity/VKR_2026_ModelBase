@@ -1,8 +1,8 @@
-# Containerized VPN Transport (WireGuard over WebSocket/TCP 443)
+# Containerized VPN Transport (WireGuard over WebSocket/TCP)
 
 Этот документ описывает основной способ запуска ModelLine в split-режиме  
 (backend-хост + admin-хост), реализованный через WireGuard-контейнер и
-WebSocket/TCP transport на `443` без ручной настройки системного
+WebSocket/TCP transport на `VPN_WS_PORT` (`8443` по умолчанию) без ручной настройки системного
 wireguard/wg-quick/systemd на хостах.
 
 > Альтернативный (ручной) вариант с wg-quick + WStunnel описан в [WG_WSTUNNEL.md](WG_WSTUNNEL.md).
@@ -18,8 +18,8 @@ modelline-vpn-server                  modelline-vpn-client
   alpine:3.19 + runtime apk bootstrap   alpine:3.19 + runtime apk bootstrap
   network_mode: host                    network_mode: host
   wg0 → 10.44.0.1/24                   wg0 → 10.44.0.2/32
-modelline-wstunnel-server :443       modelline-wstunnel-client
-  ↕  WebSocket/TCP 443  ↕
+modelline-wstunnel-server :VPN_WS_PORT  modelline-wstunnel-client
+  ↕  WebSocket/TCP       ↕
   ↕  local UDP 51820    ↕
 modelline-redpanda   :9092        admin-online → 10.44.0.1:9092 ✓
 modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
@@ -31,9 +31,13 @@ modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
   через таблицу маршрутизации хоста.
 - WireGuard client больше не стучится напрямую в публичный UDP `51820`.
   В join token его `Endpoint` указывает на `127.0.0.1:51820`, а
-  `wstunnel-client` переносит этот локальный UDP-поток в `ws://<backend>:443`.
-  На backend-хосте `wstunnel-server` принимает TCP `443` и прокидывает поток
+  `wstunnel-client` переносит этот локальный UDP-поток в `ws://<backend>:<VPN_WS_PORT>`.
+  На backend-хосте `wstunnel-server` принимает TCP `VPN_WS_PORT` и прокидывает поток
   в локальный WireGuard UDP `127.0.0.1:51820`.
+- Default `VPN_WS_PORT=8443` не требует privileged-port bind и оставляет
+  backend-host `443` свободным для reverse proxy/HTTPS. Если оператор вручную
+  возвращает `VPN_WS_PORT=443`, `wstunnel-server` всё равно запускается root
+  внутри контейнера, чтобы bind на `443` не падал с `Permission denied`.
 - Перед запуском entrypoint compose доустанавливает `wireguard-tools`,
   `iproute2-minimal`, `kmod` и `iptables`, чтобы внутри контейнера были
   доступны `wg`, `ip`, `modprobe` и firewall bootstrap для `wg0`.
@@ -69,7 +73,7 @@ modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
 | --- | --- | --- |
 | Docker Engine 24+ | ✅ | ✅ |
 | Linux-ядро ≥ 5.6 (модуль `wireguard`) | ✅ | ✅ |
-| Открытый TCP-порт **443** на backend-хосте | ✅ (входящий) | — |
+| Открытый TCP-порт `VPN_WS_PORT` на backend-хосте (`8443` по умолчанию) | ✅ (входящий) | — |
 | `/dev/net/tun` устройство | ✅ | ✅ |
 
 **Проверить ядро**: `uname -r` (должно быть ≥ 5.6, Ubuntu 20.04+ / Debian 11+ подходят).  
@@ -86,10 +90,19 @@ modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
 # microservice_infra/.env
 VPN_SERVER_URL=<публичный IP или hostname backend-хоста>
 VPN_TRANSPORT=ws
-VPN_WS_PORT=443
+VPN_WS_PORT=8443
 VPN_WS_PATH=modelline-wg
 VPN_SERVER_PORT=51820   # локальный UDP WireGuard за wstunnel, наружу не открываем
 ```
+
+Если нужно использовать другой публичный TCP-порт, поменяй `VPN_WS_PORT`:
+
+```bash
+VPN_WS_PORT=<открытый TCP-порт>
+```
+
+После смены `VPN_WS_PORT` нужен новый запуск `noadmin` и новый join token,
+потому что port переносится в metadata, которую читает admin-host.
 
 ### 2. Запусти stack в режиме noadmin
 
@@ -100,7 +113,7 @@ VPN_SERVER_PORT=51820   # локальный UDP WireGuard за wstunnel, нар
 Launcher автоматически:
 
 - Поднимет `modelline-vpn-server` с профилем `vpn` вместе с microservice_infra.
-- Поднимет `modelline-wstunnel-server` на TCP `443` вместе с WireGuard.
+- Поднимет `modelline-wstunnel-server` на TCP `VPN_WS_PORT` вместе с WireGuard.
 - Установит `REDPANDA_EXTERNAL_HOST=10.44.0.1` в `.env`.
 - Разрешит private backend-порты по `wg0` через host `iptables` прямо из
   `modelline-vpn-server`.
@@ -140,7 +153,7 @@ Launcher автоматически:
 - Прочитает metadata из join token и заполнит `VPN_SERVER_URL`, `VPN_WS_PORT`,
   `VPN_WS_PATH`, `VPN_CLIENT_LOCAL_PORT` в `microservice_admin/.env`.
 - Поднимет `modelline-wstunnel-client`, который слушает локальный UDP `51820`
-  и соединяется с backend WebSocket endpoint на TCP `443`.
+  и соединяется с backend WebSocket endpoint на TCP `VPN_WS_PORT` из join token.
 - Поднимет `modelline-vpn-client` (WireGuard клиент).
 - Дождётся, пока `wg0` поднимется (`10.44.0.2/32` на хосте).
 - Установит `ONLINE_*` переменные на `10.44.0.1:*`.
@@ -221,13 +234,15 @@ MINIO_BIND_ADDR=10.44.0.1
 
 | Проблема | Что проверить |
 | --- | --- |
-| `wstunnel-client` не подключается | На backend-host должен быть открыт входящий `443/tcp`; проверь `docker logs modelline-wstunnel-server --tail 50` и `docker logs modelline-wstunnel-client --tail 50` |
+| `wstunnel-server` падает с `Failed to bind ... Permission denied (os error 13)` | На хосте старая версия compose или вручную выбран privileged port без root bind. Обнови код и выполни `./restart.sh all noadmin`; актуальный default `VPN_WS_PORT=8443` избегает privileged port, а compose всё равно запускает `wstunnel-server` root-пользователем. |
+| `VPN_WS_PORT` недоступен на backend-host | Задай другой открытый TCP-порт в `microservice_infra/.env`, открой этот port в firewall/security group, выполни `./restart.sh all noadmin`, затем используй свежий join token на admin-host. |
+| `wstunnel-client` не подключается | На backend-host должен быть открыт входящий `VPN_WS_PORT/tcp`; проверь `docker logs modelline-wstunnel-server --tail 50` и `docker logs modelline-wstunnel-client --tail 50` |
 | `latest handshake` есть, но `ping 10.44.0.1` и `10.44.0.1:<port>` не работают | На admin-host проверь `ip route get 10.44.0.1`; корректный путь должен идти через `dev wg0`. После обновления кода нужен новый `./restart.sh all onlyadmin`, потому что актуальный `vpn-client` теперь сам ставит route-ы из `AllowedIPs` и добавляет `iptables` allow для `wg0`. Если backend-host ещё не обновлялся под server-side firewall bootstrap, отдельно выполни `./restart.sh all noadmin` |
 | В логах `Line unrecognized: \`Address=...\`` | На хосте ещё старая версия entrypoint/compose. Обнови код и заново выполни `./restart.sh all noadmin` или `./restart.sh all onlyadmin`; актуальная версия прогоняет конфиг через `wg-quick strip` перед `wg setconf` |
 | `modelline-vpn-server` / `modelline-vpn-client` уходит в restart-loop | `docker logs modelline-vpn-server --tail 50` или `docker logs modelline-vpn-client --tail 50`; после фикса bootstrap-пакетов типовые оставшиеся причины уже host-level: нет `/dev/net/tun`, нет модуля `wireguard`, нет прав `NET_ADMIN` / `SYS_MODULE` |
 | Join token не появляется | `docker logs modelline-vpn-server` |
 | `wg0` не появился на хосте | `modinfo wireguard`; убедись что `/dev/net/tun` есть |
-| Ping 10.44.0.1 не проходит | TCP 443 открыт на backend? `docker logs modelline-wstunnel-client`, `docker exec modelline-vpn-client wg show` на admin-host и `docker exec modelline-vpn-server wg show` на backend-host |
+| Ping 10.44.0.1 не проходит | TCP `VPN_WS_PORT` открыт на backend? `docker logs modelline-wstunnel-client`, `docker exec modelline-vpn-client wg show` на admin-host и `docker exec modelline-vpn-server wg show` на backend-host |
 | `base64 -w 0` ошибка | На macOS используй `base64` без флага (скрипт обрабатывает оба варианта) |
 | `.ready` не создаётся | `docker logs modelline-vpn-server` или `modelline-vpn-client` |
 
