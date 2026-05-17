@@ -21,6 +21,10 @@ VPN_CLIENT_IP="${VPN_CLIENT_IP:-10.44.0.2}"
 VPN_SUBNET="${VPN_SUBNET:-10.44.0.0/24}"
 VPN_SERVER_PORT="${VPN_SERVER_PORT:-51820}"
 VPN_ALLOWED_TCP_PORTS="${VPN_ALLOWED_TCP_PORTS:-9092,9644,7510,7520,9000}"
+VPN_TRANSPORT="${VPN_TRANSPORT:-ws}"
+VPN_WS_PORT="${VPN_WS_PORT:-443}"
+VPN_WS_PATH="${VPN_WS_PATH:-modelline-wg}"
+VPN_CLIENT_LOCAL_PORT="${VPN_CLIENT_LOCAL_PORT:-51820}"
 
 ensure_iptables_rule() {
     local chain="$1"
@@ -67,14 +71,22 @@ CLIENT_PRIVKEY=$(cat "$STATE/client.key")
 CLIENT_PUBKEY=$(cat "$STATE/client.pub")
 
 # Build the Endpoint value for the client config.
-# VPN_SERVER_URL must be the backend host's PUBLIC IP or hostname reachable by the admin host.
-if [ -n "${VPN_SERVER_URL:-}" ]; then
+# In WebSocket mode WireGuard sends UDP to a local wstunnel-client listener;
+# wstunnel carries that UDP over TCP/443 to the backend host.
+if [ "$VPN_TRANSPORT" = "ws" ]; then
+    ENDPOINT="127.0.0.1:${VPN_CLIENT_LOCAL_PORT}"
+elif [ -n "${VPN_SERVER_URL:-}" ]; then
     ENDPOINT="${VPN_SERVER_URL}:${VPN_SERVER_PORT}"
 else
     # Placeholder — operator must patch client.conf manually when VPN_SERVER_URL is not set.
     ENDPOINT="<BACKEND_PUBLIC_IP>:${VPN_SERVER_PORT}"
     echo "[vpn-server] WARNING: VPN_SERVER_URL is not set. Client Endpoint will be a placeholder."
     echo "[vpn-server] Set VPN_SERVER_URL in microservice_infra/.env and restart to fix."
+fi
+
+if [ "$VPN_TRANSPORT" = "ws" ] && [ -z "${VPN_SERVER_URL:-}" ]; then
+    echo "[vpn-server] WARNING: VPN_TRANSPORT=ws, but VPN_SERVER_URL is not set."
+    echo "[vpn-server] Admin host will not know which backend public host to dial over WebSocket."
 fi
 
 # ── Write server config ──────────────────────────────────────────────────────
@@ -92,6 +104,14 @@ WGEOF
 
 # ── Write client config (becomes the join token) ─────────────────────────────
 cat > "$STATE/client.conf" <<WGEOF
+# ModelLine VPN metadata. Launcher reads these comments on the admin host.
+# VPN_TRANSPORT=${VPN_TRANSPORT}
+# VPN_SERVER_URL=${VPN_SERVER_URL:-}
+# VPN_SERVER_PORT=${VPN_SERVER_PORT}
+# VPN_WS_PORT=${VPN_WS_PORT}
+# VPN_WS_PATH=${VPN_WS_PATH}
+# VPN_CLIENT_LOCAL_PORT=${VPN_CLIENT_LOCAL_PORT}
+
 [Interface]
 Address = ${VPN_CLIENT_IP}/32
 PrivateKey = ${CLIENT_PRIVKEY}
@@ -128,6 +148,8 @@ echo "[vpn-server] WireGuard interface wg0 is UP."
 echo "[vpn-server]   Server IP : ${VPN_SERVER_IP}/24"
 echo "[vpn-server]   Client IP : ${VPN_CLIENT_IP}/32"
 echo "[vpn-server]   UDP port  : ${VPN_SERVER_PORT}"
+echo "[vpn-server]   Transport : ${VPN_TRANSPORT}"
+echo "[vpn-server]   WebSocket : ${VPN_SERVER_URL:-<unset>}:${VPN_WS_PORT}/${VPN_WS_PATH}"
 echo "[vpn-server]   Allowed TCP via wg0 : ${VPN_ALLOWED_TCP_PORTS}"
 
 # Keep the container running; sleep loop avoids zombie restart loops.

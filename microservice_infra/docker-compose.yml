@@ -255,10 +255,30 @@ services:
       VPN_SERVER_IP: ${VPN_SERVER_IP:-10.44.0.1}
       VPN_CLIENT_IP: ${VPN_CLIENT_IP:-10.44.0.2}
       VPN_SUBNET: ${VPN_SUBNET:-10.44.0.0/24}
+      VPN_TRANSPORT: ${VPN_TRANSPORT:-ws}
+      VPN_WS_PORT: ${VPN_WS_PORT:-443}
+      VPN_WS_PATH: ${VPN_WS_PATH:-modelline-wg}
+      VPN_CLIENT_LOCAL_PORT: ${VPN_CLIENT_LOCAL_PORT:-51820}
     entrypoint: ["sh", "-c"]
     command:
       - "apk add --no-cache wireguard-tools iproute2-minimal kmod iptables && exec sh /entrypoint.sh"
     restart: unless-stopped
+
+  wstunnel-server:
+    profiles: ["vpn"]
+    image: ghcr.io/erebe/wstunnel:latest
+    container_name: modelline-wstunnel-server
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - vpn
+    command:
+      - server
+      - --restrict-to
+      - "127.0.0.1:${VPN_SERVER_PORT:-51820}"
+      - --restrict-http-upgrade-path-prefix
+      - "${VPN_WS_PATH:-modelline-wg}"
+      - "ws://0.0.0.0:${VPN_WS_PORT:-443}"
 
 networks:
   modelline_net:

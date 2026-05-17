@@ -55,7 +55,7 @@ docker-compose публикуется как host-порт **`8501`** (override 
 
 ## Split deployment через containerized VPN
 
-Для сценария `backend-host` + `remote admin-host` **рекомендуемый** способ — containerized WireGuard. Подробная инструкция: [VPN_CONTAINERIZED.md](VPN_CONTAINERIZED.md).  
+Для сценария `backend-host` + `remote admin-host` **рекомендуемый** способ — containerized WireGuard over WebSocket/TCP 443. Подробная инструкция: [VPN_CONTAINERIZED.md](VPN_CONTAINERIZED.md).  
 Manual fallback через wg-quick + WStunnel описан в [WG_WSTUNNEL.md](WG_WSTUNNEL.md).
 
 Compose-сервис `vpn` перед запуском entrypoint теперь доустанавливает
@@ -66,6 +66,10 @@ crash-loop на clean Linux-host, где в контейнере был `wg`, н
 Сам entrypoint применяет WireGuard-конфиг через `wg-quick strip`, чтобы
 wg-quick-поля вроде `Address` не ломали `wg setconf`, и дополнительно
 добавляет idempotent `iptables` accept для private backend-портов по `wg0`.
+Внешний transport для split deployment теперь обслуживает отдельный compose-
+сервис `wstunnel-server`: он слушает TCP `443` и прокидывает WebSocket-поток
+в локальный WireGuard UDP `127.0.0.1:51820`. Поэтому на backend-хосте для VPN
+нужно открыть `443/tcp`, а публичный UDP `51820` больше не нужен.
 Если `modelline-vpn-server` после этого всё ещё рестартует, следующая
 проверка уже host-level: `docker logs modelline-vpn-server --tail 50`,
 наличие `/dev/net/tun` и `modinfo wireguard`.

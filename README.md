@@ -90,14 +90,15 @@ data, analitic, account и gateway, но без `microservice_admin`. Отдел
 - bare URL `http://<admin-host>:443/` не является канонической точкой входа, потому что `admin-online` работает с `basePath=/admin`
 - на **backend-host** в режиме `noadmin` порт `8501` не должен считаться адресом admin-панели; там остаётся только infra-nginx/download ingress, а локальный `/admin/*` без поднятого `microservice_admin` не является рабочей UI-точкой
 
-Рекомендуемый transport для общей приватной сети между этими двумя машинами — **WireGuard over WStunnel (WSS/443)**. Подробная схема есть в [microservice_infra/WG_WSTUNNEL.md](microservice_infra/WG_WSTUNNEL.md).
+Рекомендуемый transport для общей приватной сети между этими двумя машинами — **containerized WireGuard over WebSocket/TCP 443**. Подробная схема есть в [microservice_infra/VPN_CONTAINERIZED.md](microservice_infra/VPN_CONTAINERIZED.md).
 
 Критичный technical detail для split deployment: backend Kafka broker не должен advertise'ить `localhost:9092`. В `microservice_infra/docker-compose.yml` внешний advertise address теперь configurable через `REDPANDA_EXTERNAL_HOST` и `REDPANDA_EXTERNAL_PORT`; для remote admin-head туда нужно подставлять WG IP или private DNS backend-хоста.
 
 В containerized VPN backend-side `modelline-vpn-server` теперь сам добавляет
-host `iptables` allow для `wg0` на private backend-порты. Это закрывает
-типовой случай, когда WireGuard handshake уже успешен, bind-адреса верны,
-но host firewall всё ещё режет доступ к `10.44.0.1:9092/9644/7510/7520/9000`.
+host `iptables` allow для `wg0` на private backend-порты, а внешний transport
+идёт через `modelline-wstunnel-server` на TCP `443`. Публичный UDP `51820`
+для этого сценария больше не нужен: WireGuard UDP остаётся локальным за
+WebSocket-туннелем.
 
 В split deployment download path остаётся прямым и zero-byte для admin:
 remote admin-head получает `presigned_url` от data-сервиса и браузер

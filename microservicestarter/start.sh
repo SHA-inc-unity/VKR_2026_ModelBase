@@ -268,95 +268,59 @@ print_vpn_join_token() {
     echo ""
 }
 
-# Decodes a join token into wg0.conf and creates the VPN state directory.
-setup_vpn_client() {
+get_wg_conf_meta() {
+    local conf_file="$1"
+    local key="$2"
+    grep -m1 -E "^# ${key}=" "$conf_file" 2>/dev/null \
+        | sed -E "s|^# ${key}=||" \
+        | tr -d '\r' \
+        | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+configure_vpn_transport_env_from_conf() {
     local admin_svc_dir="$1"
-    local join_token="$2"
     local state_dir="$REPO_ROOT/.runtime-data/microservice_admin/vpn"
-    mkdir -p "$state_dir"
+    local conf_file="$state_dir/wg0.conf"
+    [[ -f "$conf_file" ]] || return 0
 
-    printf '%s' "$join_token" | base64 -d > "$state_dir/wg0.conf" 2>/dev/null \
-        || fail "[vpn-client] Невозможно декодировать join token."
-    grep -q '^\[Interface\]' "$state_dir/wg0.conf" \
-        || fail "[vpn-client] Декодированный join token — не валидный WireGuard config."
-
-    success "[vpn-client] wg0.conf записан в $state_dir"
-}
-
-# Waits for vpn-client to write .ready marker (wg0 is up on the host).
-wait_vpn_client() {
-    local state_dir="$REPO_ROOT/.runtime-data/microservice_admin/vpn"
-    info "[vpn-client] Ожидаем подъёма WireGuard интерфейса wg0..."
-    local attempts=0
-    while [[ ! -f "$state_dir/.ready" ]]; do
-        [[ $attempts -lt 60 ]] || fail "[vpn-client] Таймаут: wg0 не поднялся за 120 с."
-        sleep 2
-        attempts=$((attempts + 1))
-    done
-    success "[vpn-client] WireGuard tunnel активен."
-}
-
-# ── Containerized VPN helpers ─────────────────────────────────────────────────
-# Returns 0 (true) if VPN_SERVER_URL is set in microservice_infra/.env (or .env.example).
-# Used to activate the "vpn" compose profile in noadmin mode.
-is_vpn_enabled() {
-    local svc_dir="$1"
-    local env_file="$svc_dir/.env"
-    local env_example="$svc_dir/.env.example"
-    # Ensure .env exists so get_env_value works on first run.
-    if [[ ! -f "$env_file" ]]; then
-        [[ -f "$env_example" ]] || return 1
+    local env_file="$admin_svc_dir/.env"
+    local env_example="$admin_svc_dir/.env.example"
+    if [[ ! -f "$env_file" && -f "$env_example" ]]; then
         cp "$env_example" "$env_file"
     fi
-    local server_url
-    server_url="$(get_env_value "$env_file" "VPN_SERVER_URL")"
-    [[ -n "$server_url" ]]
-}
 
-# Returns 0 (true) if the argument looks like a base64-encoded WireGuard config
-# (i.e. it decodes to text that starts with "[Interface]").
-# Used to distinguish a VPN join token from a plain backend host/IP.
-is_vpn_join_token() {
-    local arg="$1"
-    [[ -n "$arg" ]] || return 1
-    printf '%s' "$arg" | base64 -d 2>/dev/null | grep -q '^\[Interface\]'
-}
+    local server_url server_port ws_port ws_path client_local_port endpoint endpoint_host endpoint_port
+    server_url="$(get_wg_conf_meta "$conf_file" "VPN_SERVER_URL")"
+    server_port="$(get_wg_conf_meta "$conf_file" "VPN_SERVER_PORT")"
+    ws_port="$(get_wg_conf_meta "$conf_file" "VPN_WS_PORT")"
+    ws_path="$(get_wg_conf_meta "$conf_file" "VPN_WS_PATH")"
+    client_local_port="$(get_wg_conf_meta "$conf_file" "VPN_CLIENT_LOCAL_PORT")"
 
-# Waits for the VPN server to generate the join token, then prints it.
-# Called after microservice_infra starts in noadmin+vpn mode.
-print_vpn_join_token() {
-    local state_dir="$REPO_ROOT/.runtime-data/microservice_infra/vpn"
-    info "[vpn-server] Ожидаем генерации ключей WireGuard..."
-    local attempts=0
-    while [[ ! -f "$state_dir/.ready" ]]; do
-        [[ $attempts -lt 60 ]] || fail "[vpn-server] Таймаут: join token не сгенерирован за 120 с."
-        sleep 2
-        attempts=$((attempts + 1))
-    done
+    server_port="${server_port:-51820}"
+    ws_port="${ws_port:-443}"
+    ws_path="${ws_path:-modelline-wg}"
+    client_local_port="${client_local_port:-51820}"
 
-    local client_conf="$state_dir/client.conf"
-    [[ -f "$client_conf" ]] || fail "[vpn-server] client.conf не найден — что-то пошло не так."
+    endpoint="$(awk '/^\[Peer\]/{p=1} p && /^Endpoint[[:space:]]*=/{gsub(/.*=[[:space:]]*/,""); print; exit}' "$conf_file" | tr -d '\r')"
+    if [[ -z "$server_url" && -n "$endpoint" && "$endpoint" != 127.0.0.1:* && "$endpoint" != localhost:* && "$endpoint" != \<* ]]; then
+        endpoint_host="${endpoint%:*}"
+        endpoint_port="${endpoint##*:}"
+        server_url="$endpoint_host"
+        [[ -n "$endpoint_port" && "$endpoint_port" != "$endpoint_host" ]] && server_port="$endpoint_port"
+    fi
 
-    local join_token
-    # base64 -w 0 (GNU) or base64 (macOS/BSD, outputs without newlines on single pass)
-    join_token="$(base64 -w 0 "$client_conf" 2>/dev/null || base64 "$client_conf")"
+    [[ -n "$server_url" ]] && set_env_value "$env_file" "VPN_SERVER_URL" "$server_url"
+    set_env_value "$env_file" "VPN_SERVER_PORT" "$server_port"
+    set_env_value "$env_file" "VPN_WS_PORT" "$ws_port"
+    set_env_value "$env_file" "VPN_WS_PATH" "$ws_path"
+    set_env_value "$env_file" "VPN_CLIENT_LOCAL_PORT" "$client_local_port"
 
-    local server_ip
-    server_ip="$(grep -m1 'Address' "$state_dir/wg0-server.conf" 2>/dev/null \
-                 | sed -E 's|.*=[[:space:]]*||; s|/.*||' || true)"
+    if [[ -n "$server_url" && "$endpoint" != "127.0.0.1:$client_local_port" ]]; then
+        sed -i.bak -E "s|^Endpoint[[:space:]]*=.*$|Endpoint = 127.0.0.1:${client_local_port}|" "$conf_file"
+        rm -f "$conf_file.bak"
+    fi
 
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║         VPN JOIN TOKEN — скопируй на admin-хост                 ║"
-    echo "╠══════════════════════════════════════════════════════════════════╣"
-    echo "║  Backend WG IP : ${server_ip:-10.44.0.1}                                  ║"
-    echo "║                                                                  ║"
-    echo "║  На admin-хосте запусти:                                         ║"
-    echo "║  ./start.sh all onlyadmin <JOIN_TOKEN>                           ║"
-    echo "╚══════════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "$join_token"
-    echo ""
+    success "[vpn-client] WebSocket transport настроен: ${server_url:-<unset>}:${ws_port}/${ws_path} -> 127.0.0.1:${client_local_port}."
 }
 
 # Decodes a join token into wg0.conf and creates the VPN state directory.
@@ -370,6 +334,8 @@ setup_vpn_client() {
         || fail "[vpn-client] Невозможно декодировать join token."
     grep -q '^\[Interface\]' "$state_dir/wg0.conf" \
         || fail "[vpn-client] Декодированный join token — не валидный WireGuard config."
+
+    configure_vpn_transport_env_from_conf "$admin_svc_dir"
 
     success "[vpn-client] wg0.conf записан в $state_dir"
 }
@@ -534,7 +500,7 @@ if [[ "$MODE" == "onlyadmin" ]]; then
         rm -f "$REPO_ROOT/.runtime-data/microservice_admin/vpn/.ready"
         pushd "$admin_svc_dir" > /dev/null
         initialize_env "microservice_admin" "$admin_svc_dir"
-        docker compose --profile vpn up -d --force-recreate vpn-client
+        docker compose --profile vpn up -d --force-recreate wstunnel-client vpn-client
         popd > /dev/null
         wait_vpn_client
     elif [[ -f "$REPO_ROOT/.runtime-data/microservice_admin/vpn/wg0.conf" ]]; then
@@ -544,7 +510,8 @@ if [[ "$MODE" == "onlyadmin" ]]; then
         rm -f "$REPO_ROOT/.runtime-data/microservice_admin/vpn/.ready"
         pushd "$admin_svc_dir" > /dev/null
         initialize_env "microservice_admin" "$admin_svc_dir"
-        docker compose --profile vpn up -d --force-recreate vpn-client
+        configure_vpn_transport_env_from_conf "$admin_svc_dir"
+        docker compose --profile vpn up -d --force-recreate wstunnel-client vpn-client
         popd > /dev/null
         wait_vpn_client
     else
