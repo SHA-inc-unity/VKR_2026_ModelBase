@@ -87,9 +87,15 @@ touch "$STATE/.ready"
 # Remove stale interface if present (e.g. after container restart).
 ip link del wg0 2>/dev/null || true
 
+# `wg setconf` accepts the wireguard-native format, while our on-disk config
+# intentionally keeps wg-quick fields like Address for operator readability.
+RUNTIME_CONF="$(mktemp)"
+trap 'rm -f "$RUNTIME_CONF"' EXIT
+wg-quick strip "$STATE/wg0-server.conf" > "$RUNTIME_CONF"
+
 ip link add dev wg0 type wireguard
 ip address add "${VPN_SERVER_IP}/24" dev wg0
-wg setconf wg0 "$STATE/wg0-server.conf"
+wg setconf wg0 "$RUNTIME_CONF"
 ip link set wg0 up
 
 echo "[vpn-server] WireGuard interface wg0 is UP."

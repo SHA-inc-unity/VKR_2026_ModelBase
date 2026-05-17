@@ -29,6 +29,9 @@ modelline-minio      :9000        admin-online → 10.44.0.1:9000 ✓
 - Перед запуском entrypoint compose доустанавливает `wireguard-tools`,
   `iproute2-minimal` и `kmod`, чтобы внутри контейнера были доступны `wg`,
   `ip` и `modprobe`.
+- Entry-point применяет live-конфиг через `wg-quick strip`, поэтому join token
+  и `wg0-server.conf` могут оставаться в полном wg-quick формате с `Address`
+  и `MTU`, не ломая `wg setconf`.
 - Ключи генерируются один раз при первом запуске и сохраняются в  
   `.runtime-data/microservice_infra/vpn/` (на backend-хосте) и  
   `.runtime-data/microservice_admin/vpn/` (на admin-хосте).
@@ -179,6 +182,7 @@ MINIO_BIND_ADDR=10.44.0.1
 
 | Проблема | Что проверить |
 | --- | --- |
+| В логах `Line unrecognized: \`Address=...\`` | На хосте ещё старая версия entrypoint/compose. Обнови код и заново выполни `./restart.sh all noadmin` или `./restart.sh all onlyadmin`; актуальная версия прогоняет конфиг через `wg-quick strip` перед `wg setconf` |
 | `modelline-vpn-server` / `modelline-vpn-client` уходит в restart-loop | `docker logs modelline-vpn-server --tail 50` или `docker logs modelline-vpn-client --tail 50`; после фикса bootstrap-пакетов типовые оставшиеся причины уже host-level: нет `/dev/net/tun`, нет модуля `wireguard`, нет прав `NET_ADMIN` / `SYS_MODULE` |
 | Join token не появляется | `docker logs modelline-vpn-server` |
 | `wg0` не появился на хосте | `modinfo wireguard`; убедись что `/dev/net/tun` есть |

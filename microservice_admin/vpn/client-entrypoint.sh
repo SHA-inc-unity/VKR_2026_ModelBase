@@ -31,9 +31,15 @@ CLIENT_IP=$(awk '/^\[Interface\]/{p=1} p && /^Address[[:space:]]*=/{gsub(/.*=[[:
 # Remove stale interface if present.
 ip link del wg0 2>/dev/null || true
 
+# The join token stores a full wg-quick style config. Strip wg-quick-only keys
+# before passing it to `wg setconf`.
+RUNTIME_CONF="$(mktemp)"
+trap 'rm -f "$RUNTIME_CONF"' EXIT
+wg-quick strip "$CONF" > "$RUNTIME_CONF"
+
 ip link add dev wg0 type wireguard
 ip address add "$CLIENT_IP" dev wg0
-wg setconf wg0 "$CONF"
+wg setconf wg0 "$RUNTIME_CONF"
 ip link set wg0 up
 
 echo "[vpn-client] WireGuard interface wg0 is UP."

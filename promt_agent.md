@@ -14,6 +14,7 @@
 
 - На реальном backend-хосте подтверждён следующий этап после включения `VPN_SERVER_URL`: `modelline-vpn-server` действительно создавался, но уходил в restart-loop ещё до `wg show`.
 - Root cause закрыт в compose: оба VPN-сервиса (`microservice_infra` server и `microservice_admin` client) раньше ставили только `wireguard-tools`, хотя entrypoint'ы реально используют ещё и `ip`/`modprobe`. Теперь перед entrypoint bootstrap-ятся `wireguard-tools`, `iproute2-minimal`, `kmod`, а запуск идёт через `exec sh /entrypoint.sh`.
+- На живом логе найден и второй runtime-дефект: `wg setconf` получал полный wg-quick-конфиг и падал на `Line unrecognized: 'Address=10.44.0.1/24'`. Оба entrypoint'а переведены на `wg-quick strip` перед `wg setconf`, сохраняя при этом join token в прежнем полном формате.
 - `microservice_infra/VPN_CONTAINERIZED.md`, infra/admin README и STRUCTURE дополнены коротким troubleshooting: если restart-loop останется после этой правки, следующая проверка уже host-level (`docker logs`, `/dev/net/tun`, `modinfo wireguard`, capabilities/UDP 51820`).
 
 ### 2026-05-18 — Containerized VPN Transport
