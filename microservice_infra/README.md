@@ -59,10 +59,13 @@ docker-compose публикуется как host-порт **`8501`** (override 
 Manual fallback через wg-quick + WStunnel описан в [WG_WSTUNNEL.md](WG_WSTUNNEL.md).
 
 Compose-сервис `vpn` перед запуском entrypoint теперь доустанавливает
-`wireguard-tools`, `iproute2-minimal` и `kmod`. Это закрывает crash-loop на
-clean Linux-host, где в контейнере был `wg`, но не было `ip` или `modprobe`.
+`wireguard-tools`, `iproute2-minimal`, `kmod` и `iptables`. Это закрывает
+crash-loop на clean Linux-host, где в контейнере был `wg`, но не было `ip`
+или `modprobe`, и позволяет самому VPN-контейнеру выставлять host-side allow
+правила для `wg0`.
 Сам entrypoint применяет WireGuard-конфиг через `wg-quick strip`, чтобы
-wg-quick-поля вроде `Address` не ломали `wg setconf`.
+wg-quick-поля вроде `Address` не ломали `wg setconf`, и дополнительно
+добавляет idempotent `iptables` accept для private backend-портов по `wg0`.
 Если `modelline-vpn-server` после этого всё ещё рестартует, следующая
 проверка уже host-level: `docker logs modelline-vpn-server --tail 50`,
 наличие `/dev/net/tun` и `modinfo wireguard`.

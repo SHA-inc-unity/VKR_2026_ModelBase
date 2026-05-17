@@ -20,6 +20,31 @@ VPN_SERVER_IP="${VPN_SERVER_IP:-10.44.0.1}"
 VPN_CLIENT_IP="${VPN_CLIENT_IP:-10.44.0.2}"
 VPN_SUBNET="${VPN_SUBNET:-10.44.0.0/24}"
 VPN_SERVER_PORT="${VPN_SERVER_PORT:-51820}"
+VPN_ALLOWED_TCP_PORTS="${VPN_ALLOWED_TCP_PORTS:-9092,9644,7510,7520,9000}"
+
+ensure_iptables_rule() {
+    local chain="$1"
+    shift
+    if ! command -v iptables >/dev/null 2>&1; then
+        echo "[vpn-server] WARNING: iptables не найден — пропускаем firewall bootstrap."
+        return 0
+    fi
+
+    if iptables -C "$chain" "$@" 2>/dev/null; then
+        return 0
+    fi
+
+    iptables -I "$chain" 1 "$@"
+}
+
+allow_wg_firewall_input() {
+    ensure_iptables_rule INPUT -i wg0 -p tcp -m multiport --dports "$VPN_ALLOWED_TCP_PORTS" -j ACCEPT
+    ensure_iptables_rule INPUT -i wg0 -p icmp -j ACCEPT
+
+    if iptables -S DOCKER-USER >/dev/null 2>&1; then
+        ensure_iptables_rule DOCKER-USER -i wg0 -p tcp -m multiport --dports "$VPN_ALLOWED_TCP_PORTS" -j ACCEPT
+    fi
+}
 
 # Try to load the WireGuard kernel module; fall back to wireguard-go if needed.
 modprobe wireguard 2>/dev/null || true
@@ -97,11 +122,13 @@ ip link add dev wg0 type wireguard
 ip address add "${VPN_SERVER_IP}/24" dev wg0
 wg setconf wg0 "$RUNTIME_CONF"
 ip link set wg0 up
+allow_wg_firewall_input
 
 echo "[vpn-server] WireGuard interface wg0 is UP."
 echo "[vpn-server]   Server IP : ${VPN_SERVER_IP}/24"
 echo "[vpn-server]   Client IP : ${VPN_CLIENT_IP}/32"
 echo "[vpn-server]   UDP port  : ${VPN_SERVER_PORT}"
+echo "[vpn-server]   Allowed TCP via wg0 : ${VPN_ALLOWED_TCP_PORTS}"
 
 # Keep the container running; sleep loop avoids zombie restart loops.
 while true; do sleep 30; done
