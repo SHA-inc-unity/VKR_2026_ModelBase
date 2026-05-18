@@ -377,9 +377,18 @@ remove_dangling_images() {
     if docker images -f "dangling=true" -q | grep -q .; then
         local prune_output=""
         local prune_status=0
+        local prune_lock_dir="$REPO_ROOT/.runtime-data/.docker-image-prune.lock"
+
+        mkdir -p "$REPO_ROOT/.runtime-data"
+        if ! mkdir "$prune_lock_dir" 2>/dev/null; then
+            warn "Пропускаем docker image prune: cleanup уже выполняется другим launcher-процессом."
+            return 0
+        fi
 
         info "Удаляем dangling-образы Docker..."
         prune_output="$(docker image prune -f 2>&1)" || prune_status=$?
+        rmdir "$prune_lock_dir" 2>/dev/null || true
+
         if [[ $prune_status -ne 0 ]]; then
             if grep -qi "prune operation is already running" <<< "$prune_output"; then
                 warn "Пропускаем docker image prune: уже выполняется другая операция prune."

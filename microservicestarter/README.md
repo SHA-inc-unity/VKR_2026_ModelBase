@@ -64,7 +64,7 @@
 Операционное поведение launcher-а:
 
 - `start` и `restart` теперь автоматически восстанавливают отсутствующий `.env` из `.env.example`, если шаблон существует у сервиса
-- в multi-service fan-out dangling Docker image cleanup больше не запускается параллельно в каждом child-процессе: launcher откладывает `docker image prune` до одного общего прохода, чтобы не падать на `a prune operation is already running`
+- в multi-service fan-out dangling Docker image cleanup больше не должен конфликтовать между child-процессами: launcher ставит межпроцессный lock и пропускает параллельный `docker image prune`, если cleanup уже выполняется другим launcher-процессом
 
 ## Repo-local runtime data
 

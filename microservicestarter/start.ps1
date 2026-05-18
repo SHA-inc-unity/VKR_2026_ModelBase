@@ -374,16 +374,36 @@ function Remove-DanglingImages {
 
     $dangling = docker images -f "dangling=true" -q 2>$null
     if ($dangling) {
-        Write-Info "Удаляем dangling-образы Docker..."
-        $pruneOutput = (& docker image prune -f 2>&1 | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0) {
-            if ($pruneOutput -match 'prune operation is already running') {
-                Write-Warn "Пропускаем docker image prune: уже выполняется другая операция prune."
-            } elseif (-not [string]::IsNullOrWhiteSpace($pruneOutput)) {
-                Write-Warn "Не удалось выполнить docker image prune: $pruneOutput"
-            } else {
-                Write-Warn "Не удалось выполнить docker image prune."
+        $mutex = New-Object System.Threading.Mutex($false, "Global\ModelLineDockerImagePrune")
+        $hasLock = $false
+        try {
+            try {
+                $hasLock = $mutex.WaitOne(0)
+            } catch [System.Threading.AbandonedMutexException] {
+                $hasLock = $true
             }
+
+            if (-not $hasLock) {
+                Write-Warn "Пропускаем docker image prune: cleanup уже выполняется другим launcher-процессом."
+                return
+            }
+
+            Write-Info "Удаляем dangling-образы Docker..."
+            $pruneOutput = (& docker image prune -f 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) {
+                if ($pruneOutput -match 'prune operation is already running') {
+                    Write-Warn "Пропускаем docker image prune: уже выполняется другая операция prune."
+                } elseif (-not [string]::IsNullOrWhiteSpace($pruneOutput)) {
+                    Write-Warn "Не удалось выполнить docker image prune: $pruneOutput"
+                } else {
+                    Write-Warn "Не удалось выполнить docker image prune."
+                }
+            }
+        } finally {
+            if ($hasLock) {
+                $mutex.ReleaseMutex() | Out-Null
+            }
+            $mutex.Dispose()
         }
     }
 }

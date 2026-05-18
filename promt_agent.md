@@ -17,6 +17,8 @@
 - `microservicestarter` теперь в `noadmin` автоматически генерирует отсутствующий `ADMIN_SHARED_TOKEN` на backend-host, а в `onlyadmin` больше не предлагает автогенерацию: admin-host должен получить этот токен с backend-host и записать его как `ADMIN_BACKEND_SHARED_TOKEN`.
 - Bash launcher (`microservicestarter/start.sh`, `restart.sh`) теперь в финальном parallel summary перечисляет имена реально упавших сервисов, чтобы на Linux backend-host было проще отличать общий fail от конкретного виновника.
 - Launcher теперь в `restart` автоматически восстанавливает отсутствующий `.env` из `.env.example`, а dangling image prune вынесен из child fan-out в один parent cleanup-pass, чтобы parallel deploy не падал на `a prune operation is already running`.
+- `microservice_analitic/docker-compose.yml`: встроенный Redis больше не публикуется на host `6379`; он остаётся только внутренней зависимостью `api`/`scheduler`, чтобы backend-host не ловил port conflict при auto-deploy.
+- Launcher cleanup усилен межпроцессным lock-ом вокруг `docker image prune`, чтобы даже при нескольких параллельных child-процессах cleanup не конфликтовал между собой.
 - Старый split-transport код, compose-сервисы и отдельные markdown-гайды удалены из активной схемы.
 - Актуальные операционные документы: root `README.md`, `STRUCTURE.md`, `microservicestarter/README.md`, `microservice_admin/README.md`, `microservice_infra/README.md`.
 - `microservice_admin/src/app/api/health/route.ts`: split-mode health response снова совпадает с `InfraHealthResponse`; `npm run build` для admin проходит.

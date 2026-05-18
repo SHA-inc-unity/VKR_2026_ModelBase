@@ -128,11 +128,11 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
-| Сервис             | Адрес            | Описание                            |
-|--------------------|------------------|-------------------------------------|
-| REST API           | `localhost:8000` | FastAPI + Swagger `/docs`           |
-| Redis              | `localhost:6379` | KV-store настроек (fallback SQLite) |
-| microservice_data  | Kafka (внутри)   | Источник данных (PostgreSQL, Bybit) |
+| Сервис            | Адрес                  | Описание                                          |
+| ----------------- | ---------------------- | ------------------------------------------------- |
+| REST API          | `localhost:8000`       | FastAPI + Swagger `/docs`                         |
+| Redis             | `redis:6379` (compose) | KV-store настроек, не публикуется в host          |
+| microservice_data | Kafka (внутри)         | Источник данных (PostgreSQL, Bybit)               |
 
 ---
 
@@ -305,13 +305,15 @@ curl -X POST http://localhost:8000/retrain \
 
 Все параметры задаются в `.env` (скопируйте из `.env.example`):
 
-| Переменная                | По умолчанию               | Описание                                        |
-|---------------------------|----------------------------|-------------------------------------------------|
-| `KAFKA_BOOTSTRAP_SERVERS` | `redpanda:29092`           | Kafka (Redpanda) — источник данных              |
-| `REDIS_URL`               | `redis://localhost:6379/0` | URL Redis                                       |
-| `API_PORT`                | `8000`                     | Порт FastAPI                                    |
-| `SCHEDULER_JOBS`          | `[]`                       | JSON-список заданий scheduler                   |
-| `SCHEDULER_TIMEZONE`      | `UTC`                      | Временная зона для cron                         |
+| Переменная                | По умолчанию               | Описание                                                              |
+| ------------------------- | -------------------------- | --------------------------------------------------------------------- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `redpanda:29092`           | Kafka (Redpanda) — источник данных                                    |
+| `REDIS_URL`               | `redis://localhost:6379/0` | URL Redis                                                             |
+| `API_PORT`                | `8000`                     | Порт FastAPI                                                          |
+| `SCHEDULER_JOBS`          | `[]`                       | JSON-список заданий scheduler                                         |
+| `SCHEDULER_TIMEZONE`      | `UTC`                      | Временная зона для cron                                               |
+
+В Docker compose сервис использует внутренний Redis endpoint `redis://redis:6379/0`.
 
 ---
 

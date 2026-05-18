@@ -16,7 +16,7 @@
 | ---- | -------- |
 | `Dockerfile.base` | Базовый образ (Python + requirements). FROM python:3.12-slim |
 | `Dockerfile.api` | FastAPI-сервер; `FROM base` |
-| `docker-compose.yml` | Сервисы: `base` (profile `build-base`), `api`, `scheduler` (profile `scheduler`), `redis`. Сеть: `modelline_net` (внешняя). Runtime-данные Redis и каталога моделей хранятся в repo-local bind mounts `../.runtime-data/microservice_analitic/{redis,models}` |
+| `docker-compose.yml` | Сервисы: `base` (profile `build-base`), `api`, `scheduler` (profile `scheduler`), `redis`. Сеть: `modelline_net` (внешняя). Runtime-данные Redis и каталога моделей хранятся в repo-local bind mounts `../.runtime-data/microservice_analitic/{redis,models}`. Redis остаётся internal-only dependency для `api`/`scheduler` и больше не публикуется в host, чтобы не конфликтовать с другими Redis-инстансами backend-хоста. |
 | `requirements.txt` | Python-зависимости (CatBoost, FastAPI, APScheduler, ReportLab, aiokafka…) |
 | `.env.example` | Шаблон: `KAFKA_BOOTSTRAP_SERVERS`, `API_HOST/PORT`, `SCHEDULER_*` |
 
