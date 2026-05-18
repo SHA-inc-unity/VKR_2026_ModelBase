@@ -175,7 +175,25 @@ PY
     od -An -N 32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
 }
 
-resolve_secret_env_value() {
+resolve_secret_env_value_or_generate() {
+    local env_file="$1"
+    local key="$2"
+    local owner_label="$3"
+    local current_value generated_value
+
+    current_value="$(get_env_value "$env_file" "$key")"
+    if [[ -n "$current_value" ]]; then
+        printf '%s' "$current_value"
+        return 0
+    fi
+
+    generated_value="$(generate_random_hex_token)"
+    [[ -n "$generated_value" ]] || fail "[$owner_label] Не удалось сгенерировать $key автоматически."
+    success "[$owner_label] $key не был задан — сгенерировали новое значение и сохраним его в $(basename "$env_file"). Передай этот токен на admin-host как ADMIN_BACKEND_SHARED_TOKEN." >&2
+    printf '%s' "$generated_value"
+}
+
+resolve_required_secret_env_value() {
     local env_file="$1"
     local key="$2"
     local owner_label="$3"
@@ -187,18 +205,15 @@ resolve_secret_env_value() {
         return 0
     fi
 
-    [[ -t 0 ]] || fail "[$owner_label] $key не задан. Запусти интерактивно или заранее заполни $env_file"
+    [[ -t 0 ]] || fail "[$owner_label] $key не задан. Укажи токен, сгенерированный на backend-host, в $env_file"
 
-    info "[$owner_label] $key не задан — можно вставить своё значение или нажать Enter для автогенерации." >&2
-    read -rsp "[$owner_label] Введите $key (Enter = сгенерировать): " prompt_value
-    echo >&2
-    prompt_value="$(printf '%s' "$prompt_value" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-
-    if [[ -z "$prompt_value" ]]; then
-        prompt_value="$(generate_random_hex_token)"
-        [[ -n "$prompt_value" ]] || fail "[$owner_label] Не удалось сгенерировать $key автоматически."
-        success "[$owner_label] $key сгенерирован и сохранён в $(basename "$env_file"). То же значение нужно указать на второй стороне split deployment." >&2
-    fi
+    info "[$owner_label] $key не задан — укажи значение ADMIN_SHARED_TOKEN с backend-host." >&2
+    while [[ -z "$prompt_value" ]]; do
+        read -rsp "[$owner_label] Введите $key (значение с backend-host): " prompt_value
+        echo >&2
+        prompt_value="$(printf '%s' "$prompt_value" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+        [[ -z "$prompt_value" ]] && warn "[$owner_label] $key не может быть пустым." >&2
+    done
 
     printf '%s' "$prompt_value"
 }
@@ -286,7 +301,7 @@ configure_backend_http_facade_env() {
     data_env="$(ensure_env_file "$data_svc_dir")"
 
     public_base_url="$(resolve_backend_public_base_url "$data_env")"
-    shared_token="$(resolve_secret_env_value "$gateway_env" "ADMIN_SHARED_TOKEN" "microservice_gateway")"
+    shared_token="$(resolve_secret_env_value_or_generate "$gateway_env" "ADMIN_SHARED_TOKEN" "microservice_gateway")"
     backend_port="$(infer_http_url_port "$public_base_url")"
 
     set_env_value "$data_env" "PUBLIC_DOWNLOAD_BASE_URL" "$public_base_url"
@@ -350,7 +365,7 @@ configure_admin_online_env() {
     local backend_host admin_backend_base_url admin_backend_shared_token
     backend_host="$(resolve_admin_online_backend_host "$svc_dir" "$explicit_backend_host")"
     admin_backend_base_url="$(resolve_admin_backend_base_url "$svc_dir" "$backend_host")"
-    admin_backend_shared_token="$(resolve_secret_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "microservice_admin")"
+    admin_backend_shared_token="$(resolve_required_secret_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "microservice_admin")"
 
     set_env_value "$env_file" "ONLINE_BACKEND_HOST" "$backend_host"
     set_env_value "$env_file" "ONLINE_KAFKA_BOOTSTRAP_SERVERS" "$backend_host:9092"

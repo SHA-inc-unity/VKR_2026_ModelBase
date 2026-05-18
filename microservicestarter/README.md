@@ -136,14 +136,14 @@ Launcher принимает backend host/IP аргументом:
 Для HTTP facade launcher также:
 
 - предлагает `ADMIN_BACKEND_BASE_URL` с default `https://<host>:8443`
-- спрашивает `ADMIN_BACKEND_SHARED_TOKEN`, только если он ещё не задан
+- спрашивает `ADMIN_BACKEND_SHARED_TOKEN`, только если он ещё не задан, и ожидает сюда токен, уже сгенерированный на backend-host
 - прокидывает оба ключа в `admin-online`, чтобы split mode действительно переключился с direct Kafka path на backend facade
 
 На backend-хосте режим `noadmin` теперь тоже может донастроить недостающий
 минимум для нового split-path ещё до старта compose:
 
 - спросить browser-facing base URL backend-хоста и записать его в `microservice_data/.env` как `PUBLIC_DOWNLOAD_BASE_URL`
-- спросить или сгенерировать `ADMIN_SHARED_TOKEN` и сохранить его в `microservice_gateway/.env`
+- автоматически сгенерировать отсутствующий `ADMIN_SHARED_TOKEN`, сохранить его в `microservice_gateway/.env` и вывести напоминание передать это же значение на admin-host как `ADMIN_BACKEND_SHARED_TOKEN`
 - вывести порт из этого URL и сохранить его в `microservice_infra/.env` как `ADMIN_BACKEND_PORT`
 
 Поведение split admin-head теперь различается между `start` и `restart`:

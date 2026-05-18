@@ -99,20 +99,38 @@ Get-Content $ConfFile | ForEach-Object {
         return [Convert]::ToHexString($bytes).ToLowerInvariant()
     }
 
-    function Resolve-SecretEnvValue {
+    function Resolve-SecretEnvValueOrGenerate {
         param([string]$EnvFile, [string]$Key, [string]$OwnerLabel)
         $currentValue = (Get-EnvValue -EnvFile $EnvFile -Key $Key).Trim()
         if (-not [string]::IsNullOrWhiteSpace($currentValue)) {
             return $currentValue
         }
 
-        Write-Info "[$OwnerLabel] $Key не задан — можно вставить своё значение или нажать Enter для автогенерации."
-        $secure = Read-Host "[$OwnerLabel] Введите $Key (Enter = сгенерировать)" -AsSecureString
-        $plain = (Convert-SecureStringToPlainText -Value $secure).Trim()
-        if ([string]::IsNullOrWhiteSpace($plain)) {
-            $plain = New-RandomHexToken
-            Write-Ok "[$OwnerLabel] $Key сгенерирован и сохранён в $(Split-Path $EnvFile -Leaf). То же значение нужно указать на второй стороне split deployment."
+        $generated = New-RandomHexToken
+        if ([string]::IsNullOrWhiteSpace($generated)) {
+            Write-Fail "[$OwnerLabel] Не удалось сгенерировать $Key автоматически."
         }
+
+        Write-Ok "[$OwnerLabel] $Key не был задан — сгенерировали новое значение и сохраним его в $(Split-Path $EnvFile -Leaf). Передай этот токен на admin-host как ADMIN_BACKEND_SHARED_TOKEN."
+        return $generated
+    }
+
+    function Resolve-RequiredSecretEnvValue {
+        param([string]$EnvFile, [string]$Key, [string]$OwnerLabel)
+        $currentValue = (Get-EnvValue -EnvFile $EnvFile -Key $Key).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($currentValue)) {
+            return $currentValue
+        }
+
+        Write-Info "[$OwnerLabel] $Key не задан — укажи значение ADMIN_SHARED_TOKEN с backend-host."
+        do {
+            $secure = Read-Host "[$OwnerLabel] Введите $Key (значение с backend-host)" -AsSecureString
+            $plain = (Convert-SecureStringToPlainText -Value $secure).Trim()
+            if ([string]::IsNullOrWhiteSpace($plain)) {
+                Write-Warn "[$OwnerLabel] $Key не может быть пустым."
+            }
+        } while ([string]::IsNullOrWhiteSpace($plain))
+
         return $plain
     }
 
@@ -185,7 +203,7 @@ Get-Content $ConfFile | ForEach-Object {
         $dataEnv = Ensure-EnvFile -SvcDir $dataSvcDir
 
         $publicBaseUrl = Resolve-BackendPublicBaseUrl -EnvFile $dataEnv
-        $sharedToken = Resolve-SecretEnvValue -EnvFile $gatewayEnv -Key "ADMIN_SHARED_TOKEN" -OwnerLabel "microservice_gateway"
+        $sharedToken = Resolve-SecretEnvValueOrGenerate -EnvFile $gatewayEnv -Key "ADMIN_SHARED_TOKEN" -OwnerLabel "microservice_gateway"
         $backendPort = Get-HttpUrlEffectivePort -Value $publicBaseUrl
 
         Set-EnvValue -EnvFile $dataEnv -Key "PUBLIC_DOWNLOAD_BASE_URL" -Value $publicBaseUrl
@@ -316,7 +334,7 @@ function Configure-AdminOnlineEnv {
 
     $resolvedBackendHost = Resolve-AdminOnlineBackendHost -SvcDir $SvcDir -ExplicitBackendHost $ExplicitBackendHost
     $resolvedBackendBaseUrl = Resolve-AdminBackendBaseUrl -SvcDir $SvcDir -BackendHost $resolvedBackendHost
-    $resolvedSharedToken = Resolve-SecretEnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_SHARED_TOKEN" -OwnerLabel "microservice_admin"
+    $resolvedSharedToken = Resolve-RequiredSecretEnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_SHARED_TOKEN" -OwnerLabel "microservice_admin"
 
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST" -Value $resolvedBackendHost
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_KAFKA_BOOTSTRAP_SERVERS" -Value "${resolvedBackendHost}:9092"

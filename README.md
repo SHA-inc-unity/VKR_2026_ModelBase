@@ -149,7 +149,7 @@ Host-specific настройки хранятся в `.env` конкретног
 - изменения `.env` не подхватываются на лету: после правки нужно заново выполнить `start` или `restart` для соответствующего сервиса/хоста
 - в split deployment browser-facing backend URL живёт в `PUBLIC_DOWNLOAD_BASE_URL` и `ADMIN_BACKEND_BASE_URL`
 - для ограничения publish-ed private ports на backend-host используй bind-address переменные `REDPANDA_BIND_ADDR`, `MINIO_BIND_ADDR`, `ACCOUNT_BIND_ADDR`, `GATEWAY_BIND_ADDR`
-- launcher для split deployment теперь сам спрашивает недостающие значения: на admin-host в `onlyadmin` — backend host, `ADMIN_BACKEND_BASE_URL` и недостающий shared token; на backend-host в `noadmin` — browser-facing base URL, `ADMIN_SHARED_TOKEN` и `ADMIN_BACKEND_PORT`
+- launcher для split deployment теперь сам собирает недостающие значения: на backend-host в `noadmin` — browser-facing base URL, `ADMIN_BACKEND_PORT` и, если нужно, автоматически генерирует `ADMIN_SHARED_TOKEN`; на admin-host в `onlyadmin` — backend host, `ADMIN_BACKEND_BASE_URL` и спрашивает уже сгенерированный backend token для `ADMIN_BACKEND_SHARED_TOKEN`
 - самый безопасный путь для admin-host — передавать backend адрес аргументом launcher-а (`./start.sh all onlyadmin <backend-host>` / `./restart.sh all onlyadmin <backend-host>`), а не редактировать вручную `ONLINE_*` и `ADMIN_BACKEND_*`
 
 ## Документация для агентов
