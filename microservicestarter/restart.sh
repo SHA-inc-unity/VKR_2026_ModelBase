@@ -417,6 +417,7 @@ run_parallel_restart_selection() {
     done
 
     local failed=0
+    local -a failed_names=()
     local idx
     for idx in "${!pids[@]}"; do
         if wait "${pids[$idx]}"; then
@@ -424,10 +425,11 @@ run_parallel_restart_selection() {
         else
             warn "[${names[$idx]}] Параллельный перезапуск завершился с ошибкой."
             failed=1
+            failed_names+=("${names[$idx]}")
         fi
     done
 
-    [[ $failed -eq 0 ]] || fail "Параллельный перезапуск завершился с ошибкой."
+    [[ $failed -eq 0 ]] || fail "Параллельный перезапуск завершился с ошибкой для: ${failed_names[*]}"
 }
 
 restart_service() {

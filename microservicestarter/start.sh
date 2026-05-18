@@ -440,6 +440,7 @@ run_parallel_start_selection() {
     done
 
     local failed=0
+    local -a failed_names=()
     local idx
     for idx in "${!pids[@]}"; do
         if wait "${pids[$idx]}"; then
@@ -447,10 +448,11 @@ run_parallel_start_selection() {
         else
             warn "[${names[$idx]}] Параллельный запуск завершился с ошибкой."
             failed=1
+            failed_names+=("${names[$idx]}")
         fi
     done
 
-    [[ $failed -eq 0 ]] || fail "Параллельный запуск завершился с ошибкой."
+    [[ $failed -eq 0 ]] || fail "Параллельный запуск завершился с ошибкой для: ${failed_names[*]}"
 }
 
 # ── Запуск сервиса ────────────────────────────────────────────────────────────
