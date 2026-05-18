@@ -139,7 +139,10 @@ Health application-сервисов (`data`, `analitic`) — через Kafka (`
 `fetchInfraHealth()` из `src/lib/healthClient.ts` используется для server-side HTTP
 probe Redpanda admin, MinIO, account и gateway. В local stack эти адреса обычно
 резолвятся по docker-hostname внутри `modelline_net`; в online-head режиме — через
-`ONLINE_*` namespace. Прямого доступа браузера к Kafka нет.
+`ONLINE_*` namespace. В split mode route пробует только backend facade
+`ADMIN_BACKEND_BASE_URL/health`, но всё равно возвращает полный
+`InfraHealthResponse` с `kafka.bootstrapServers` и согласованными статусами
+`online/offline` для dashboard. Прямого доступа браузера к Kafka нет.
 
 ### KafkaJS 2.x + Redpanda workaround
 

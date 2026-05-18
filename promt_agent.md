@@ -16,3 +16,4 @@
 - `microservicestarter` в `onlyadmin` сам собирает `ONLINE_*`, `ADMIN_BACKEND_BASE_URL` и `ADMIN_BACKEND_SHARED_TOKEN`; в `noadmin` собирает `PUBLIC_DOWNLOAD_BASE_URL`, `ADMIN_SHARED_TOKEN` и `ADMIN_BACKEND_PORT`.
 - Старый split-transport код, compose-сервисы и отдельные markdown-гайды удалены из активной схемы.
 - Актуальные операционные документы: root `README.md`, `STRUCTURE.md`, `microservicestarter/README.md`, `microservice_admin/README.md`, `microservice_infra/README.md`.
+- `microservice_admin/src/app/api/health/route.ts`: split-mode health response снова совпадает с `InfraHealthResponse`; `npm run build` для admin проходит.

@@ -6,7 +6,7 @@
  *
  * In split-deployment mode (ADMIN_BACKEND_BASE_URL set): skips all direct
  * backend probes and instead probes only the backend HTTPS endpoint itself,
- * deriving the gateway/Redpanda/MinIO results from the combined backend
+ * deriving the gateway/Redpanda/MinIO/account results from the combined backend
  * reachability status.
  */
 import { probeKafkaConnectivity } from '@/lib/kafka';
@@ -21,6 +21,7 @@ const REDPANDA_ADMIN_URL = process.env.REDPANDA_ADMIN_URL ?? 'redpanda:9644';
 const MINIO_URL          = process.env.MINIO_URL          ?? 'minio:9000';
 const ACCOUNT_URL        = process.env.ACCOUNT_URL        ?? 'account_service_api:5000';
 const GATEWAY_URL        = process.env.GATEWAY_URL        ?? 'exchange-gateway:5020';
+const KAFKA_BOOTSTRAP_SERVERS = process.env.KAFKA_BOOTSTRAP_SERVERS ?? 'unconfigured';
 const BACKEND_CONNECTION_TARGET = process.env.BACKEND_CONNECTION_TARGET?.trim() || 'localhost';
 
 async function probe(url: string): Promise<InfraServiceHealth> {
@@ -40,10 +41,14 @@ export async function GET(): Promise<Response> {
     const backendProbe = await probe(`${ADMIN_BACKEND_BASE_URL}/health`);
     const body: InfraHealthResponse = {
       connectionTarget: ADMIN_BACKEND_BASE_URL,
-      kafka:    backendProbe.status === 'online' ? { status: 'ok' } : { status: 'error', error: backendProbe.error },
+      kafka: {
+        status: backendProbe.status,
+        bootstrapServers: KAFKA_BOOTSTRAP_SERVERS,
+        ...(backendProbe.error ? { error: backendProbe.error } : {}),
+      },
       redpanda: backendProbe,
       minio:    backendProbe,
-      account:  { status: 'unknown' },
+      account:  backendProbe,
       gateway:  backendProbe,
     };
     return Response.json(body);

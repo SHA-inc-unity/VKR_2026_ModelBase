@@ -10,3 +10,4 @@
 - `microservice_admin/docker-compose.yml`, `microservice_infra/docker-compose.yml`, `microservice_admin/.env.example`: удалены legacy split-transport сервисы и переменные. Split deployment больше не документируется и не поддерживается через join-token transport.
 - `README.md`, `STRUCTURE.md`, `microservicestarter/README.md`, `microservicestarter/STRUCTURE.md`, `microservice_admin/README.md`, `microservice_admin/STRUCTURE.md`, `microservice_infra/README.md`, `microservice_infra/STRUCTURE.md`: документация синхронизирована под один официальный маршрут backend `:8443` + `ADMIN_SHARED_TOKEN`.
 - Два obsolete split-transport guide-файла удалены из `microservice_infra`.
+- `microservice_admin/src/app/api/health/route.ts`: исправлен split-mode response `/api/health` для production typecheck. Route снова возвращает полный `KafkaBrokerHealth` с `bootstrapServers` и согласованными `online/offline` статусами; `npm run build` в `microservice_admin` проходит.
