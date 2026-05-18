@@ -218,8 +218,22 @@ Get-Content $ConfFile | ForEach-Object {
 }
 
 function Remove-DanglingImages {
+    if ($env:MODELLINE_SKIP_DOCKER_PRUNE -eq "1") { return }
+
     $dangling = docker images -f "dangling=true" -q 2>$null
-    if ($dangling) { docker image prune -f | Out-Null }
+    if ($dangling) {
+        Write-Info "Удаляем dangling-образы Docker..."
+        $pruneOutput = (& docker image prune -f 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            if ($pruneOutput -match 'prune operation is already running') {
+                Write-Warn "Пропускаем docker image prune: уже выполняется другая операция prune."
+            } elseif (-not [string]::IsNullOrWhiteSpace($pruneOutput)) {
+                Write-Warn "Не удалось выполнить docker image prune: $pruneOutput"
+            } else {
+                Write-Warn "Не удалось выполнить docker image prune."
+            }
+        }
+    }
 }
 
 function Get-ServiceDirectory {
@@ -358,7 +372,9 @@ function Invoke-ParallelRestartSelection {
 
     Write-Info ("Параллельный перезапуск: " + ($Services -join ', '))
     $previousSkipGitPull = $env:MODELLINE_SKIP_GIT_PULL
+    $previousSkipDockerPrune = $env:MODELLINE_SKIP_DOCKER_PRUNE
     $env:MODELLINE_SKIP_GIT_PULL = "1"
+    $env:MODELLINE_SKIP_DOCKER_PRUNE = "1"
 
     try {
         $children = @()
@@ -401,6 +417,14 @@ function Invoke-ParallelRestartSelection {
             }
         }
 
+        if ($null -eq $previousSkipDockerPrune) {
+            Remove-Item Env:MODELLINE_SKIP_DOCKER_PRUNE -ErrorAction SilentlyContinue
+        } else {
+            $env:MODELLINE_SKIP_DOCKER_PRUNE = $previousSkipDockerPrune
+        }
+
+        Remove-DanglingImages
+
         if ($failed.Count -gt 0) {
             Write-Fail ("Параллельный перезапуск завершился ошибкой для: " + ($failed -join ', '))
         }
@@ -409,6 +433,12 @@ function Invoke-ParallelRestartSelection {
             Remove-Item Env:MODELLINE_SKIP_GIT_PULL -ErrorAction SilentlyContinue
         } else {
             $env:MODELLINE_SKIP_GIT_PULL = $previousSkipGitPull
+        }
+
+        if ($null -eq $previousSkipDockerPrune) {
+            Remove-Item Env:MODELLINE_SKIP_DOCKER_PRUNE -ErrorAction SilentlyContinue
+        } else {
+            $env:MODELLINE_SKIP_DOCKER_PRUNE = $previousSkipDockerPrune
         }
     }
 }
@@ -439,6 +469,7 @@ function Restart-Microservice {
     $SvcDir = Get-ServiceDirectory -Name $Name
 
     Write-Info "[$Name] Перезапуск (mode=$RunMode)..."
+    Ensure-EnvFile -SvcDir $SvcDir | Out-Null
     Push-Location $SvcDir
 
     $composeFile    = Join-Path $SvcDir "docker-compose.yml"

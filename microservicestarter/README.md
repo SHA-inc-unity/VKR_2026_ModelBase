@@ -61,6 +61,11 @@
 
 Подробная документация и таблица режимов — в корневом [README.md](../README.md).
 
+Операционное поведение launcher-а:
+
+- `start` и `restart` теперь автоматически восстанавливают отсутствующий `.env` из `.env.example`, если шаблон существует у сервиса
+- в multi-service fan-out dangling Docker image cleanup больше не запускается параллельно в каждом child-процессе: launcher откладывает `docker image prune` до одного общего прохода, чтобы не падать на `a prune operation is already running`
+
 ## Repo-local runtime data
 
 Stateful Docker-сервисы по умолчанию хранят runtime-данные в каталоге

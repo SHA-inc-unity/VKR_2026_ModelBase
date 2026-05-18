@@ -400,6 +400,29 @@ do_git_pull() {
     fi
 }
 
+remove_dangling_images() {
+    if [[ "${MODELLINE_SKIP_DOCKER_PRUNE:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    if docker images -f "dangling=true" -q | grep -q .; then
+        local prune_output=""
+        local prune_status=0
+
+        info "Удаляем dangling-образы Docker..."
+        prune_output="$(docker image prune -f 2>&1)" || prune_status=$?
+        if [[ $prune_status -ne 0 ]]; then
+            if grep -qi "prune operation is already running" <<< "$prune_output"; then
+                warn "Пропускаем docker image prune: уже выполняется другая операция prune."
+            elif [[ -n "$prune_output" ]]; then
+                warn "Не удалось выполнить docker image prune: $prune_output"
+            else
+                warn "Не удалось выполнить docker image prune."
+            fi
+        fi
+    fi
+}
+
 run_parallel_restart_selection() {
     local mode="$1"
     shift
@@ -411,7 +434,7 @@ run_parallel_restart_selection() {
     local -a names=()
     local svc
     for svc in "${services[@]}"; do
-        MODELLINE_SKIP_GIT_PULL=1 bash "$SCRIPT_DIR/restart.sh" "$svc" "$mode" &
+        MODELLINE_SKIP_GIT_PULL=1 MODELLINE_SKIP_DOCKER_PRUNE=1 bash "$SCRIPT_DIR/restart.sh" "$svc" "$mode" &
         pids+=("$!")
         names+=("$svc")
     done
@@ -429,6 +452,8 @@ run_parallel_restart_selection() {
         fi
     done
 
+    remove_dangling_images
+
     [[ $failed -eq 0 ]] || fail "Параллельный перезапуск завершился с ошибкой для: ${failed_names[*]}"
 }
 
@@ -439,6 +464,7 @@ restart_service() {
     svc_dir="$(get_service_directory "$name")"
 
     info "[$name] Перезапуск (mode=$mode)..."
+    ensure_env_file "$svc_dir" >/dev/null
     pushd "$svc_dir" > /dev/null
     prepare_bind_mount_data_paths "$name"
 
@@ -464,20 +490,20 @@ restart_service() {
             if [[ $has_base -eq 1 ]]; then
                 info "[$name] Пересборка base-образа (requirements.txt изменился)..."
                 docker compose --profile build-base build --no-cache base
-                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                remove_dangling_images
             fi
             docker compose build
-            docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+            remove_dangling_images
             docker compose up -d
             ;;
         api)
             if [[ $has_api -eq 1 ]]; then
                 docker compose build api
-                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                remove_dangling_images
                 docker compose up -d --no-deps api
             else
                 docker compose build
-                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                remove_dangling_images
                 docker compose up -d
             fi
             success "[$name] api перезапущен."
@@ -486,28 +512,28 @@ restart_service() {
         full)
             if [[ $has_base -eq 1 && $base_found -eq 0 ]]; then
                 docker compose --profile build-base build base
-                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                remove_dangling_images
             fi
             if [[ $has_api -eq 1 ]]; then
                 docker compose build api
             else
                 docker compose build
             fi
-            docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+            remove_dangling_images
             docker compose --profile scheduler up -d
             ;;
         core|"")
             if [[ $has_base -eq 1 && $base_found -eq 0 ]]; then
                 info "[$name] Сборка base-образа..."
                 docker compose --profile build-base build base
-                docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+                remove_dangling_images
             fi
             if [[ $has_api -eq 1 ]]; then
                 docker compose build api
             else
                 docker compose build
             fi
-            docker images -f "dangling=true" -q | grep -q . && docker image prune -f >/dev/null
+            remove_dangling_images
             docker compose up -d
             ;;
         *)

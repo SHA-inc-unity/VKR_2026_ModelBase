@@ -370,10 +370,21 @@ function Configure-AdminOnlineEnv {
 
 # ── Очистка dangling-образов после сборки ────────────────────────────────────
 function Remove-DanglingImages {
+    if ($env:MODELLINE_SKIP_DOCKER_PRUNE -eq "1") { return }
+
     $dangling = docker images -f "dangling=true" -q 2>$null
     if ($dangling) {
         Write-Info "Удаляем dangling-образы Docker..."
-        docker image prune -f | Out-Null
+        $pruneOutput = (& docker image prune -f 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            if ($pruneOutput -match 'prune operation is already running') {
+                Write-Warn "Пропускаем docker image prune: уже выполняется другая операция prune."
+            } elseif (-not [string]::IsNullOrWhiteSpace($pruneOutput)) {
+                Write-Warn "Не удалось выполнить docker image prune: $pruneOutput"
+            } else {
+                Write-Warn "Не удалось выполнить docker image prune."
+            }
+        }
     }
 }
 
@@ -402,48 +413,67 @@ function Invoke-ParallelStartSelection {
     if (-not $Services -or $Services.Count -eq 0) { return }
 
     Write-Info ("Параллельный запуск: " + ($Services -join ', '))
-    $children = @()
-    foreach ($name in $Services) {
-        $resultFile = [System.IO.Path]::GetTempFileName()
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList @(
-                '-NoLogo',
-                '-NoProfile',
-                '-ExecutionPolicy', 'Bypass',
-                '-File', $LauncherScript,
-                '-Service', $name,
-                '-Mode', $RunMode,
-                '-ResultFile', $resultFile
-            ) `
-            -WorkingDirectory $ScriptDir `
-            -NoNewWindow `
-            -PassThru
-        $children += [pscustomobject]@{
-            Service = $name
-            Process = $proc
-            Result  = $resultFile
-        }
-    }
+    $previousSkipDockerPrune = $env:MODELLINE_SKIP_DOCKER_PRUNE
+    $env:MODELLINE_SKIP_DOCKER_PRUNE = "1"
 
-    $failed = @()
-    foreach ($child in $children) {
-        try {
-            $child.Process.WaitForExit()
-
-            $result = if (Test-Path $child.Result) { (Get-Content $child.Result -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
-            if ($result -eq 'OK') {
-                Write-Ok "[$($child.Service)] Параллельный запуск завершён."
-            } else {
-                Write-Warn "[$($child.Service)] Параллельный запуск завершился с ошибкой."
-                $failed += $child.Service
+    try {
+        $children = @()
+        foreach ($name in $Services) {
+            $resultFile = [System.IO.Path]::GetTempFileName()
+            $proc = Start-Process -FilePath "powershell.exe" `
+                -ArgumentList @(
+                    '-NoLogo',
+                    '-NoProfile',
+                    '-ExecutionPolicy', 'Bypass',
+                    '-File', $LauncherScript,
+                    '-Service', $name,
+                    '-Mode', $RunMode,
+                    '-ResultFile', $resultFile
+                ) `
+                -WorkingDirectory $ScriptDir `
+                -NoNewWindow `
+                -PassThru
+            $children += [pscustomobject]@{
+                Service = $name
+                Process = $proc
+                Result  = $resultFile
             }
-        } finally {
-            Remove-Item $child.Result -ErrorAction SilentlyContinue
         }
-    }
 
-    if ($failed.Count -gt 0) {
-        Write-Fail ("Параллельный запуск завершился ошибкой для: " + ($failed -join ', '))
+        $failed = @()
+        foreach ($child in $children) {
+            try {
+                $child.Process.WaitForExit()
+
+                $result = if (Test-Path $child.Result) { (Get-Content $child.Result -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
+                if ($result -eq 'OK') {
+                    Write-Ok "[$($child.Service)] Параллельный запуск завершён."
+                } else {
+                    Write-Warn "[$($child.Service)] Параллельный запуск завершился с ошибкой."
+                    $failed += $child.Service
+                }
+            } finally {
+                Remove-Item $child.Result -ErrorAction SilentlyContinue
+            }
+        }
+
+        if ($null -eq $previousSkipDockerPrune) {
+            Remove-Item Env:MODELLINE_SKIP_DOCKER_PRUNE -ErrorAction SilentlyContinue
+        } else {
+            $env:MODELLINE_SKIP_DOCKER_PRUNE = $previousSkipDockerPrune
+        }
+
+        Remove-DanglingImages
+
+        if ($failed.Count -gt 0) {
+            Write-Fail ("Параллельный запуск завершился ошибкой для: " + ($failed -join ', '))
+        }
+    } finally {
+        if ($null -eq $previousSkipDockerPrune) {
+            Remove-Item Env:MODELLINE_SKIP_DOCKER_PRUNE -ErrorAction SilentlyContinue
+        } else {
+            $env:MODELLINE_SKIP_DOCKER_PRUNE = $previousSkipDockerPrune
+        }
     }
 }
 

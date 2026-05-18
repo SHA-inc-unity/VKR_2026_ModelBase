@@ -370,9 +370,25 @@ configure_admin_online_env() {
 
 # ── Очистка dangling-образов ──────────────────────────────────────────────────
 remove_dangling_images() {
+    if [[ "${MODELLINE_SKIP_DOCKER_PRUNE:-0}" == "1" ]]; then
+        return 0
+    fi
+
     if docker images -f "dangling=true" -q | grep -q .; then
+        local prune_output=""
+        local prune_status=0
+
         info "Удаляем dangling-образы Docker..."
-        docker image prune -f >/dev/null
+        prune_output="$(docker image prune -f 2>&1)" || prune_status=$?
+        if [[ $prune_status -ne 0 ]]; then
+            if grep -qi "prune operation is already running" <<< "$prune_output"; then
+                warn "Пропускаем docker image prune: уже выполняется другая операция prune."
+            elif [[ -n "$prune_output" ]]; then
+                warn "Не удалось выполнить docker image prune: $prune_output"
+            else
+                warn "Не удалось выполнить docker image prune."
+            fi
+        fi
     fi
 }
 
@@ -434,7 +450,7 @@ run_parallel_start_selection() {
     local -a names=()
     local svc
     for svc in "${services[@]}"; do
-        bash "$SCRIPT_DIR/start.sh" "$svc" "$mode" &
+        MODELLINE_SKIP_DOCKER_PRUNE=1 bash "$SCRIPT_DIR/start.sh" "$svc" "$mode" &
         pids+=("$!")
         names+=("$svc")
     done
@@ -451,6 +467,8 @@ run_parallel_start_selection() {
             failed_names+=("${names[$idx]}")
         fi
     done
+
+    remove_dangling_images
 
     [[ $failed -eq 0 ]] || fail "Параллельный запуск завершился с ошибкой для: ${failed_names[*]}"
 }
