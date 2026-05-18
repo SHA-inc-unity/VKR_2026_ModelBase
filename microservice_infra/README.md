@@ -16,8 +16,6 @@
 ## Документация для агентов
 
 - [STRUCTURE.md](STRUCTURE.md) — карта инфраструктурных компонентов и compose-слоя
-- [VPN_CONTAINERIZED.md](VPN_CONTAINERIZED.md) — **рекомендуемый** split-deployment: backend-host + admin-host через containerized WireGuard (без ручных хостовых настроек)
-- [WG_WSTUNNEL.md](WG_WSTUNNEL.md) — fallback: ручная схема WireGuard over WStunnel
 - [../docs/agents/services/microservice_infra.md](../docs/agents/services/microservice_infra.md) — профиль сервиса для agent workflow
 - [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
 
@@ -53,36 +51,9 @@ docker-compose публикуется как host-порт **`8501`** (override 
 **HTTPS:** добавить certbot + смонтировать ssl.conf в
 `/etc/nginx/conf.d/`; открыть на хосте `:443`.
 
-## Split deployment через containerized VPN
+## Split deployment через HTTPS admin facade
 
-Для сценария `backend-host` + `remote admin-host` **рекомендуемый** способ — containerized WireGuard over WebSocket/TCP на `VPN_WS_PORT` (`8443` по умолчанию). Подробная инструкция: [VPN_CONTAINERIZED.md](VPN_CONTAINERIZED.md).  
-Manual fallback через wg-quick + WStunnel описан в [WG_WSTUNNEL.md](WG_WSTUNNEL.md).
-
-Compose-сервис `vpn` перед запуском entrypoint теперь доустанавливает
-`wireguard-tools`, `iproute2-minimal`, `kmod` и `iptables`. Это закрывает
-crash-loop на clean Linux-host, где в контейнере был `wg`, но не было `ip`
-или `modprobe`, и позволяет самому VPN-контейнеру выставлять host-side allow
-правила для `wg0`.
-Сам entrypoint применяет WireGuard-конфиг через `wg-quick strip`, чтобы
-wg-quick-поля вроде `Address` не ломали `wg setconf`, и дополнительно
-добавляет idempotent `iptables` accept для private backend-портов по `wg0`.
-Внешний transport для split deployment теперь обслуживает отдельный compose-
-сервис `wstunnel-server`: он слушает TCP `VPN_WS_PORT` и прокидывает WebSocket-поток
-в локальный WireGuard UDP `127.0.0.1:51820`. Поэтому на backend-хосте для VPN
-нужно открыть `VPN_WS_PORT/tcp`, а публичный UDP `51820` больше не нужен.
-Default `8443` оставляет backend-host `443` свободным для reverse proxy/HTTPS
-и не требует bind на privileged port. Если нужно вернуть именно `443`, контейнер
-уже запускается root-пользователем, но такой режим снова потребует открытого
-`443/tcp` на backend-хосте и нового join token.
-Если `VPN_WS_PORT` занят на backend-host, `noadmin + VPN` shell launcher заранее
-выбирает первый свободный fallback-порт, записывает его в `microservice_infra/.env`
-и печатает выбранное значение в JOIN TOKEN-блоке. Список fallback-портов можно
-переопределить через `MODELLINE_VPN_WS_PORT_CANDIDATES`.
-Если `modelline-vpn-server` после этого всё ещё рестартует, следующая
-проверка уже host-level: `docker logs modelline-vpn-server --tail 50`,
-наличие `/dev/net/tun` и `modinfo wireguard`.
-
-Критичное требование для этого сценария: Kafka broker на backend-хосте должен advertise'ить не `localhost`, а приватный WG-адрес или private DNS backend-хоста. Для этого в `docker-compose.yml` введены переменные:
+Primary split path идёт через HTTPS admin facade на backend `:8443`. Для этого сценария важны переменные:
 
 - `REDPANDA_EXTERNAL_HOST`
 - `REDPANDA_EXTERNAL_PORT`
@@ -92,15 +63,7 @@ Default `8443` оставляет backend-host `443` свободным для r
 - `MINIO_CONSOLE_PORT`
 - `NGINX_PORT`
 
-Для local/full stack default остаётся прежним: `REDPANDA_EXTERNAL_HOST=localhost`. Для split deployment задай, например, `REDPANDA_EXTERNAL_HOST=10.44.0.1`.
-
-Если backend поднимается через shell launcher в режиме `noadmin` и VPN включён,
-launcher теперь сам выставляет `REDPANDA_EXTERNAL_HOST=10.44.0.1`,
-`REDPANDA_BIND_ADDR=10.44.0.1` и `MINIO_BIND_ADDR=10.44.0.1` до рестарта
-infra. Аналогично для `microservice_account` и `microservice_gateway`
-launcher прописывает `ACCOUNT_BIND_ADDR=10.44.0.1` и
-`GATEWAY_BIND_ADDR=10.44.0.1`, чтобы WG/private binding оставался
-repo-managed, а не ручным.
+Для local/full stack default остаётся прежним: `REDPANDA_EXTERNAL_HOST=localhost`.
 
 ## Запуск
 

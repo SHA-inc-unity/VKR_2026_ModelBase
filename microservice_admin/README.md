@@ -40,7 +40,7 @@ registry `cgr.dev` может быть недоступен, а `docker compose 
 - не требует `modelline_net`
 - используется в split deployment, когда backend-хост поднят в режиме `noadmin`, а admin живёт отдельно
 - внешние адреса берутся из namespace `ONLINE_*`: `ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`
-- для split deployment эти `ONLINE_*` должны указывать на приватный WG/private DNS адрес backend-хоста, а не на `localhost`; рекомендуемая схема описана в `microservice_infra/WG_WSTUNNEL.md`
+- для split deployment эти `ONLINE_*` должны указывать на backend host/domain, а не на `localhost`
 
 Канонический URL для браузера в этом режиме: `http://<admin-host>:443/admin/`.
 `admin-online` работает с `basePath=/admin`, поэтому bare `http://<admin-host>:443/`
@@ -58,32 +58,9 @@ UI живёт только на отдельном admin-host.
 - `ONLINE_ACCOUNT_URL` → `localhost:7510`
 - `ONLINE_GATEWAY_URL` → `localhost:7520`
 
-Но при реальном split deployment их нужно переопределять на адрес backend-хоста, например `95.165.27.159:7510` и `95.165.27.159:7520` или на WG/private address.
+Но при реальном split deployment их нужно переопределять на адрес backend-хоста, например `95.165.27.159:7510` и `95.165.27.159:7520`.
 
 Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST`, автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`, предлагает `ADMIN_BACKEND_BASE_URL` с default `https://<host>:8443` и спрашивает `ADMIN_BACKEND_SHARED_TOKEN`, только если он ещё не задан.
-
-**Containerized VPN (рекомендуется):** при запуске backend в режиме `noadmin` с заданным `VPN_SERVER_URL` в `microservice_infra/.env`, launcher автоматически поднимает WireGuard-сервер, WebSocket/TCP transport на `8443` и печатает **join token** (base64-строку). На admin-хосте достаточно:
-
-```bash
-./start.sh all onlyadmin <JOIN_TOKEN>
-```
-
-Launcher декодирует join token, записывает `wg0.conf`, переносит WebSocket metadata в `.env`, поднимает `modelline-wstunnel-client` и `modelline-vpn-client`, ждёт готовности tunnel и автоматически выставляет `ONLINE_*` на `10.44.0.1:*`. При последующих перезапусках join token не нужен — `wg0.conf` сохраняется в `.runtime-data/microservice_admin/vpn/`. Подробнее: [../microservice_infra/VPN_CONTAINERIZED.md](../microservice_infra/VPN_CONTAINERIZED.md).
-
-Compose-сервис `vpn-client` перед запуском entrypoint теперь доустанавливает
-`wireguard-tools`, `iproute2-minimal`, `kmod` и `iptables`, чтобы `wg`, `ip`,
-`modprobe` и client-side firewall bootstrap были доступны даже на clean
-Linux-host без отдельной подготовки VPN-образа. Сам клиентский entrypoint перед `wg setconf` прогоняет
-`wg0.conf` через `wg-quick strip`, поэтому join token по-прежнему хранит
-полный wg-quick-конфиг и не падает на строках `Address` / `MTU`. После
-подъёма интерфейса entrypoint также ставит route-ы из `AllowedIPs` на `wg0`,
-иначе handshake был бы успешным, но трафик к `10.44.0.1:*` продолжал бы идти
-в default route хоста вместо туннеля. Дополнительно `vpn-client` теперь
-вставляет idempotent `iptables` allow для `wg0` в `INPUT` и `DOCKER-USER`,
-чтобы ответный трафик backend -> admin не зависел от ручной host firewall/UFW
-на admin-хосте.
-WireGuard client теперь использует локальный endpoint `127.0.0.1:51820`, а
-`wstunnel-client` переносит этот UDP-поток поверх `ws://<backend>:8443`.
 
 Dashboard на главной странице теперь явно показывает, к какому backend host/IP подключён текущий admin, отдельным заметным connection-блоком над stat cards. Источник один и предсказуемый: compose кладёт в runtime `BACKEND_CONNECTION_TARGET`, где local stack всегда показывает `localhost`, а `admin-online` берёт значение из `ONLINE_BACKEND_HOST`. Тот же блок теперь показывает и реальный `KAFKA_BOOTSTRAP_SERVERS`, который использует admin, плюс текст ошибки broker connectivity, если Kafka path недоступен. Дополнительно `connectionTarget` дублируется в верхней строке dashboard, в sidebar header под логотипом и в footer sidebar, чтобы оператор видел target backend на любой странице admin-панели.
 

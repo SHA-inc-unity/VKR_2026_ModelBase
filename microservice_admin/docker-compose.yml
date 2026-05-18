@@ -68,57 +68,6 @@ services:
     ports:
       - "${ADMIN_PORT:-443}:3000"
 
-  wstunnel-client:
-    profiles: ["vpn"]
-    image: ghcr.io/erebe/wstunnel:latest
-    container_name: modelline-wstunnel-client
-    restart: unless-stopped
-    network_mode: host
-    command:
-      - /home/app/wstunnel
-      - client
-      - --http-upgrade-path-prefix
-      - "${VPN_WS_PATH:-modelline-wg}"
-      - -L
-      - "udp://${VPN_CLIENT_LOCAL_PORT:-51820}:127.0.0.1:${VPN_SERVER_PORT:-51820}?timeout_sec=0"
-      - "ws://${VPN_SERVER_URL:-}:${VPN_WS_PORT:-8443}"
-
-  # ── VPN client (WireGuard) ───────────────────────────────────────────────────
-  # Profile: vpn.  Only active in split deployment (onlyadmin with join token).
-  # Brings up wg0 on the HOST so admin-online (Docker bridge network) can reach
-  # the backend's WireGuard IP (10.44.0.1) via host routing — no changes to the
-  # admin-online container or its network attachment are required.
-  #
-  # Runtime contract: same as vpn-server (NET_ADMIN, SYS_MODULE, /dev/net/tun).
-  #
-  # wg0.conf is written by the launcher when a join token is provided:
-  #   .runtime-data/microservice_admin/vpn/wg0.conf
-  vpn-client:
-    profiles: ["vpn"]
-    image: alpine:3.19
-    container_name: modelline-vpn-client
-    depends_on:
-      - wstunnel-client
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    network_mode: host
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    volumes:
-      - type: bind
-        source: ../.runtime-data/microservice_admin/vpn
-        target: /vpn/state
-      - type: bind
-        source: ./vpn/client-entrypoint.sh
-        target: /entrypoint.sh
-        read_only: true
-      - /lib/modules:/lib/modules:ro
-    entrypoint: ["sh", "-c"]
-    command:
-      - "apk add --no-cache wireguard-tools iproute2-minimal kmod iptables && exec sh /entrypoint.sh"
-    restart: unless-stopped
-
 networks:
   modelline_net:
     name: modelline_net
