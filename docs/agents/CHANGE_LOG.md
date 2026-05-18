@@ -4,6 +4,12 @@
 
 ## 2026-05
 
+### 2026-05-18 (Launcher env prompts for HTTP Admin Facade)
+
+- `microservice_admin/docker-compose.yml`: `admin` и `admin-online` теперь получают `ADMIN_BACKEND_BASE_URL` и `ADMIN_BACKEND_SHARED_TOKEN` напрямую из `.env`, без временного compose override.
+- `microservicestarter/start.sh`, `restart.sh`, `start.ps1`, `restart.ps1`: launcher научен интерактивно собирать недостающий split-config для нового `8443`-facade path. `onlyadmin` дописывает `ONLINE_*`, `ADMIN_BACKEND_BASE_URL` и `ADMIN_BACKEND_SHARED_TOKEN`; `noadmin` может спросить browser-facing backend URL, сохранить `PUBLIC_DOWNLOAD_BASE_URL`, `ADMIN_SHARED_TOKEN` и вычислить `ADMIN_BACKEND_PORT`.
+- `microservice_data/.env.example`, `microservice_infra/.env.example`, root/starter/admin docs: шаблоны env и Markdown синхронизированы под новый launcher flow.
+
 ### 2026-05-XX (HTTP Admin Facade — замена VPN transport)
 
 **Цель**: заменить VPN/WireGuard/WStunnel split-deployment transport единым HTTPS-endpoint на порту 8443 (backend-хост). Admin-хосту достаточно двух переменных: `ADMIN_BACKEND_BASE_URL` + `ADMIN_BACKEND_SHARED_TOKEN`.

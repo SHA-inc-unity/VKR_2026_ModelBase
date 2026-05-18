@@ -52,6 +52,151 @@ Get-Content $ConfFile | ForEach-Object {
     if ($parts.Count -eq 2) { $ServicePaths[$parts[0]] = $parts[1]; $script:ServiceOrder += $parts[0] }
 }
 
+function Test-BackendBaseUrl {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        Write-Fail "Base URL backend-фасада не может быть пустым."
+    }
+    if ($Value -match '\s') {
+        Write-Fail "Base URL backend-фасада не должен содержать пробелы: $Value"
+    }
+    try {
+        $uri = [System.Uri]$Value
+    } catch {
+        Write-Fail "Ожидается base URL без пути, например https://backend.example.com:8443"
+    }
+    if ($uri.Scheme -notin @('http', 'https') -or [string]::IsNullOrWhiteSpace($uri.Host)) {
+        Write-Fail "Ожидается base URL без пути, например https://backend.example.com:8443"
+    }
+    if ($uri.AbsolutePath -and $uri.AbsolutePath -ne '/') {
+        Write-Fail "ADMIN_BACKEND_BASE_URL / PUBLIC_DOWNLOAD_BASE_URL не должны содержать путь: $Value"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($uri.Query) -or -not [string]::IsNullOrWhiteSpace($uri.Fragment)) {
+        Write-Fail "ADMIN_BACKEND_BASE_URL / PUBLIC_DOWNLOAD_BASE_URL не должны содержать query или fragment: $Value"
+    }
+}
+
+function Get-HttpUrlEffectivePort {
+    param([string]$Value)
+    $uri = [System.Uri]$Value
+    if (-not $uri.IsDefaultPort) { return [string]$uri.Port }
+    if ($uri.Scheme -eq 'https') { return '443' }
+    return '80'
+}
+
+function Convert-SecureStringToPlainText {
+    param([Security.SecureString]$Value)
+    if ($null -eq $Value) { return '' }
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+    }
+}
+
+function New-RandomHexToken {
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    return [Convert]::ToHexString($bytes).ToLowerInvariant()
+}
+
+function Resolve-SecretEnvValue {
+    param([string]$EnvFile, [string]$Key, [string]$OwnerLabel)
+    $currentValue = (Get-EnvValue -EnvFile $EnvFile -Key $Key).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($currentValue)) {
+        return $currentValue
+    }
+
+    Write-Info "[$OwnerLabel] $Key не задан — можно вставить своё значение или нажать Enter для автогенерации."
+    $secure = Read-Host "[$OwnerLabel] Введите $Key (Enter = сгенерировать)" -AsSecureString
+    $plain = (Convert-SecureStringToPlainText -Value $secure).Trim()
+    if ([string]::IsNullOrWhiteSpace($plain)) {
+        $plain = New-RandomHexToken
+        Write-Ok "[$OwnerLabel] $Key сгенерирован и сохранён в $(Split-Path $EnvFile -Leaf). То же значение нужно указать на второй стороне split deployment."
+    }
+    return $plain
+}
+
+function Resolve-AdminBackendBaseUrl {
+    param([string]$SvcDir, [string]$BackendHost)
+    $envFile = Join-Path $SvcDir ".env"
+    $currentUrl = (Get-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_BASE_URL").Trim().TrimEnd('/')
+
+    $scheme = 'https'
+    $port = '8443'
+    if (-not [string]::IsNullOrWhiteSpace($currentUrl)) {
+        try {
+            $currentUri = [System.Uri]$currentUrl
+            if ($currentUri.Scheme -in @('http', 'https')) {
+                $scheme = $currentUri.Scheme
+                if (-not $currentUri.IsDefaultPort) {
+                    $port = [string]$currentUri.Port
+                }
+                if ($currentUri.Host -eq $BackendHost -and ($currentUri.AbsolutePath -eq '/' -or [string]::IsNullOrWhiteSpace($currentUri.AbsolutePath))) {
+                    return $currentUrl
+                }
+            }
+        } catch {
+        }
+    }
+
+    $derivedUrl = "${scheme}://${BackendHost}:${port}"
+    if (-not [string]::IsNullOrWhiteSpace($currentUrl)) {
+        Write-Info "[microservice_admin] Текущий ADMIN_BACKEND_BASE_URL: $currentUrl"
+        $answer = Read-Host "[microservice_admin] Введите ADMIN_BACKEND_BASE_URL [$derivedUrl]"
+        $resolvedUrl = if ([string]::IsNullOrWhiteSpace($answer)) { $derivedUrl } else { $answer.Trim() }
+    } else {
+        Write-Info "[microservice_admin] ADMIN_BACKEND_BASE_URL не задан — настроим split HTTPS endpoint."
+        $answer = Read-Host "[microservice_admin] Введите ADMIN_BACKEND_BASE_URL [$derivedUrl]"
+        $resolvedUrl = if ([string]::IsNullOrWhiteSpace($answer)) { $derivedUrl } else { $answer.Trim() }
+    }
+
+    $resolvedUrl = $resolvedUrl.TrimEnd('/')
+    Test-BackendBaseUrl -Value $resolvedUrl
+    return $resolvedUrl
+}
+
+function Resolve-BackendPublicBaseUrl {
+    param([string]$EnvFile)
+    $currentUrl = (Get-EnvValue -EnvFile $EnvFile -Key "PUBLIC_DOWNLOAD_BASE_URL").Trim().TrimEnd('/')
+    if (-not [string]::IsNullOrWhiteSpace($currentUrl) -and $currentUrl -ne 'http://localhost:8501') {
+        Test-BackendBaseUrl -Value $currentUrl
+        return $currentUrl
+    }
+
+    Write-Info "[backend-host] Нужен внешний base URL backend-host для HTTPS admin facade и прямых downloads."
+    do {
+        $resolvedUrl = (Read-Host "[backend-host] Введите backend public base URL (например https://backend.example.com:8443)").Trim().TrimEnd('/')
+        if ([string]::IsNullOrWhiteSpace($resolvedUrl)) {
+            Write-Warn "[backend-host] Base URL не может быть пустым."
+        }
+    } while ([string]::IsNullOrWhiteSpace($resolvedUrl))
+
+    Test-BackendBaseUrl -Value $resolvedUrl
+    return $resolvedUrl
+}
+
+function Configure-BackendAdminFacadeEnv {
+    $infraSvcDir = Get-ServiceDirectory -Name "microservice_infra"
+    $gatewaySvcDir = Get-ServiceDirectory -Name "microservice_gateway"
+    $dataSvcDir = Get-ServiceDirectory -Name "microservice_data"
+
+    $infraEnv = Ensure-EnvFile -SvcDir $infraSvcDir
+    $gatewayEnv = Ensure-EnvFile -SvcDir $gatewaySvcDir
+    $dataEnv = Ensure-EnvFile -SvcDir $dataSvcDir
+
+    $publicBaseUrl = Resolve-BackendPublicBaseUrl -EnvFile $dataEnv
+    $sharedToken = Resolve-SecretEnvValue -EnvFile $gatewayEnv -Key "ADMIN_SHARED_TOKEN" -OwnerLabel "microservice_gateway"
+    $backendPort = Get-HttpUrlEffectivePort -Value $publicBaseUrl
+
+    Set-EnvValue -EnvFile $dataEnv -Key "PUBLIC_DOWNLOAD_BASE_URL" -Value $publicBaseUrl
+    Set-EnvValue -EnvFile $gatewayEnv -Key "ADMIN_SHARED_TOKEN" -Value $sharedToken
+    Set-EnvValue -EnvFile $infraEnv -Key "ADMIN_BACKEND_PORT" -Value $backendPort
+
+    Write-Ok "[backend-host] HTTP admin facade env настроены: PUBLIC_DOWNLOAD_BASE_URL=$publicBaseUrl, ADMIN_BACKEND_PORT=$backendPort."
+}
+
 # ── Первичная настройка .env с интерактивным запросом паролей ────────────────
 function Initialize-Env {
     param([string]$Name, [string]$SvcDir)
@@ -111,6 +256,16 @@ function Set-EnvValue {
     }
     if (-not $updated) { $lines += "${Key}=${Value}" }
     [System.IO.File]::WriteAllText($EnvFile, (($lines -join "`r`n") + "`r`n"), [System.Text.Encoding]::UTF8)
+}
+
+function Ensure-EnvFile {
+    param([string]$SvcDir)
+    $envFile = Join-Path $SvcDir ".env"
+    $envExample = Join-Path $SvcDir ".env.example"
+    if (-not (Test-Path $envFile) -and (Test-Path $envExample)) {
+        Copy-Item $envExample $envFile
+    }
+    return $envFile
 }
 
 function Test-BackendHost {
@@ -180,6 +335,8 @@ function Configure-AdminOnlineEnv {
     }
 
     $resolvedBackendHost = Resolve-AdminOnlineBackendHost -SvcDir $SvcDir -ExplicitBackendHost $ExplicitBackendHost
+    $resolvedBackendBaseUrl = Resolve-AdminBackendBaseUrl -SvcDir $SvcDir -BackendHost $resolvedBackendHost
+    $resolvedSharedToken = Resolve-SecretEnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_SHARED_TOKEN" -OwnerLabel "microservice_admin"
 
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST" -Value $resolvedBackendHost
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_KAFKA_BOOTSTRAP_SERVERS" -Value "${resolvedBackendHost}:9092"
@@ -187,8 +344,10 @@ function Configure-AdminOnlineEnv {
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_ACCOUNT_URL" -Value "${resolvedBackendHost}:7510"
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_GATEWAY_URL" -Value "${resolvedBackendHost}:7520"
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_MINIO_URL" -Value "${resolvedBackendHost}:9000"
+    Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_BASE_URL" -Value $resolvedBackendBaseUrl
+    Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_SHARED_TOKEN" -Value $resolvedSharedToken
 
-    Write-Ok "[microservice_admin] ONLINE_* настроены на backend-host $resolvedBackendHost."
+    Write-Ok "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_* для $resolvedBackendBaseUrl"
 }
 
 # ── Очистка dangling-образов после сборки ────────────────────────────────────
@@ -340,6 +499,7 @@ if ($Mode -eq "onlyadmin") {
             Write-Fail "mode=noadmin поддерживается только вместе с -Service all"
         }
         $dispatchMode = "core"
+        Configure-BackendAdminFacadeEnv
         foreach ($svc in $ServiceOrder) {
             if ($svc -ne "microservice_admin") { $selectedServices += $svc }
         }

@@ -201,6 +201,180 @@ validate_backend_host() {
     [[ ! "$backend_host" =~ [[:space:]] ]] || fail "Для mode=onlyadmin host/IP не должен содержать пробелы: $backend_host"
 }
 
+validate_backend_base_url() {
+    local base_url="$1"
+    [[ -n "$base_url" ]] || fail "Base URL backend-фасада не может быть пустым."
+    [[ ! "$base_url" =~ [[:space:]] ]] || fail "Base URL backend-фасада не должен содержать пробелы: $base_url"
+    [[ "$base_url" =~ ^https?://[^/]+/?$ ]] || fail "Ожидается base URL без пути, например https://backend.example.com:8443"
+}
+
+extract_http_url_scheme() {
+    local url="$1"
+    if [[ "$url" =~ ^(https?):// ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
+}
+
+extract_http_url_port() {
+    local url="$1"
+    if [[ "$url" =~ ^https?://[^/:]+:([0-9]+)/?$ ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
+}
+
+infer_http_url_port() {
+    local url="$1"
+    local explicit_port scheme
+    explicit_port="$(extract_http_url_port "$url")"
+    if [[ -n "$explicit_port" ]]; then
+        printf '%s' "$explicit_port"
+        return 0
+    fi
+
+    scheme="$(extract_http_url_scheme "$url")"
+    if [[ "$scheme" == "https" ]]; then
+        printf '443'
+    else
+        printf '80'
+    fi
+}
+
+generate_random_hex_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+        return 0
+    fi
+    od -An -N 32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
+}
+
+resolve_secret_env_value() {
+    local env_file="$1"
+    local key="$2"
+    local owner_label="$3"
+    local current_value prompt_value=""
+
+    current_value="$(get_env_value "$env_file" "$key")"
+    if [[ -n "$current_value" ]]; then
+        printf '%s' "$current_value"
+        return 0
+    fi
+
+    [[ -t 0 ]] || fail "[$owner_label] $key не задан. Запусти интерактивно или заранее заполни $env_file"
+
+    info "[$owner_label] $key не задан — можно вставить своё значение или нажать Enter для автогенерации." >&2
+    read -rsp "[$owner_label] Введите $key (Enter = сгенерировать): " prompt_value
+    echo >&2
+    prompt_value="$(printf '%s' "$prompt_value" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+
+    if [[ -z "$prompt_value" ]]; then
+        prompt_value="$(generate_random_hex_token)"
+        [[ -n "$prompt_value" ]] || fail "[$owner_label] Не удалось сгенерировать $key автоматически."
+        success "[$owner_label] $key сгенерирован и сохранён в $(basename "$env_file"). То же значение нужно указать на второй стороне split deployment." >&2
+    fi
+
+    printf '%s' "$prompt_value"
+}
+
+resolve_admin_backend_base_url() {
+    local svc_dir="$1"
+    local backend_host="$2"
+    local env_file="$svc_dir/.env"
+    local current_url scheme port derived_url prompt_url
+
+    current_url="$(get_env_value "$env_file" "ADMIN_BACKEND_BASE_URL")"
+    current_url="${current_url%/}"
+    scheme="$(extract_http_url_scheme "$current_url")"
+    port="$(extract_http_url_port "$current_url")"
+    scheme="${scheme:-https}"
+    port="${port:-8443}"
+    derived_url="${scheme}://${backend_host}:${port}"
+
+    if [[ -n "$current_url" ]]; then
+        if [[ "$current_url" =~ ^https?://${backend_host}(:[0-9]+)?/?$ ]]; then
+            printf '%s' "$current_url"
+            return 0
+        fi
+
+        if [[ -t 0 ]]; then
+            info "[microservice_admin] Текущий ADMIN_BACKEND_BASE_URL: $current_url" >&2
+            read -rp "[microservice_admin] Введите ADMIN_BACKEND_BASE_URL [$derived_url]: " prompt_url
+            prompt_url="${prompt_url:-$derived_url}"
+        else
+            prompt_url="$derived_url"
+        fi
+    else
+        if [[ -t 0 ]]; then
+            info "[microservice_admin] ADMIN_BACKEND_BASE_URL не задан — настроим split HTTPS endpoint." >&2
+            read -rp "[microservice_admin] Введите ADMIN_BACKEND_BASE_URL [$derived_url]: " prompt_url
+            prompt_url="${prompt_url:-$derived_url}"
+        else
+            prompt_url="$derived_url"
+        fi
+    fi
+
+    prompt_url="$(printf '%s' "$prompt_url" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    prompt_url="${prompt_url%/}"
+    validate_backend_base_url "$prompt_url"
+    printf '%s' "$prompt_url"
+}
+
+resolve_backend_public_base_url() {
+    local env_file="$1"
+    local current_url prompt_url=""
+
+    current_url="$(get_env_value "$env_file" "PUBLIC_DOWNLOAD_BASE_URL")"
+    current_url="${current_url%/}"
+
+    if [[ -n "$current_url" && "$current_url" != "http://localhost:8501" ]]; then
+        validate_backend_base_url "$current_url"
+        printf '%s' "$current_url"
+        return 0
+    fi
+
+    [[ -t 0 ]] || fail "[backend-host] PUBLIC_DOWNLOAD_BASE_URL не задан. Запусти интерактивно или заранее заполни $env_file"
+
+    info "[backend-host] Нужен внешний base URL backend-host для HTTPS admin facade и прямых downloads." >&2
+    while [[ -z "$prompt_url" ]]; do
+        read -rp "[backend-host] Введите backend public base URL (например https://backend.example.com:8443): " prompt_url
+        prompt_url="$(printf '%s' "$prompt_url" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+        prompt_url="${prompt_url%/}"
+        [[ -z "$prompt_url" ]] && warn "[backend-host] Base URL не может быть пустым." >&2
+    done
+
+    validate_backend_base_url "$prompt_url"
+    printf '%s' "$prompt_url"
+}
+
+configure_backend_http_facade_env() {
+    local infra_svc_dir gateway_svc_dir data_svc_dir infra_env gateway_env data_env
+    local public_base_url shared_token backend_port
+
+    infra_svc_dir="$(get_service_directory "microservice_infra")"
+    gateway_svc_dir="$(get_service_directory "microservice_gateway")"
+    data_svc_dir="$(get_service_directory "microservice_data")"
+
+    infra_env="$(ensure_env_file "$infra_svc_dir")"
+    gateway_env="$(ensure_env_file "$gateway_svc_dir")"
+    data_env="$(ensure_env_file "$data_svc_dir")"
+
+    public_base_url="$(resolve_backend_public_base_url "$data_env")"
+    shared_token="$(resolve_secret_env_value "$gateway_env" "ADMIN_SHARED_TOKEN" "microservice_gateway")"
+    backend_port="$(infer_http_url_port "$public_base_url")"
+
+    set_env_value "$data_env" "PUBLIC_DOWNLOAD_BASE_URL" "$public_base_url"
+    set_env_value "$gateway_env" "ADMIN_SHARED_TOKEN" "$shared_token"
+    set_env_value "$infra_env" "ADMIN_BACKEND_PORT" "$backend_port"
+
+    success "[backend-host] HTTP admin facade env настроены: PUBLIC_DOWNLOAD_BASE_URL=$public_base_url, ADMIN_BACKEND_PORT=$backend_port."
+}
+
 resolve_admin_online_backend_host() {
     local svc_dir="$1"
     local explicit_backend_host="${2:-}"
@@ -252,8 +426,10 @@ configure_admin_online_env() {
         cp "$env_example" "$env_file"
     fi
 
-    local backend_host
+    local backend_host admin_backend_base_url admin_backend_shared_token
     backend_host="$(resolve_admin_online_backend_host "$svc_dir" "$explicit_backend_host")"
+    admin_backend_base_url="$(resolve_admin_backend_base_url "$svc_dir" "$backend_host")"
+    admin_backend_shared_token="$(resolve_secret_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "microservice_admin")"
 
     set_env_value "$env_file" "ONLINE_BACKEND_HOST" "$backend_host"
     set_env_value "$env_file" "ONLINE_KAFKA_BOOTSTRAP_SERVERS" "$backend_host:9092"
@@ -261,8 +437,10 @@ configure_admin_online_env() {
     set_env_value "$env_file" "ONLINE_ACCOUNT_URL" "$backend_host:7510"
     set_env_value "$env_file" "ONLINE_GATEWAY_URL" "$backend_host:7520"
     set_env_value "$env_file" "ONLINE_MINIO_URL" "$backend_host:9000"
+    set_env_value "$env_file" "ADMIN_BACKEND_BASE_URL" "$admin_backend_base_url"
+    set_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "$admin_backend_shared_token"
 
-    success "[microservice_admin] ONLINE_* настроены на backend-host $backend_host."
+    success "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_* для $admin_backend_base_url"
 }
 
 # ── Очистка dangling-образов ──────────────────────────────────────────────────
@@ -611,6 +789,7 @@ else
     if [[ ${#selected_services[@]} -gt 1 && "$dispatch_mode" != "logs" ]]; then
         if [[ " ${selected_services[*]} " == *" microservice_infra "* ]]; then
             if [[ "$MODE" == "noadmin" ]]; then
+                configure_backend_http_facade_env
                 configure_backend_vpn_env || true
             fi
             start_service "microservice_infra" "$dispatch_mode"

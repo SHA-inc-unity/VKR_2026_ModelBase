@@ -144,10 +144,11 @@ cd /path/to/ModelLine/microservicestarter
 
 Host-specific настройки хранятся в `.env` конкретного сервиса:
 
-- `microservice_infra/.env` — внешний advertise path и bind address инфраструктуры
+- `microservice_infra/.env` — внешний advertise path, bind address инфраструктуры и TLS-port backend facade (`ADMIN_BACKEND_PORT`)
 - `microservice_account/.env` — bind address и порт account API
-- `microservice_gateway/.env` — bind address и порт gateway API
-- `microservice_admin/.env` — `ONLINE_BACKEND_HOST` и derived `ONLINE_*` для remote admin-head
+- `microservice_gateway/.env` — bind address, порт gateway API и `ADMIN_SHARED_TOKEN` для admin facade
+- `microservice_data/.env` — `PUBLIC_DOWNLOAD_BASE_URL` для browser-facing download origin
+- `microservice_admin/.env` — `ONLINE_BACKEND_HOST`, derived `ONLINE_*`, `ADMIN_BACKEND_BASE_URL` и `ADMIN_BACKEND_SHARED_TOKEN` для remote admin-head
 
 Правила:
 
@@ -157,7 +158,8 @@ Host-specific настройки хранятся в `.env` конкретног
 - для backend-host `REDPANDA_EXTERNAL_HOST` должен совпадать с тем WG/private адресом, который использует admin-host для `ONLINE_KAFKA_BOOTSTRAP_SERVERS`
 - для ограничения publish-ed private ports на backend-host используй bind-address переменные `REDPANDA_BIND_ADDR`, `MINIO_BIND_ADDR`, `ACCOUNT_BIND_ADDR`, `GATEWAY_BIND_ADDR`
 - в контейнерном VPN-сценарии shell launcher `noadmin` теперь сам выставляет `REDPANDA_EXTERNAL_HOST` и эти `*_BIND_ADDR` на `10.44.0.1` до рестарта backend-сервисов
-- самый безопасный путь для admin-host — передавать backend адрес аргументом launcher-а (`./start.sh all onlyadmin 10.44.0.1` / `./restart.sh all onlyadmin 10.44.0.1`), а не редактировать все `ONLINE_*` вручную
+- launcher для split deployment теперь сам спрашивает недостающие значения: backend-host на `onlyadmin`, `ADMIN_BACKEND_BASE_URL` и недостающий shared token на admin-host, а на backend-host в `noadmin` — browser-facing base URL, `ADMIN_SHARED_TOKEN` и `ADMIN_BACKEND_PORT`
+- самый безопасный путь для admin-host — передавать backend адрес аргументом launcher-а (`./start.sh all onlyadmin 10.44.0.1` / `./restart.sh all onlyadmin 10.44.0.1`), а не редактировать вручную `ONLINE_*` и `ADMIN_BACKEND_*`
 
 ## Документация для агентов
 

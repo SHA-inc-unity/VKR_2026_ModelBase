@@ -28,6 +28,8 @@ services:
       REDPANDA_ADMIN_URL: ${REDPANDA_ADMIN_URL:-redpanda:9644}
       ACCOUNT_URL: ${ACCOUNT_URL:-account_service_api:5000}
       GATEWAY_URL: ${GATEWAY_URL:-exchange-gateway:5020}
+      ADMIN_BACKEND_BASE_URL: ${ADMIN_BACKEND_BASE_URL:-}
+      ADMIN_BACKEND_SHARED_TOKEN: ${ADMIN_BACKEND_SHARED_TOKEN:-}
       BACKEND_CONNECTION_TARGET: localhost
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # MinIO URL used by /api/health liveness probe.
@@ -56,6 +58,8 @@ services:
       REDPANDA_ADMIN_URL: ${ONLINE_REDPANDA_ADMIN_URL:-localhost:9644}
       ACCOUNT_URL: ${ONLINE_ACCOUNT_URL:-localhost:7510}
       GATEWAY_URL: ${ONLINE_GATEWAY_URL:-localhost:7520}
+      ADMIN_BACKEND_BASE_URL: ${ADMIN_BACKEND_BASE_URL:-}
+      ADMIN_BACKEND_SHARED_TOKEN: ${ADMIN_BACKEND_SHARED_TOKEN:-}
       BACKEND_CONNECTION_TARGET: ${ONLINE_BACKEND_HOST:-localhost}
       REDIS_URL: ${ONLINE_REDIS_URL:-}
       # Used only by /api/health; may point to a remote MinIO endpoint.

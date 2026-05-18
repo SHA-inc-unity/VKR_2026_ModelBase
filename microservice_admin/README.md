@@ -60,7 +60,7 @@ UI живёт только на отдельном admin-host.
 
 Но при реальном split deployment их нужно переопределять на адрес backend-хоста, например `95.165.27.159:7510` и `95.165.27.159:7520` или на WG/private address.
 
-Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST` и автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`.
+Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST`, автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`, предлагает `ADMIN_BACKEND_BASE_URL` с default `https://<host>:8443` и спрашивает `ADMIN_BACKEND_SHARED_TOKEN`, только если он ещё не задан.
 
 **Containerized VPN (рекомендуется):** при запуске backend в режиме `noadmin` с заданным `VPN_SERVER_URL` в `microservice_infra/.env`, launcher автоматически поднимает WireGuard-сервер, WebSocket/TCP transport на `8443` и печатает **join token** (base64-строку). На admin-хосте достаточно:
 
