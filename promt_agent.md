@@ -10,6 +10,11 @@
 
 ## Текущий контекст
 
+### 2026-05-19
+
+- `microservice_admin`: добавлена страница `/logs` шестым пунктом sidebar после Anomaly. Она читает process-local admin runtime log buffer через `/api/logs`, автообновляется, умеет запускать быстрый connectivity check и показывает source/event/level/details без token/payload.
+- `microservice_admin/src/lib/adminRuntimeLog.ts`: server-only ring buffer последних admin diagnostics; `/api/health`, `/api/kafka` и `backendClient.ts` пишут туда те же этапы, которые печатают в container logs.
+
 ### 2026-05-18
 
 - Split deployment стандартизирован на один маршрут: backend HTTPS facade на `:8443` через `ADMIN_BACKEND_BASE_URL` и `ADMIN_SHARED_TOKEN`.

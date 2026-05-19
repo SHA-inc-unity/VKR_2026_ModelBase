@@ -4,6 +4,10 @@
 
 ## 2026-05
 
+### 2026-05-19
+
+- `microservice_admin/src/components/Sidebar.tsx`, `src/app/logs/page.tsx`, `src/app/api/logs/route.ts`, `src/lib/adminRuntimeLog.ts`: в админку добавлен шестой пункт меню **Logs**. Страница показывает process-local runtime diagnostics из admin (`/api/health`, `/api/kafka`, `backendClient.ts`), умеет запускать быстрый health/data/analytics check и не сохраняет token/payload.
+
 ### 2026-05-18
 
 - `microservicestarter/start.sh`, `microservicestarter/restart.sh`, `microservicestarter/start.ps1`, `microservicestarter/restart.ps1`: launcher закреплён за одним split deployment path через backend HTTPS facade и сам собирает недостающие `ONLINE_*`, `ADMIN_BACKEND_BASE_URL`, `ADMIN_BACKEND_SHARED_TOKEN`, `PUBLIC_DOWNLOAD_BASE_URL`, `ADMIN_SHARED_TOKEN`, `ADMIN_BACKEND_PORT`.

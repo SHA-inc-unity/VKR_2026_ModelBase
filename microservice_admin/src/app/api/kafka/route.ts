@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { kafkaRequest } from '@/lib/kafka';
 import { coalesce, coalesceTtlFor, makeKey } from '@/lib/kafkaCoalesce';
 import { isSplitMode, backendCall, BackendClientError } from '@/lib/backendClient';
+import { writeAdminRuntimeLog } from '@/lib/adminRuntimeLog';
 
 /**
  * POST /api/kafka
@@ -31,6 +32,13 @@ export async function POST(req: NextRequest) {
 
     if (!topic || typeof topic !== 'string') {
       console.warn('[api/kafka] invalid-request', { bodyKeys: Object.keys(body ?? {}) });
+      writeAdminRuntimeLog({
+        level: 'warn',
+        source: 'api/kafka',
+        event: 'invalid-request',
+        message: 'topic is required',
+        fields: { bodyKeys: Object.keys(body ?? {}) },
+      });
       return NextResponse.json({ error: 'topic is required' }, { status: 400 });
     }
 
@@ -43,6 +51,19 @@ export async function POST(req: NextRequest) {
       callerCorrelationId: correlationId ?? null,
       coalesceTtlMs: ttl,
       payloadKeys: payload ? Object.keys(payload) : [],
+    });
+    writeAdminRuntimeLog({
+      level: 'info',
+      source: 'api/kafka',
+      event: 'request:start',
+      fields: {
+        topic,
+        splitMode: isSplitMode,
+        timeoutMs: timeoutMs ?? null,
+        callerCorrelationId: correlationId ?? null,
+        coalesceTtlMs: ttl,
+        payloadKeys: payload ? Object.keys(payload) : [],
+      },
     });
 
     if (isSplitMode) {
@@ -59,6 +80,12 @@ export async function POST(req: NextRequest) {
         splitMode: true,
         durationMs: Date.now() - startedAt,
         responseKeys: Object.keys(data),
+      });
+      writeAdminRuntimeLog({
+        level: 'success',
+        source: 'api/kafka',
+        event: 'request:success',
+        fields: { topic, splitMode: true, durationMs: Date.now() - startedAt, responseKeys: Object.keys(data) },
       });
       return NextResponse.json({ data });
     }
@@ -77,6 +104,12 @@ export async function POST(req: NextRequest) {
       durationMs: Date.now() - startedAt,
       responseKeys: Object.keys(data),
     });
+    writeAdminRuntimeLog({
+      level: 'success',
+      source: 'api/kafka',
+      event: 'request:success',
+      fields: { topic, splitMode: false, durationMs: Date.now() - startedAt, responseKeys: Object.keys(data) },
+    });
     return NextResponse.json({ data });
   } catch (err) {
     if (err instanceof BackendClientError) {
@@ -87,6 +120,19 @@ export async function POST(req: NextRequest) {
         detail: err.detail,
         correlationId: err.correlationId,
         durationMs: Date.now() - startedAt,
+      });
+      writeAdminRuntimeLog({
+        level: 'error',
+        source: 'api/kafka',
+        event: 'request:backend-error',
+        message: err.message,
+        fields: {
+          status,
+          code: err.code,
+          detail: err.detail,
+          correlationId: err.correlationId,
+          durationMs: Date.now() - startedAt,
+        },
       });
       return NextResponse.json({
         error: err.message,
@@ -100,6 +146,13 @@ export async function POST(req: NextRequest) {
     console.error('[api/kafka] request:unexpected-error', {
       message,
       durationMs: Date.now() - startedAt,
+    });
+    writeAdminRuntimeLog({
+      level: 'error',
+      source: 'api/kafka',
+      event: 'request:unexpected-error',
+      message,
+      fields: { durationMs: Date.now() - startedAt },
     });
     return NextResponse.json({ error: message }, { status: 500 });
   }

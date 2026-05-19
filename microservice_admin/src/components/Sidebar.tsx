@@ -9,6 +9,7 @@ import {
   BrainCircuit,
   GitCompare,
   ShieldAlert,
+  ScrollText,
   Zap,
   ChevronLeft,
   ChevronRight,
@@ -24,6 +25,7 @@ const NAV_KEYS = [
   { href: '/train',    key: 'nav.train'     as const, icon: BrainCircuit },
   { href: '/compare',  key: 'nav.compare'   as const, icon: GitCompare },
   { href: '/anomaly',  key: 'nav.anomaly'   as const, icon: ShieldAlert },
+  { href: '/logs',     key: 'nav.logs'      as const, icon: ScrollText },
 ] as const;
 
 type Mode = 'expanded-collapsible' | 'icon-only' | 'bottom-nav';

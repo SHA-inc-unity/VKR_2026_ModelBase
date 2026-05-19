@@ -1,6 +1,6 @@
 /**
  * Flat translation dictionary for the admin panel.
- * Keys use dot-notation groups: nav.*, dashboard.*, dataset.*, train.*, compare.*, anomaly.*
+ * Keys use dot-notation groups: nav.*, dashboard.*, dataset.*, train.*, compare.*, anomaly.*, logs.*
  */
 
 export type Locale = 'en' | 'ru';
@@ -13,6 +13,7 @@ const translations = {
     'nav.train':     'Train',
     'nav.compare':   'Compare',
     'nav.anomaly':   'Anomaly',
+    'nav.logs':      'Logs',
     'nav.kafka':     'Kafka',
 
     // ── Common ───────────────────────────────────────────────────────────
@@ -109,6 +110,20 @@ const translations = {
     'anomaly.page':          'Page',
     'anomaly.cleanApply':    'Apply Clean',
     'anomaly.cleaning':      'Cleaning…',
+
+    // ── Logs ─────────────────────────────────────────────────────────────
+    'logs.title':       'Logs',
+    'logs.events':      'Runtime Events',
+    'logs.totalEvents': 'Total Events',
+    'logs.warnings':    'Warnings',
+    'logs.errors':      'Errors',
+    'logs.runCheck':    'Run Check',
+    'logs.clear':       'Clear',
+    'logs.level':       'Level',
+    'logs.source':      'Source',
+    'logs.event':       'Event',
+    'logs.details':     'Details',
+    'logs.noEvents':    'No events',
   },
 
   ru: {
@@ -118,6 +133,7 @@ const translations = {
     'nav.train':     'Обучение',
     'nav.compare':   'Сравнение',
     'nav.anomaly':   'Аномалии',
+    'nav.logs':      'Логи',
     'nav.kafka':     'Kafka',
 
     // ── Common ───────────────────────────────────────────────────────────
@@ -214,6 +230,20 @@ const translations = {
     'anomaly.page':          'Страница',
     'anomaly.cleanApply':    'Применить очистку',
     'anomaly.cleaning':      'Очищаю…',
+
+    // ── Logs ─────────────────────────────────────────────────────────────
+    'logs.title':       'Логи',
+    'logs.events':      'События runtime',
+    'logs.totalEvents': 'Всего событий',
+    'logs.warnings':    'Предупреждения',
+    'logs.errors':      'Ошибки',
+    'logs.runCheck':    'Проверить',
+    'logs.clear':       'Очистить',
+    'logs.level':       'Уровень',
+    'logs.source':      'Источник',
+    'logs.event':       'Событие',
+    'logs.details':     'Детали',
+    'logs.noEvents':    'Событий нет',
   },
 } as const;
 

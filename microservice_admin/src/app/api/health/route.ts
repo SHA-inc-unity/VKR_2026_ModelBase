@@ -10,6 +10,7 @@
  * reachability status.
  */
 import { probeKafkaConnectivity } from '@/lib/kafka';
+import { writeAdminRuntimeLog } from '@/lib/adminRuntimeLog';
 import type { InfraHealthResponse, InfraServiceHealth } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -34,6 +35,12 @@ async function probe(url: string, label: string): Promise<InfraServiceHealth> {
       ok: res.ok,
       durationMs: Date.now() - startedAt,
     });
+    writeAdminRuntimeLog({
+      level: res.ok ? 'success' : 'warn',
+      source: 'api/health',
+      event: 'probe:response',
+      fields: { label, url, status: res.status, ok: res.ok, durationMs: Date.now() - startedAt },
+    });
     if (res.ok) return { status: 'online' };
     return { status: 'offline', error: `HTTP ${res.status}` };
   } catch (err) {
@@ -48,6 +55,13 @@ async function probe(url: string, label: string): Promise<InfraServiceHealth> {
       causeCode: cause?.code,
       causeMessage: cause?.message,
       durationMs: Date.now() - startedAt,
+    });
+    writeAdminRuntimeLog({
+      level: 'error',
+      source: 'api/health',
+      event: 'probe:error',
+      message: msg,
+      fields: { label, url, causeCode: cause?.code, causeMessage: cause?.message, durationMs: Date.now() - startedAt },
     });
     return { status: 'offline', error: msg };
   }
@@ -64,6 +78,18 @@ export async function GET(): Promise<Response> {
     adminBackendTlsInsecure,
     nodeTlsRejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED ?? '(unset)',
     kafkaBootstrapServers: KAFKA_BOOTSTRAP_SERVERS,
+  });
+  writeAdminRuntimeLog({
+    level: 'info',
+    source: 'api/health',
+    event: 'request:start',
+    fields: {
+      splitMode: adminBackendBaseUrl.length > 0,
+      adminBackendBaseUrl: adminBackendBaseUrl || '(empty)',
+      adminBackendTlsInsecure,
+      nodeTlsRejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED ?? '(unset)',
+      kafkaBootstrapServers: KAFKA_BOOTSTRAP_SERVERS,
+    },
   });
 
   // ── Split-deployment: only probe the backend HTTPS endpoint ───────────────
@@ -88,6 +114,13 @@ export async function GET(): Promise<Response> {
       status: backendProbe.status,
       error: backendProbe.error,
       durationMs: Date.now() - startedAt,
+    });
+    writeAdminRuntimeLog({
+      level: backendProbe.status === 'online' ? 'success' : 'error',
+      source: 'api/health',
+      event: 'request:split-result',
+      message: backendProbe.error,
+      fields: { status: backendProbe.status, durationMs: Date.now() - startedAt },
     });
     return Response.json(body);
   }
@@ -121,6 +154,19 @@ export async function GET(): Promise<Response> {
     account: body.account.status,
     gateway: body.gateway.status,
     durationMs: Date.now() - startedAt,
+  });
+  writeAdminRuntimeLog({
+    level: body.kafka.status === 'online' ? 'success' : 'warn',
+    source: 'api/health',
+    event: 'request:local-result',
+    fields: {
+      kafka: body.kafka.status,
+      redpanda: body.redpanda.status,
+      minio: body.minio.status,
+      account: body.account.status,
+      gateway: body.gateway.status,
+      durationMs: Date.now() - startedAt,
+    },
   });
 
   return Response.json(body);
