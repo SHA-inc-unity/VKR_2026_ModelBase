@@ -189,11 +189,14 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
             {
                 if (Volatile.Read(ref _isReplyInboxReady) == 0)
                 {
-                    await EnsureReplyInboxTopicAsync(ct);
+                    var topicReady = await EnsureReplyInboxTopicAsync(ct);
                     _consumer.Subscribe(_replyInbox);
                     Interlocked.Exchange(ref _isReplyInboxReady, 1);
                     _replyInboxReady.TrySetResult(true);
-                    _log.LogInformation("KafkaRequestClient started, reply inbox: {Inbox}", _replyInbox);
+                    _log.LogInformation(
+                        "KafkaRequestClient started, reply inbox: {Inbox}, topicReady={TopicReady}",
+                        _replyInbox,
+                        topicReady);
                 }
 
                 await ConsumeLoopAsync(ct);
@@ -307,7 +310,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
         _loopCts?.Dispose();
     }
 
-    private async Task EnsureReplyInboxTopicAsync(CancellationToken ct)
+    private async Task<bool> EnsureReplyInboxTopicAsync(CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + ReplyInboxStartupBudget;
 
@@ -316,7 +319,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
             _replyInbox,
             (int)ReplyInboxStartupBudget.TotalMilliseconds);
 
-        while (true)
+        while (DateTime.UtcNow < deadline)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -337,15 +340,15 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
 
                 _log.LogInformation("KafkaRequestClient created reply inbox topic {Inbox}", _replyInbox);
                 await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
-                return;
+                return true;
             }
             catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code == ErrorCode.TopicAlreadyExists))
             {
                 _log.LogDebug("KafkaRequestClient reply inbox topic already exists: {Inbox}", _replyInbox);
                 await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
-                return;
+                return true;
             }
-            catch (Exception ex) when (DateTime.UtcNow < deadline)
+            catch (Exception ex)
             {
                 _log.LogWarning(ex,
                     "KafkaRequestClient failed to create reply inbox {Inbox}; retrying",
@@ -353,5 +356,10 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
                 await Task.Delay(ReplyInboxRetryDelay, ct);
             }
         }
+
+        _log.LogWarning(
+            "KafkaRequestClient could not confirm reply inbox topic {Inbox} within startup budget; continuing with best-effort subscribe",
+            _replyInbox);
+        return false;
     }
 }

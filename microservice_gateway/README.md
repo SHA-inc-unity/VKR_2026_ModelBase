@@ -10,8 +10,10 @@ request/reply on a per-instance `reply.gateway.{instanceId}` inbox).
 Gateway bootstrap-ит этот reply-inbox topic через Kafka Admin API в
 background-loop и подписывается на него сразу после готовности. Если Kafka
 временно недоступна или controller/leader ещё не поднялся, процесс gateway
-не падает и `/health` остаётся доступен; Kafka-facing запросы просто ждут
-готовность reply inbox в пределах собственного timeout.
+не падает и `/health` остаётся доступен. Если Kafka Admin create не успел
+подтвердить topic в пределах startup budget, gateway всё равно продолжает с
+best-effort subscribe на reply inbox вместо бесконечной блокировки всех
+Kafka-facing запросов состоянием `reply inbox not ready`.
 Для live-диагностики gateway пишет связку логов `AdminFacade request ...`
 и `KafkaRequest ...` с `topic`, HTTP path, `replyInbox`, duration,
 timeout и `correlationId`; payload и shared token не логируются.
