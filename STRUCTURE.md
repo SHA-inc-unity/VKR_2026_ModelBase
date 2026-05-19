@@ -63,7 +63,7 @@
 | `microservice_infra/` | Shared инфраструктура: Redpanda + MinIO + nginx ingress + one-shot TLS bootstrap |
 | `microservice_analitic/` | ML-сервис: обучение, прогнозы (Python) |
 | `microservice_data/` | Data-сервис: PostgreSQL + Kafka (C#/.NET 8) |
-| `microservice_admin/` | Admin UI: Next.js + Kafka (TypeScript) |
+| `microservice_admin/` | Admin UI: Next.js + Kafka + SQLite state (TypeScript) |
 | `microservice_account/` | Auth-сервис: JWT, аккаунты (C#/.NET 8) |
 | `microservice_gateway/` | Mobile BFF Gateway (C#/.NET 8) |
 | `shared/` | Общий Python-пакет `modelline_shared` (Kafka client, schemas) |
@@ -401,11 +401,11 @@
 
 ## microservice_admin/
 
-**Стек:** Next.js 14, React 18, TypeScript, Tailwind, kafkajs  
+**Стек:** Next.js 14, React 18, TypeScript, Tailwind, kafkajs, node:sqlite  
 **Порт:** `3000`  
 **Детали:** [microservice_admin/STRUCTURE.md](microservice_admin/STRUCTURE.md)
 
-Admin UI. Общается с `data` и `analytics` через Kafka (via server-side Route Handler proxy).
+Admin UI. Общается с `data` и `analytics` через Kafka (via server-side Route Handler proxy) и хранит persistent UI state/queue history в SQLite.
 
 ---
 

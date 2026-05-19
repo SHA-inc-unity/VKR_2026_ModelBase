@@ -44,6 +44,19 @@ public sealed partial class KafkaConsumerService
             ? paramsElement.GetRawText()
             : "{}";
 
+        if (type == DatasetJobType.Ingest)
+        {
+            var exchange = TryGetString(paramsElement, "exchange") ?? "bybit";
+            if (!string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase))
+            {
+                return new
+                {
+                    error = $"unsupported exchange: {exchange}",
+                    code = "unsupported_exchange",
+                };
+            }
+        }
+
         // For ingest jobs we ALWAYS know the target table from
         // (target_symbol, target_timeframe) — derive it here so the
         // scheduler can take a per-table lock and run ingests for

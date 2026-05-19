@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { cacheGet, cacheSet } from '@/lib/redisCache';
+import { readStoredValue, writeStoredValue } from '@/lib/sqliteStore';
 
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get('key');
   if (!key) {
     return NextResponse.json({ error: 'Missing key' }, { status: 400 });
   }
-  const value = await cacheGet(key);
+  const value = readStoredValue(key);
   return NextResponse.json({ value });
 }
 
@@ -28,6 +28,6 @@ export async function POST(req: NextRequest) {
   }
   const ttlSeconds = typeof ttl === 'number' && ttl > 0 ? ttl : 3600;
 
-  await cacheSet(key, value, ttlSeconds);
+  writeStoredValue(key, value, ttlSeconds);
   return NextResponse.json({ ok: true });
 }

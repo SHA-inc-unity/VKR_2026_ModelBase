@@ -48,7 +48,7 @@
 
 ### Ingest pipeline (`cmd.data.dataset.ingest`)
 
-Payload: `{ symbol, timeframe, start_ms, end_ms }`. The handler:
+Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handler currently supports only `bybit`; dataset jobs that request any other exchange are rejected early with `{ error, code: "unsupported_exchange" }`. The handler:
 
 1. Resolves the timeframe (alias-aware) and the canonical table name
    `{symbol}_{timeframe}` in `crypt_date`.
@@ -370,6 +370,7 @@ timeout). It always returns one of:
 | `{ job_id, status, deduped, job }` | Success or dedup hit |
 | `{ error, code: "schema_not_ready" }` | DB unreachable at startup |
 | `{ error, code: "bad_request" }` | Missing/invalid `type` or arguments |
+| `{ error, code: "unsupported_exchange" }` | Ingest job requested exchange other than `bybit` |
 | `{ error, code: "invalid_state" }` | Unexpected `InvalidOperationException` |
 | `{ error, code: "db_unavailable" }` | Connection-level DB failure (`NpgsqlException`) |
 | `{ error, code: "pg_<SQLSTATE>" }` | Other Postgres failure |

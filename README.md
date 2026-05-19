@@ -10,7 +10,7 @@
 | ------ | ---------- | ----- | -------- |
 | [microservice_infra](microservice_infra/README.md) | Docker Compose, Redpanda, MinIO, Nginx | `9092`, `8080`, `9000`, `9001`, `8501`, `8443` | Общая инфраструктура платформы: Kafka, S3 claim-check, локальный ingress/download endpoint backend-стека и HTTPS admin facade для split deployment |
 | [microservice_data](microservice_data/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Kafka, MinIO | `8100` | Владелец рыночных данных, датасета, export и фоновых jobs |
-| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, Redis | `3000` (local stack), `80/443` (`onlyadmin` public proxy) | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов. В local-стеке идёт через infra-nginx, в split deployment публикуется как отдельная online-head нода с TLS proxy на `/admin` |
+| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, SQLite | `3000` (local stack), `80/443` (`onlyadmin` public proxy) | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов. В local-стеке идёт через infra-nginx, в split deployment публикуется как отдельная online-head нода с TLS proxy на `/admin` |
 | [microservice_analitic](microservice_analitic/README.md) | Python 3.12, CatBoost, FastAPI, PostgreSQL, Redis | API: `8000` | ML-сервис: обучение, прогнозы, аналитика рынка |
 | [microservice_account](microservice_account/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Redis | `7510` | Сервис аутентификации и управления аккаунтами (Clean Architecture) |
 | [microservice_gateway](microservice_gateway/README.md) | .NET 8, ASP.NET Core | `7520` | Mobile BFF Gateway — маршрутизация и агрегация запросов |
@@ -39,7 +39,7 @@
 │
 ├── microservice_infra/          # Redpanda + MinIO + Nginx + shared network
 ├── microservice_data/           # Data service (.NET 8, PostgreSQL, Kafka jobs)
-├── microservice_admin/          # Admin UI (Next.js, Kafka, Redis)
+├── microservice_admin/          # Admin UI (Next.js, Kafka, SQLite state)
 ├── microservice_analitic/       # ML service (Python, FastAPI, training, anomaly)
 ├── microservice_account/        # Auth service (.NET 8, JWT, PostgreSQL)
 ├── microservice_gateway/        # Mobile BFF gateway (.NET 8)
@@ -308,8 +308,13 @@ Launcher также умеет принять один backend host/IP для `o
 
 ## Локальное хранение runtime-данных
 
-Runtime-данные stateful Docker-сервисов по умолчанию хранятся в каталоге
-репозитория `.runtime-data/`, а не в Docker named volumes:
+Runtime-данные большинства stateful Docker-сервисов по умолчанию хранятся в
+каталоге репозитория `.runtime-data/`, а не в Docker named volumes. Текущее
+исключение — `microservice_admin`: его persistent state лежит в SQLite-файле
+`/app/.runtime-data/admin-state.sqlite` внутри named volumes
+`admin_sqlite_data` и `admin_online_sqlite_data`.
+
+Repo-local bind mounts по умолчанию используются для:
 
 - `.runtime-data/microservice_infra/redpanda`
 - `.runtime-data/microservice_infra/minio`
@@ -321,7 +326,8 @@ Runtime-данные stateful Docker-сервисов по умолчанию х
 
 `.runtime-data/` уже исключён из git через `.gitignore`, а
 `microservicestarter stop ... clean` для этих сервисов удаляет и Docker
-volumes, и соответствующие каталоги внутри `.runtime-data/`.
+volumes, и соответствующие каталоги внутри `.runtime-data/`, включая admin
+named volumes с SQLite state.
 
 На Linux launcher (`start.sh` / `restart.sh`) дополнительно сам создаёт эти
 каталоги перед `docker compose up` и нормализует права записи для bind mounts,

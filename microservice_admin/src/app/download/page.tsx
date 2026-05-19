@@ -46,9 +46,17 @@ const CoverageBar = dynamic(
 );
 
 const PARAMS_KEY = 'modelline:params:dataset';
+const PARAMS_TTL = 60 * 60 * 24 * 365 * 5;
 const CACHE_TABLES_KEY         = 'modelline:dataset-tables:v1';
 const CACHE_TABLES_TTL         = 3600; // 60 minutes
 const CACHE_COVERAGE_TTL       = 1800; // 30 minutes
+const EXCHANGES = [
+  { value: 'bybit', label: 'Bybit' },
+  { value: 'binance', label: 'Binance' },
+  { value: 'kraken', label: 'Kraken' },
+] as const;
+type DatasetExchange = typeof EXCHANGES[number]['value'];
+
 function coverageCacheKey(symbol: string, timeframe: string) {
   return `modelline:dataset-coverage:v1:${symbol}:${timeframe}`;
 }
@@ -60,7 +68,16 @@ function todayStr() { return new Date().toISOString().slice(0, 10); }
 function daysAgoStr(n: number) {
   const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10);
 }
-function loadParams() {
+
+interface DatasetPageParams {
+  symbol?: string;
+  timeframe?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  exchange?: DatasetExchange;
+}
+
+function loadParams(): DatasetPageParams | null {
   if (typeof window === 'undefined') return null;
   try { const r = localStorage.getItem(PARAMS_KEY); return r ? JSON.parse(r) : null; }
   catch { return null; }
@@ -478,11 +495,38 @@ export default function DatasetPage() {
   const [timeframe, setTimeframe] = useState<string>(saved.current?.timeframe ?? '5m');
   const [dateFrom,  setDateFrom]  = useState<string>(saved.current?.dateFrom  ?? daysAgoStr(90));
   const [dateTo,    setDateTo]    = useState<string>(saved.current?.dateTo    ?? todayStr());
+  const [exchange,  setExchange]  = useState<DatasetExchange>(saved.current?.exchange ?? 'bybit');
+  const [paramsHydrated, setParamsHydrated] = useState(saved.current !== null);
 
   useEffect(() => {
-    try { localStorage.setItem(PARAMS_KEY, JSON.stringify({ symbol, timeframe, dateFrom, dateTo })); }
+    if (saved.current !== null) return;
+
+    let cancelled = false;
+    void cacheRead<DatasetPageParams>(PARAMS_KEY).then((cached) => {
+      if (cancelled) return;
+      if (cached?.symbol && SYMBOLS.includes(cached.symbol as typeof SYMBOLS[number])) setSymbol(cached.symbol);
+      if (cached?.timeframe && TIMEFRAMES_ALL.includes(cached.timeframe as typeof TIMEFRAMES_ALL[number])) setTimeframe(cached.timeframe);
+      if (typeof cached?.dateFrom === 'string' && cached.dateFrom.length > 0) setDateFrom(cached.dateFrom);
+      if (typeof cached?.dateTo === 'string' && cached.dateTo.length > 0) setDateTo(cached.dateTo);
+      if (cached?.exchange && EXCHANGES.some((item) => item.value === cached.exchange)) setExchange(cached.exchange);
+      setParamsHydrated(true);
+    }).catch(() => {
+      if (!cancelled) setParamsHydrated(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!paramsHydrated) return;
+
+    const nextParams: DatasetPageParams = { symbol, timeframe, dateFrom, dateTo, exchange };
+    try { localStorage.setItem(PARAMS_KEY, JSON.stringify(nextParams)); }
     catch { /* ignore */ }
-  }, [symbol, timeframe, dateFrom, dateTo]);
+    void cacheWrite(PARAMS_KEY, nextParams, PARAMS_TTL);
+  }, [paramsHydrated, symbol, timeframe, dateFrom, dateTo, exchange]);
 
   // On mount: restore tables from cache immediately
   useEffect(() => {
@@ -1000,8 +1044,9 @@ export default function DatasetPage() {
               Topics.CMD_DATA_DATASET_JOBS_START,
               {
                 type: 'ingest',
-                params: { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs },
+                params: { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs, exchange },
                 target_symbol: symbol, target_timeframe: tf,
+                target_exchange: exchange,
                 target_start_ms: startMs, target_end_ms: endMs,
                 created_by: 'admin_ui',
               },
@@ -1043,7 +1088,7 @@ export default function DatasetPage() {
         keepIngestBusy = Object.keys(newJobIds).length > 0;
         addEntry({
           action: 'Download',
-          params: { symbol, timeframe: 'ALL', dateFrom, dateTo },
+          params: { symbol, timeframe: 'ALL', exchange, dateFrom, dateTo },
           result: `Started ${Object.keys(newJobIds).length} ingest jobs`,
           durationMs: Date.now() - t0,
         });
@@ -1064,8 +1109,9 @@ export default function DatasetPage() {
           Topics.CMD_DATA_DATASET_JOBS_START,
           {
             type: 'ingest',
-            params: { symbol, timeframe, start_ms: _sMs, end_ms: _eMs },
+            params: { symbol, timeframe, start_ms: _sMs, end_ms: _eMs, exchange },
             target_symbol: symbol, target_timeframe: timeframe,
+            target_exchange: exchange,
             target_start_ms: _sMs, target_end_ms: _eMs,
             created_by: 'admin_ui',
           },
@@ -1089,7 +1135,7 @@ export default function DatasetPage() {
         }
         addEntry({
           action: 'Download',
-          params: { symbol, timeframe, dateFrom, dateTo },
+          params: { symbol, timeframe, exchange, dateFrom, dateTo },
           result: `Job ${res.job_id.slice(0, 8)} started`,
           durationMs: Date.now() - t0,
         });
@@ -1099,7 +1145,7 @@ export default function DatasetPage() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast(msg, 'error');
-      addEntry({ action: 'Download', params: { symbol, timeframe, dateFrom, dateTo }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
+      addEntry({ action: 'Download', params: { symbol, timeframe, exchange, dateFrom, dateTo }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
     } finally {
       if (!keepIngestBusy) {
         operationLockRef.current = false;
@@ -1587,10 +1633,22 @@ export default function DatasetPage() {
                 {loadingCov ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                 Check Coverage
               </Button>
-              <Button onClick={handleIngest} disabled={isBusy} className="w-full gap-2">
-                <DownloadCloud className="w-3.5 h-3.5" />
-                Ingest from Bybit
-              </Button>
+              <div className="flex gap-2">
+                <Button onClick={handleIngest} disabled={isBusy} className="min-w-0 flex-1 gap-2">
+                  <DownloadCloud className="w-3.5 h-3.5" />
+                  Ingest
+                </Button>
+                <Select value={exchange} onValueChange={(value) => setExchange(value as DatasetExchange)}>
+                  <SelectTrigger className="w-36 shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EXCHANGES.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               <Button onClick={handleListTables} disabled={isBusy} variant="secondary" className="w-full gap-2">
                 {loadingList ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
                 List Tables
@@ -2226,7 +2284,7 @@ export default function DatasetPage() {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {h.params.symbol} {h.params.timeframe}
+                      {h.params.symbol} {h.params.timeframe}{h.params.exchange ? ` · ${h.params.exchange}` : ''}
                     </TableCell>
                     <TableCell className="text-xs max-w-xs truncate">{h.result}</TableCell>
                     <TableCell className="text-xs text-right text-muted-foreground">{h.durationMs}</TableCell>

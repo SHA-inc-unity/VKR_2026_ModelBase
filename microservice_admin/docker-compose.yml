@@ -34,12 +34,14 @@ services:
       ADMIN_BACKEND_SHARED_TOKEN: ${ADMIN_BACKEND_SHARED_TOKEN:-}
       ADMIN_BACKEND_TLS_INSECURE: ${ADMIN_BACKEND_TLS_INSECURE:-0}
       BACKEND_CONNECTION_TARGET: localhost
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SQLITE_DB_PATH: /app/.runtime-data/admin-state.sqlite
       # MinIO URL used by /api/health liveness probe.
       MINIO_URL: ${MINIO_URL:-minio:9000}
       NODE_ENV: production
     expose:
       - "3000"
+    volumes:
+      - admin_sqlite_data:/app/.runtime-data
     networks:
       - modelline_net
 
@@ -65,12 +67,14 @@ services:
       ADMIN_BACKEND_SHARED_TOKEN: ${ADMIN_BACKEND_SHARED_TOKEN:-}
       ADMIN_BACKEND_TLS_INSECURE: ${ADMIN_BACKEND_TLS_INSECURE:-1}
       BACKEND_CONNECTION_TARGET: ${ONLINE_BACKEND_HOST:-localhost}
-      REDIS_URL: ${ONLINE_REDIS_URL:-}
+      SQLITE_DB_PATH: /app/.runtime-data/admin-state.sqlite
       # Used only by /api/health; may point to a remote MinIO endpoint.
       MINIO_URL: ${ONLINE_MINIO_URL:-localhost:9000}
       NODE_ENV: production
     expose:
       - "3000"
+    volumes:
+      - admin_online_sqlite_data:/app/.runtime-data
 
   admin-online-proxy:
     profiles: ["online"]
@@ -93,3 +97,7 @@ networks:
   modelline_net:
     name: modelline_net
     external: true
+
+volumes:
+  admin_sqlite_data:
+  admin_online_sqlite_data:

@@ -105,6 +105,7 @@ function buildHistorySummary(item: QueueHistoryEntry): { request: string; result
   const responseSummary = asRecord(item.responseSummary);
 
   const targetTable = (payloadSummary?.target_table ?? payloadSummary?.table ?? payloadSummary?.target_symbol) as string | undefined;
+  const exchange = (payloadSummary?.target_exchange ?? payloadSummary?.exchange) as string | undefined;
   const timeframe = (payloadSummary?.target_timeframe ?? payloadSummary?.timeframe) as string | undefined;
   const type = payloadSummary?.type as string | undefined;
   const range = formatRange(
@@ -114,6 +115,7 @@ function buildHistorySummary(item: QueueHistoryEntry): { request: string; result
 
   const requestParts = [humanizeTopic(topic)];
   if (type) requestParts.push(type);
+  if (exchange) requestParts.push(String(exchange));
   if (targetTable) requestParts.push(String(targetTable));
   if (timeframe && targetTable !== timeframe) requestParts.push(String(timeframe));
   if (range) requestParts.push(range);

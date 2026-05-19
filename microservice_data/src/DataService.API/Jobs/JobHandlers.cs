@@ -66,8 +66,12 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         var p = ctx.Params();
         var symbol    = p.S("symbol")    ?? throw new ArgumentException("symbol required");
         var timeframe = p.S("timeframe") ?? throw new ArgumentException("timeframe required");
+        var exchange  = (p.S("exchange") ?? "bybit").Trim().ToLowerInvariant();
         var startMs   = p.L("start_ms")  ?? throw new ArgumentException("start_ms required");
         var endMs     = p.L("end_ms")    ?? throw new ArgumentException("end_ms required");
+
+        if (!string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException($"unsupported exchange: {exchange}");
 
         var (key, interval, stepMs) = DatasetCore.NormalizeTimeframe(timeframe);
         var (s, e) = DatasetCore.NormalizeWindow(startMs, endMs, stepMs);
@@ -139,7 +143,7 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         {
             if (!klinesByTs.TryGetValue(ts, out var k)) continue;
             rows.Add(new DatasetRepository.MarketRow(
-                TimestampMs:  ts, Symbol: symbol.ToUpperInvariant(), Exchange: "bybit", Timeframe: key,
+                TimestampMs:  ts, Symbol: symbol.ToUpperInvariant(), Exchange: exchange, Timeframe: key,
                 OpenPrice: k.Open, HighPrice: k.High, LowPrice: k.Low, ClosePrice: k.Close,
                 Volume: k.Volume, Turnover: k.Turnover,
                 FundingRate: LookupForwardFill(fundingFf, ts),

@@ -31,10 +31,12 @@ function buildPayloadSummary(payload?: Record<string, unknown>): Record<string, 
   const summary: Record<string, unknown> = {};
   for (const key of [
     'type',
+    'exchange',
     'table',
     'target_table',
     'symbol',
     'target_symbol',
+    'target_exchange',
     'timeframe',
     'target_timeframe',
     'start_ms',
