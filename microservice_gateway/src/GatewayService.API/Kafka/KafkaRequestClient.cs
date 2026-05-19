@@ -13,7 +13,7 @@ namespace GatewayService.API.Kafka;
 /// topic and awaits a matching envelope on a private reply-inbox topic.
 /// Runs as a hosted service: the consume-loop lifecycle is tied to the app.
 /// </summary>
-public sealed class KafkaRequestClient : IHostedService, IDisposable
+public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, IDisposable
 {
     private static readonly TimeSpan ReplyInboxStartupBudget = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ReplyInboxRetryDelay = TimeSpan.FromSeconds(1);

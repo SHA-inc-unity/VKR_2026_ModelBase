@@ -9,4 +9,6 @@ public static class DataTopics
     public const string CmdDataDatasetCoverage = "cmd.data.dataset.coverage";
     public const string CmdDataDatasetRows     = "cmd.data.dataset.rows";
     public const string CmdDataDatasetIngest   = "cmd.data.dataset.ingest";
+    public const string CmdDataDatasetJobsStart = "cmd.data.dataset.jobs.start";
+    public const string CmdDataDatasetJobsGet   = "cmd.data.dataset.jobs.get";
 }

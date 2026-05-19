@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using GatewayService.API.Kafka;
 using Microsoft.Extensions.Options;
@@ -7,12 +8,14 @@ namespace GatewayService.API.Market;
 /// <inheritdoc />
 public sealed class DataServiceClient : IDataServiceClient
 {
-    private readonly KafkaRequestClient _kafka;
-    private readonly MarketSettings     _settings;
+    private static readonly TimeSpan IngestJobPollDelay = TimeSpan.FromMilliseconds(500);
+
+    private readonly IKafkaRequestClient _kafka;
+    private readonly MarketSettings      _settings;
     private readonly ILogger<DataServiceClient> _log;
 
     public DataServiceClient(
-        KafkaRequestClient kafka,
+        IKafkaRequestClient kafka,
         IOptions<MarketSettings> settings,
         ILogger<DataServiceClient> log)
     {
@@ -107,52 +110,78 @@ public sealed class DataServiceClient : IDataServiceClient
     public async Task<IngestResult> IngestAsync(
         string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default)
     {
-        var timeout = TimeSpan.FromSeconds(_settings.IngestKafkaTimeoutSeconds);
+        var totalTimeout = TimeSpan.FromSeconds(_settings.IngestKafkaTimeoutSeconds);
+        var requestTimeout = TimeSpan.FromSeconds(Math.Min(
+            _settings.KafkaTimeoutSeconds,
+            _settings.IngestKafkaTimeoutSeconds));
+        var tableName = BuildTableName(symbol, bybitInterval);
+
         try
         {
-            var reply = await _kafka.RequestAsync(
-                DataTopics.CmdDataDatasetIngest,
+            var startReply = await _kafka.RequestAsync(
+                DataTopics.CmdDataDatasetJobsStart,
                 new
                 {
-                    symbol,
-                    timeframe = bybitInterval,
-                    start_ms = startMs,
-                    end_ms = endMs,
+                    type = "ingest",
+                    target_table = tableName,
+                    target_symbol = symbol,
+                    target_timeframe = bybitInterval,
+                    target_start_ms = startMs,
+                    target_end_ms = endMs,
+                    created_by = "gateway_market_chart",
+                    @params = new
+                    {
+                        symbol,
+                        timeframe = bybitInterval,
+                        start_ms = startMs,
+                        end_ms = endMs,
+                    },
                 },
-                timeout,
+                requestTimeout,
                 ct);
 
-            var tableName = reply.ValueKind == JsonValueKind.Object &&
-                reply.TryGetProperty("table", out var tableEl)
-                ? tableEl.GetString() ?? string.Empty
-                : string.Empty;
-
-            if (reply.ValueKind == JsonValueKind.Object &&
-                reply.TryGetProperty("error", out var errEl))
+            if (TryGetError(startReply, out var startError))
             {
-                var error = errEl.GetString() ?? "unknown error";
                 _log.LogError(
-                    "Ingest failed (data-service error) for {Symbol}/{Interval}: {Error}",
-                    symbol, bybitInterval, error);
-                return IngestResult.Fail(error, tableName);
+                    "Ingest job start failed for {Symbol}/{Interval}: {Error}",
+                    symbol, bybitInterval, startError);
+                return IngestResult.Fail(startError, tableName);
             }
 
-            var rowsIngested = reply.ValueKind == JsonValueKind.Object &&
-                reply.TryGetProperty("rows_ingested", out var ri) &&
-                ri.ValueKind == JsonValueKind.Number
-                ? ri.GetInt32()
-                : 0;
+            var jobId = TryGetString(startReply, "job_id");
+            if (string.IsNullOrWhiteSpace(jobId) &&
+                TryGetNestedJob(startReply, out var startJob))
+            {
+                jobId = TryGetString(startJob, "job_id");
+            }
+
+            if (string.IsNullOrWhiteSpace(jobId))
+            {
+                _log.LogError(
+                    "Ingest job start returned no job_id for {Symbol}/{Interval}",
+                    symbol, bybitInterval);
+                return IngestResult.Fail("ingest_job_id_missing", tableName);
+            }
+
+            var deduped = startReply.ValueKind == JsonValueKind.Object &&
+                startReply.TryGetProperty("deduped", out var dedupedEl) &&
+                dedupedEl.ValueKind == JsonValueKind.True;
 
             _log.LogInformation(
-                "Ingest completed for {Symbol}/{Interval}: {Rows} rows ingested",
-                symbol, bybitInterval, rowsIngested);
+                "Ingest job {JobId} {Mode} for {Symbol}/{Interval} [{StartMs}..{EndMs}]",
+                jobId,
+                deduped ? "reused" : "started",
+                symbol,
+                bybitInterval,
+                startMs,
+                endMs);
 
-            return IngestResult.Ok(tableName, rowsIngested);
+            return await WaitForIngestJobAsync(jobId, tableName, totalTimeout, requestTimeout, ct);
         }
         catch (TimeoutException ex)
         {
             _log.LogWarning(ex,
-                "Ingest Kafka request timed out for {Symbol}/{Interval}",
+                "Queued ingest timed out for {Symbol}/{Interval}",
                 symbol, bybitInterval);
             return IngestResult.Fail("ingest_timeout");
         }
@@ -170,42 +199,29 @@ public sealed class DataServiceClient : IDataServiceClient
         string symbol, string bybitInterval, long startMs, long endMs,
         Action onComplete, Action<Exception> onError)
     {
-        var timeout = TimeSpan.FromSeconds(_settings.IngestKafkaTimeoutSeconds);
         _ = Task.Run(async () =>
         {
             try
             {
-                var reply = await _kafka.RequestAsync(
-                    DataTopics.CmdDataDatasetIngest,
-                    new
-                    {
-                        symbol,
-                        timeframe = bybitInterval,
-                        start_ms  = startMs,
-                        end_ms    = endMs,
-                    },
-                    timeout,
+                var result = await IngestAsync(
+                    symbol,
+                    bybitInterval,
+                    startMs,
+                    endMs,
                     CancellationToken.None);
 
-                if (reply.ValueKind == JsonValueKind.Object &&
-                    reply.TryGetProperty("error", out var errEl))
+                if (!result.Success)
                 {
-                    var msg = errEl.GetString() ?? "unknown error";
                     _log.LogError(
-                        "Ingest failed (data-service error) for {Symbol}/{Interval}: {Error}",
-                        symbol, bybitInterval, msg);
-                    onError(new InvalidOperationException(msg));
+                        "Background queued ingest failed for {Symbol}/{Interval}: {Error}",
+                        symbol, bybitInterval, result.Error ?? "unknown error");
+                    onError(new InvalidOperationException(result.Error ?? "unknown error"));
                 }
                 else
                 {
-                    var rowsIngested = reply.ValueKind == JsonValueKind.Object &&
-                        reply.TryGetProperty("rows_ingested", out var ri) &&
-                        ri.ValueKind == JsonValueKind.Number
-                        ? ri.GetInt32()
-                        : -1;
                     _log.LogInformation(
-                        "Ingest completed for {Symbol}/{Interval}: {Rows} rows ingested",
-                        symbol, bybitInterval, rowsIngested);
+                        "Background queued ingest completed for {Symbol}/{Interval}: {Rows} rows ingested",
+                        symbol, bybitInterval, result.RowsIngested);
                     onComplete();
                 }
             }
@@ -218,7 +234,143 @@ public sealed class DataServiceClient : IDataServiceClient
         });
     }
 
+    private async Task<IngestResult> WaitForIngestJobAsync(
+        string jobId,
+        string fallbackTableName,
+        TimeSpan totalTimeout,
+        TimeSpan requestTimeout,
+        CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+
+        while (stopwatch.Elapsed < totalTimeout)
+        {
+            var remaining = totalTimeout - stopwatch.Elapsed;
+            var effectiveTimeout = remaining < requestTimeout ? remaining : requestTimeout;
+
+            var jobReply = await _kafka.RequestAsync(
+                DataTopics.CmdDataDatasetJobsGet,
+                new { job_id = jobId },
+                effectiveTimeout,
+                ct);
+
+            if (TryGetError(jobReply, out var jobError))
+            {
+                _log.LogError(
+                    "Queued ingest job {JobId} failed to load status: {Error}",
+                    jobId, jobError);
+                return IngestResult.Fail(jobError, fallbackTableName);
+            }
+
+            if (!TryGetNestedJob(jobReply, out var job))
+            {
+                _log.LogError(
+                    "Queued ingest job {JobId} returned invalid payload",
+                    jobId);
+                return IngestResult.Fail("ingest_job_payload_invalid", fallbackTableName);
+            }
+
+            var status = TryGetString(job, "status") ?? string.Empty;
+            var tableName = TryGetString(job, "target_table") ?? fallbackTableName;
+            var completed = ClampToInt(GetLong(job, "completed"));
+
+            switch (status)
+            {
+                case "succeeded":
+                case "skipped":
+                    _log.LogInformation(
+                        "Queued ingest job {JobId} completed with status={Status} table={Table} completed={Completed}",
+                        jobId, status, tableName, completed);
+                    return IngestResult.Ok(tableName, completed);
+
+                case "failed":
+                case "canceled":
+                {
+                    var error = BuildJobFailure(job, status);
+                    _log.LogWarning(
+                        "Queued ingest job {JobId} finished with status={Status}: {Error}",
+                        jobId, status, error);
+                    return IngestResult.Fail(error, tableName);
+                }
+            }
+
+            var delay = remaining < IngestJobPollDelay ? remaining : IngestJobPollDelay;
+            if (delay > TimeSpan.Zero)
+                await Task.Delay(delay, ct);
+        }
+
+        _log.LogWarning("Queued ingest job {JobId} exceeded timeout {TimeoutMs}ms",
+            jobId, (int)totalTimeout.TotalMilliseconds);
+        return IngestResult.Fail("ingest_timeout", fallbackTableName);
+    }
+
     // ── Parsers ───────────────────────────────────────────────────────────
+
+    private static string BuildTableName(string symbol, string bybitInterval) =>
+        $"{symbol.ToLowerInvariant()}_{bybitInterval}";
+
+    private static bool TryGetNestedJob(JsonElement el, out JsonElement job)
+    {
+        if (el.ValueKind == JsonValueKind.Object &&
+            el.TryGetProperty("job", out job) &&
+            job.ValueKind == JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        job = default;
+        return false;
+    }
+
+    private static bool TryGetError(JsonElement el, out string error)
+    {
+        error = string.Empty;
+        if (el.ValueKind != JsonValueKind.Object ||
+            !el.TryGetProperty("error", out var errEl))
+            return false;
+
+        var detail = errEl.ValueKind switch
+        {
+            JsonValueKind.String => errEl.GetString(),
+            _ => errEl.ToString(),
+        };
+        var code = TryGetString(el, "code");
+        error = string.IsNullOrWhiteSpace(code)
+            ? detail ?? "unknown error"
+            : $"{code}: {detail}";
+        return true;
+    }
+
+    private static string BuildJobFailure(JsonElement job, string fallbackStatus)
+    {
+        var errorCode = TryGetString(job, "error_code");
+        var errorMessage = TryGetString(job, "error_message");
+        if (!string.IsNullOrWhiteSpace(errorMessage))
+            return errorMessage!;
+        if (!string.IsNullOrWhiteSpace(errorCode))
+            return errorCode!;
+        return $"job_{fallbackStatus}";
+    }
+
+    private static string? TryGetString(JsonElement el, string name)
+    {
+        if (!el.TryGetProperty(name, out var value)) return null;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.ToString(),
+            JsonValueKind.True => bool.TrueString,
+            JsonValueKind.False => bool.FalseString,
+            _ => null,
+        };
+    }
+
+    private static int ClampToInt(long value)
+    {
+        if (value <= 0) return 0;
+        if (value >= int.MaxValue) return int.MaxValue;
+        return (int)value;
+    }
 
     private static CoverageResult? ParseCoverage(JsonElement el)
     {

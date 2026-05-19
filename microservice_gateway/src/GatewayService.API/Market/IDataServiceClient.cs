@@ -64,7 +64,7 @@ public sealed record IngestResult(
 
 /// <summary>
 /// Kafka client for the data-service (microservice_data).
-/// All calls use the shared <see cref="GatewayService.API.Kafka.KafkaRequestClient"/>
+/// All calls use the shared <see cref="GatewayService.API.Kafka.IKafkaRequestClient"/>
 /// and the topics defined in <see cref="GatewayService.API.Market.DataTopics"/>.
 /// </summary>
 public interface IDataServiceClient
@@ -87,16 +87,17 @@ public interface IDataServiceClient
         string tableName, long startMs, long endMs, int limit, CancellationToken ct = default);
 
     /// <summary>
-    /// Triggers the data-service ingest pipeline and waits for it to complete.
-    /// Used by the chart path to lazily hydrate a missing window before replying.
+    /// Submits a data-service ingest job to the dataset queue and waits for its
+    /// terminal state. Used by the chart path to lazily hydrate a missing window
+    /// before replying while reusing the shared 4-slot job runner and per-table locks.
     /// </summary>
     Task<IngestResult> IngestAsync(
         string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default);
 
     /// <summary>
-    /// Triggers the data-service ingest pipeline asynchronously
-    /// (fire-and-forget). Errors are logged, not propagated.
-    /// The caller is responsible for setting and clearing the ingest-lock key.
+    /// Submits the same queued ingest path asynchronously (fire-and-forget).
+    /// Errors are logged, not propagated. The caller is responsible for setting
+    /// and clearing the ingest-lock key.
     /// </summary>
     void FireAndForgetIngest(
         string symbol, string bybitInterval, long startMs, long endMs,

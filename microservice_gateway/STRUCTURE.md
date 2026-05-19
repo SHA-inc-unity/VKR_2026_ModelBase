@@ -38,7 +38,7 @@
 | `DTOs/` | Контракты ответов и ошибок; `ErrorResponse` включает optional `code` для машинно-читаемой диагностики |
 | `Extensions/` | Регистрация сервисов и инфраструктурных зависимостей |
 | `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade, различает `admin_token_missing` и `admin_token_invalid` |
-| `Kafka/` | Kafka settings, topics и request client; `AdminTopics` — topic-константы admin facade. `KafkaRequestClient` на старте явно создаёт per-instance reply-inbox `reply.gateway.{instanceId}` и только затем подписывается на него, чтобы request/reply не деградировал в ложные `504` при пустом auto-created topic. Runtime diagnostics логируют `KafkaRequest start/produced/success/timeout/failed` с topic, replyInbox, duration и correlationId без payload. |
+| `Kafka/` | Kafka settings, topics, `IKafkaRequestClient` и request client; `AdminTopics` — topic-константы admin facade. `KafkaRequestClient` на старте явно создаёт per-instance reply-inbox `reply.gateway.{instanceId}` и только затем подписывается на него, чтобы request/reply не деградировал в ложные `504` при пустом auto-created topic. Runtime diagnostics логируют `KafkaRequest start/produced/success/timeout/failed` с topic, replyInbox, duration и correlationId без payload. |
 | `Market/` | Полный market API — см. ниже |
 | `Middleware/` | CorrelationId, exception handling и другие cross-cutting middleware |
 | `Settings/` | strongly-typed конфиги; `AdminSettings` — конфиг admin facade (SharedToken, таймауты) |
@@ -50,16 +50,16 @@
 | Файл | Назначение |
 | ---- | ---------- |
 | `IChartService.cs` | интерфейс chart-сервиса |
-| `ChartService.cs` | ядро: кэш → coverage → sync lazy ingest missing window → rows; при первом запросе по валидному symbol/timeframe пытается синхронно догрузить нужный диапазон и только потом вернуть candles. `pending`/`partial` остаются fallback-состояниями при занятом ingest-lock, timeout/error ingest или `claim_check`; ingest-lock при ошибке переводится в cooldown. |
+| `ChartService.cs` | ядро: кэш → coverage → sync lazy ingest missing window → rows; при первом запросе по валидному symbol/timeframe пытается синхронно догрузить нужный диапазон и только потом вернуть candles. Lazy hydrate не шлёт прямой `cmd.data.dataset.ingest`, а создаёт queued ingest-job через `DataServiceClient`, поэтому попадает в data-service ingest queue (cap 4, per-table serialization). `pending`/`partial` остаются fallback-состояниями при занятом ingest-lock, timeout/error ingest или `claim_check`; ingest-lock при ошибке переводится в cooldown. |
 | `ChartRequestQueue.cs` | coalescing-декоратор: идентичные `(symbol, timeframe, limit)` запросы разделяют один downstream-вызов; каждый caller имеет независимый `CancellationToken` |
 | `IMarketCacheService.cs` / `MarketCacheService.cs` | Redis-кэш с stampede protection (`SetIfNotExistsAsync`) |
 | `IMarketConfigService.cs` / `MarketConfigService.cs` | конфиг символов и таймфреймов |
 | `IBybitSymbolProvider.cs` / `BybitSymbolProvider.cs` | получение активных символов с Bybit |
-| `IDataServiceClient.cs` / `DataServiceClient.cs` | Kafka-клиент к data-сервису; различает inline rows и `claim_check`, а также умеет делать synchronous `cmd.data.dataset.ingest` для lazy hydrate chart-window перед ответом клиенту |
+| `IDataServiceClient.cs` / `DataServiceClient.cs` | Kafka-клиент к data-сервису; различает inline rows и `claim_check`, а lazy hydrate выполняет через `cmd.data.dataset.jobs.start` + polling `cmd.data.dataset.jobs.get` до terminal status. Это направляет chart-triggered ingest в тот же `DatasetJobRunner`, что и admin queue, с общим cap `4` и per-table lock по `target_table`. |
 | `MarketSettings.cs` | strongly-typed конфиг market-блока (включает 4 queue-поля) |
 | `TimeframeMap.cs` | маппинг таймфреймов ID → Bybit interval |
 | `CandleCountGrid.cs` | валидация и маппинг количества свечей |
-| `DataTopics.cs` | Kafka topic-константы для ingest |
+| `DataTopics.cs` | Kafka topic-константы для chart-path: coverage/rows и dataset job control (`jobs.start`, `jobs.get`) |
 
 ---
 
