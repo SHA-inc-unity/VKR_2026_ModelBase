@@ -47,6 +47,22 @@ public sealed record RowsResult(
 }
 
 /// <summary>
+/// Outcome of a synchronous ingest request.
+/// </summary>
+public sealed record IngestResult(
+    bool Success,
+    string TableName,
+    int RowsIngested,
+    string? Error = null)
+{
+    public static IngestResult Ok(string tableName, int rowsIngested) =>
+        new(true, tableName, rowsIngested, null);
+
+    public static IngestResult Fail(string? error, string? tableName = null) =>
+        new(false, tableName ?? string.Empty, 0, error);
+}
+
+/// <summary>
 /// Kafka client for the data-service (microservice_data).
 /// All calls use the shared <see cref="GatewayService.API.Kafka.KafkaRequestClient"/>
 /// and the topics defined in <see cref="GatewayService.API.Market.DataTopics"/>.
@@ -69,6 +85,13 @@ public interface IDataServiceClient
     /// </summary>
     Task<RowsResult> GetRowsAsync(
         string tableName, long startMs, long endMs, int limit, CancellationToken ct = default);
+
+    /// <summary>
+    /// Triggers the data-service ingest pipeline and waits for it to complete.
+    /// Used by the chart path to lazily hydrate a missing window before replying.
+    /// </summary>
+    Task<IngestResult> IngestAsync(
+        string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default);
 
     /// <summary>
     /// Triggers the data-service ingest pipeline asynchronously

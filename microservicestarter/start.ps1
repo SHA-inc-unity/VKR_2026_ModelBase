@@ -364,6 +364,24 @@ function Configure-AdminOnlineEnv {
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_MINIO_URL" -Value "${resolvedBackendHost}:9000"
     Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_BASE_URL" -Value $resolvedBackendBaseUrl
     Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_SHARED_TOKEN" -Value $resolvedSharedToken
+    if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_HTTP_PORT"))) {
+        Set-EnvValue -EnvFile $envFile -Key "ADMIN_HTTP_PORT" -Value "80"
+    }
+    if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_HTTPS_PORT"))) {
+        Set-EnvValue -EnvFile $envFile -Key "ADMIN_HTTPS_PORT" -Value "443"
+    }
+    if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_PRIMARY_DOMAIN"))) {
+        Set-EnvValue -EnvFile $envFile -Key "ADMIN_PRIMARY_DOMAIN" -Value "sha-trade.tech"
+    }
+    if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_SECONDARY_DOMAIN"))) {
+        Set-EnvValue -EnvFile $envFile -Key "ADMIN_SECONDARY_DOMAIN" -Value "www.sha-trade.tech"
+    }
+    if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_TLS_CERT_PATH"))) {
+        Set-EnvValue -EnvFile $envFile -Key "ADMIN_TLS_CERT_PATH" -Value "/etc/letsencrypt/live/sha-trade.tech/fullchain.pem"
+    }
+    if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_TLS_KEY_PATH"))) {
+        Set-EnvValue -EnvFile $envFile -Key "ADMIN_TLS_KEY_PATH" -Value "/etc/letsencrypt/live/sha-trade.tech/privkey.pem"
+    }
     if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_TLS_INSECURE")) -and $resolvedBackendBaseUrl.StartsWith("https://")) {
         Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_TLS_INSECURE" -Value "1"
     }
@@ -542,7 +560,7 @@ function Start-Microservice {
                 Write-Fail "mode=onlyadmin поддерживается только для microservice_admin"
             }
             Configure-AdminOnlineEnv -SvcDir $SvcDir -ExplicitBackendHost $BackendHost
-            docker compose --profile online up -d admin-online
+            docker compose --profile online up -d admin-online admin-online-proxy
         }
         default     { docker compose up -d }
     }

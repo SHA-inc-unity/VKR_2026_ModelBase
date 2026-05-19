@@ -261,7 +261,8 @@ preflight_check_host_ports() {
             ;;
         microservice_admin)
             if [[ "$mode" == "onlyadmin" ]]; then
-                require_host_port_available "$service_name" "$env_file" "ADMIN_PORT" "" "$(get_env_value_or_default "$env_file" "ADMIN_PORT" "443")" "admin-online HTTP entrypoint"
+                require_host_port_available "$service_name" "$env_file" "ADMIN_HTTP_PORT" "" "$(get_env_value_or_default "$env_file" "ADMIN_HTTP_PORT" "80")" "admin-online HTTP redirect entrypoint"
+                require_host_port_available "$service_name" "$env_file" "ADMIN_HTTPS_PORT" "" "$(get_env_value_or_default "$env_file" "ADMIN_HTTPS_PORT" "443")" "admin-online HTTPS entrypoint"
             fi
             ;;
     esac
@@ -504,6 +505,17 @@ resolve_admin_online_backend_host() {
     printf '%s' "$backend_host"
 }
 
+ensure_admin_online_public_env_defaults() {
+    local env_file="$1"
+
+    [[ -n "$(get_env_value "$env_file" "ADMIN_HTTP_PORT")" ]] || set_env_value "$env_file" "ADMIN_HTTP_PORT" "80"
+    [[ -n "$(get_env_value "$env_file" "ADMIN_HTTPS_PORT")" ]] || set_env_value "$env_file" "ADMIN_HTTPS_PORT" "443"
+    [[ -n "$(get_env_value "$env_file" "ADMIN_PRIMARY_DOMAIN")" ]] || set_env_value "$env_file" "ADMIN_PRIMARY_DOMAIN" "sha-trade.tech"
+    [[ -n "$(get_env_value "$env_file" "ADMIN_SECONDARY_DOMAIN")" ]] || set_env_value "$env_file" "ADMIN_SECONDARY_DOMAIN" "www.sha-trade.tech"
+    [[ -n "$(get_env_value "$env_file" "ADMIN_TLS_CERT_PATH")" ]] || set_env_value "$env_file" "ADMIN_TLS_CERT_PATH" "/etc/letsencrypt/live/sha-trade.tech/fullchain.pem"
+    [[ -n "$(get_env_value "$env_file" "ADMIN_TLS_KEY_PATH")" ]] || set_env_value "$env_file" "ADMIN_TLS_KEY_PATH" "/etc/letsencrypt/live/sha-trade.tech/privkey.pem"
+}
+
 configure_admin_online_env() {
     local svc_dir="$1"
     local explicit_backend_host="${2:-}"
@@ -528,6 +540,7 @@ configure_admin_online_env() {
     set_env_value "$env_file" "ONLINE_MINIO_URL" "$backend_host:9000"
     set_env_value "$env_file" "ADMIN_BACKEND_BASE_URL" "$admin_backend_base_url"
     set_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "$admin_backend_shared_token"
+    ensure_admin_online_public_env_defaults "$env_file"
     if [[ -z "$(get_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE")" && "$admin_backend_base_url" == https://* ]]; then
         set_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE" "1"
     fi
@@ -650,7 +663,7 @@ restart_service() {
         onlyadmin)
             [[ "$name" == "microservice_admin" ]] || fail "[$name] mode=onlyadmin поддерживается только для microservice_admin"
             configure_admin_online_env "$svc_dir" "${BACKEND_HOST:-}"
-            docker compose --profile online up -d --build admin-online
+            docker compose --profile online up -d --build admin-online admin-online-proxy
             ;;
         deps)
             if [[ $has_base -eq 1 ]]; then

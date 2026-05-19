@@ -216,6 +216,10 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
         string tableName, long startMs, long endMs, int limit, CancellationToken ct = default)
         => Task.FromResult(RowsResult.Empty);
 
+    public Task<IngestResult> IngestAsync(
+        string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default)
+        => Task.FromResult(IngestResult.Fail("disabled"));
+
     public void FireAndForgetIngest(
         string symbol, string bybitInterval, long startMs, long endMs,
         Action onComplete, Action<Exception> onError)

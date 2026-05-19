@@ -37,7 +37,7 @@
 
        Split deployment:
              backend-host         → noadmin (8443 TLS facade с auto-cert bootstrap)
-             remote admin-host    → onlyadmin (admin-head на :443/admin)
+             remote admin-host    → onlyadmin (nginx TLS proxy :80/:443 → admin-online:3000, canonical /admin)
              split transport      → HTTPS admin facade :8443
 ```
 

@@ -104,6 +104,68 @@ public sealed class DataServiceClient : IDataServiceClient
     }
 
     /// <inheritdoc />
+    public async Task<IngestResult> IngestAsync(
+        string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default)
+    {
+        var timeout = TimeSpan.FromSeconds(_settings.IngestKafkaTimeoutSeconds);
+        try
+        {
+            var reply = await _kafka.RequestAsync(
+                DataTopics.CmdDataDatasetIngest,
+                new
+                {
+                    symbol,
+                    timeframe = bybitInterval,
+                    start_ms = startMs,
+                    end_ms = endMs,
+                },
+                timeout,
+                ct);
+
+            var tableName = reply.ValueKind == JsonValueKind.Object &&
+                reply.TryGetProperty("table", out var tableEl)
+                ? tableEl.GetString() ?? string.Empty
+                : string.Empty;
+
+            if (reply.ValueKind == JsonValueKind.Object &&
+                reply.TryGetProperty("error", out var errEl))
+            {
+                var error = errEl.GetString() ?? "unknown error";
+                _log.LogError(
+                    "Ingest failed (data-service error) for {Symbol}/{Interval}: {Error}",
+                    symbol, bybitInterval, error);
+                return IngestResult.Fail(error, tableName);
+            }
+
+            var rowsIngested = reply.ValueKind == JsonValueKind.Object &&
+                reply.TryGetProperty("rows_ingested", out var ri) &&
+                ri.ValueKind == JsonValueKind.Number
+                ? ri.GetInt32()
+                : 0;
+
+            _log.LogInformation(
+                "Ingest completed for {Symbol}/{Interval}: {Rows} rows ingested",
+                symbol, bybitInterval, rowsIngested);
+
+            return IngestResult.Ok(tableName, rowsIngested);
+        }
+        catch (TimeoutException ex)
+        {
+            _log.LogWarning(ex,
+                "Ingest Kafka request timed out for {Symbol}/{Interval}",
+                symbol, bybitInterval);
+            return IngestResult.Fail("ingest_timeout");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Ingest Kafka request failed for {Symbol}/{Interval}",
+                symbol, bybitInterval);
+            return IngestResult.Fail(ex.Message);
+        }
+    }
+
+    /// <inheritdoc />
     public void FireAndForgetIngest(
         string symbol, string bybitInterval, long startMs, long endMs,
         Action onComplete, Action<Exception> onError)

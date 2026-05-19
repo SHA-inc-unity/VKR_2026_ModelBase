@@ -90,7 +90,33 @@ public class ChartService : IChartService
 
         if (coverage is null || !coverage.Exists || coverage.Rows == 0)
         {
-            await TriggerIngestAsync(ingestKey, symbolUpper, tfInfo, limit, ct);
+            var initialEndMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var initialStartMs = initialEndMs - (long)limit * tfInfo.StepMs * _settings.IngestWindowMultiplier;
+            var initialRows = await TrySynchronizeWindowAsync(
+                ingestKey, symbolUpper, tfInfo, limit, initialStartMs, initialEndMs, ct);
+
+            if (initialRows?.IsClaimCheck == true)
+            {
+                return ServiceResult<ChartResponse>.Ok(
+                    BuildPendingResponse(symbolUpper, timeframe, limit,
+                        "Data payload too large; use a smaller limit or wait for streaming path"));
+            }
+
+            if (initialRows is not null && initialRows.Rows.Count > 0)
+            {
+                return ServiceResult<ChartResponse>.Ok(
+                    await BuildChartResponseAsync(
+                        symbolUpper,
+                        timeframe,
+                        limit,
+                        tfInfo,
+                        ingestKey,
+                        initialStartMs,
+                        initialEndMs,
+                        initialRows,
+                        ct));
+            }
+
             return ServiceResult<ChartResponse>.Ok(BuildPendingResponse(
                 symbolUpper, timeframe, limit, "No data available; ingest triggered"));
         }
@@ -120,13 +146,80 @@ public class ChartService : IChartService
 
         if (rowsResult.Rows.Count == 0)
         {
-            await TriggerIngestAsync(ingestKey, symbolUpper, tfInfo, limit, ct);
+            var hydratedRows = await TrySynchronizeWindowAsync(
+                ingestKey, symbolUpper, tfInfo, limit, startMs, endMs, ct);
+
+            if (hydratedRows?.IsClaimCheck == true)
+            {
+                return ServiceResult<ChartResponse>.Ok(
+                    BuildPendingResponse(symbolUpper, timeframe, limit,
+                        "Data payload too large; use a smaller limit or wait for streaming path"));
+            }
+
+            if (hydratedRows is not null && hydratedRows.Rows.Count > 0)
+            {
+                return ServiceResult<ChartResponse>.Ok(
+                    await BuildChartResponseAsync(
+                        symbolUpper,
+                        timeframe,
+                        limit,
+                        tfInfo,
+                        ingestKey,
+                        startMs,
+                        endMs,
+                        hydratedRows,
+                        ct));
+            }
+
             return ServiceResult<ChartResponse>.Ok(
                 BuildPendingResponse(symbolUpper, timeframe, limit,
                     "No rows returned; ingest triggered"));
         }
 
         // ── 7. Build response ─────────────────────────────────────────────────
+
+        return ServiceResult<ChartResponse>.Ok(
+            await BuildChartResponseAsync(
+                symbolUpper,
+                timeframe,
+                limit,
+                tfInfo,
+                ingestKey,
+                startMs,
+                endMs,
+                rowsResult,
+                ct));
+    }
+
+    private async Task<ChartResponse> BuildChartResponseAsync(
+        string symbol,
+        string timeframe,
+        int limit,
+        TimeframeInfo tfInfo,
+        string ingestKey,
+        long startMs,
+        long endMs,
+        RowsResult rowsResult,
+        CancellationToken ct)
+    {
+        if (rowsResult.Rows.Count > 0)
+        {
+            var initialCoverage = (double)rowsResult.Rows.Count / limit;
+            if (initialCoverage < _settings.FullCoverageThreshold)
+            {
+                var hydratedRows = await TrySynchronizeWindowAsync(
+                    ingestKey, symbol, tfInfo, limit, startMs, endMs, ct);
+
+                if (hydratedRows?.IsClaimCheck == true)
+                {
+                    return BuildPendingResponse(symbol, timeframe, limit,
+                        "Data payload too large; use a smaller limit or wait for streaming path");
+                }
+
+                if (hydratedRows is not null && hydratedRows.Rows.Count > rowsResult.Rows.Count)
+                    rowsResult = hydratedRows;
+            }
+        }
 
         var candles = rowsResult.Rows
             .OrderBy(r => r.TimestampMs)
@@ -143,30 +236,15 @@ public class ChartService : IChartService
         string status;
         int? retryAfterMs = null;
 
-        if (isFullCoverage)
-        {
-            status = "ok";
-        }
-        else
-        {
-            status       = "partial";
+        status = isFullCoverage ? "ok" : "partial";
+        if (!isFullCoverage)
             retryAfterMs = _settings.IngestRetryAfterMs;
-
-            // Trigger background ingest to fill the gap
-            var ingestLockAcquired = await _cache.SetIfNotExistsAsync(
-                ingestKey, IngestInProgress,
-                TimeSpan.FromSeconds(_settings.IngestLockTtlSeconds), ct);
-
-            if (ingestLockAcquired)
-                TriggerIngestInBackground(
-                    ingestKey, symbolUpper, tfInfo, limit, startMs, endMs);
-        }
 
         var coverageLabel = isFullCoverage ? "full" : "partial";
 
         var response = new ChartResponse
         {
-            Symbol    = symbolUpper,
+            Symbol    = symbol,
             Timeframe = timeframe,
             Limit     = limit,
             Candles   = candles,
@@ -184,9 +262,10 @@ public class ChartService : IChartService
 
         // Cache only when data is complete; partial results get a shorter TTL
         var cacheTtl = CacheTtlFor(tfInfo, isFullCoverage);
+        var cacheKey = BuildCacheKey(symbol, tfInfo, limit);
         await _cache.SetAsync(cacheKey, response, cacheTtl, ct);
 
-        return ServiceResult<ChartResponse>.Ok(response);
+        return response;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -211,9 +290,14 @@ public class ChartService : IChartService
         };
     }
 
-    /// <summary>Acquires the ingest lock and starts fire-and-forget ingest.</summary>
-    private async Task TriggerIngestAsync(
-        string ingestKey, string symbol, TimeframeInfo tfInfo, int limit, CancellationToken ct)
+    private async Task<RowsResult?> TrySynchronizeWindowAsync(
+        string ingestKey,
+        string symbol,
+        TimeframeInfo tfInfo,
+        int limit,
+        long startMs,
+        long endMs,
+        CancellationToken ct)
     {
         var lockAcquired = await _cache.SetIfNotExistsAsync(
             ingestKey, IngestInProgress,
@@ -221,17 +305,68 @@ public class ChartService : IChartService
 
         if (!lockAcquired)
         {
-            _log.LogDebug("Ingest already locked for {Symbol}/{Interval}",
+            _log.LogDebug("Synchronous ingest already locked for {Symbol}/{Interval}",
                 symbol, tfInfo.BybitInterval);
-            return;
+            return null;
         }
 
-        var nowMs    = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var windowMs = (long)limit * tfInfo.StepMs * _settings.IngestWindowMultiplier;
-        var startMs  = nowMs - windowMs;
-        var endMs    = nowMs;
+        try
+        {
+            var correlationId = Activity.Current?.Id ?? "n/a";
+            _log.LogInformation(
+                "Synchronizing chart window for {Symbol}/{Interval} [{StartMs}..{EndMs}] "
+                + "limit={Limit} correlationId={CorrelationId}",
+                symbol, tfInfo.BybitInterval, startMs, endMs, limit, correlationId);
 
-        TriggerIngestInBackground(ingestKey, symbol, tfInfo, limit, startMs, endMs);
+            var ingest = await _data.IngestAsync(
+                symbol,
+                tfInfo.BybitInterval,
+                startMs,
+                endMs,
+                ct);
+
+            if (!ingest.Success)
+            {
+                _log.LogWarning(
+                    "Synchronous ingest failed for {Symbol}/{Interval}: {Error}",
+                    symbol, tfInfo.BybitInterval, ingest.Error ?? "unknown error");
+
+                await _cache.SetAsync(
+                    ingestKey,
+                    IngestErrorCooldown,
+                    TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
+                    CancellationToken.None);
+
+                return null;
+            }
+
+            await _cache.RemoveAsync(ingestKey);
+
+            var tableName = string.IsNullOrWhiteSpace(ingest.TableName)
+                ? $"{symbol.ToLowerInvariant()}_{tfInfo.BybitInterval}"
+                : ingest.TableName;
+
+            return await _data.GetRowsAsync(tableName, startMs, endMs, limit, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "Synchronous ingest FAILED for {Symbol}/{Interval} [{StartMs}..{EndMs}]",
+                symbol, tfInfo.BybitInterval, startMs, endMs);
+
+            await _cache.SetAsync(
+                ingestKey,
+                IngestErrorCooldown,
+                TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
+                CancellationToken.None);
+
+            return null;
+        }
+    }
+
+    private string BuildCacheKey(string symbol, TimeframeInfo tfInfo, int limit)
+    {
+        return string.Format(ChartKeyFmt, symbol, tfInfo.BybitInterval, limit);
     }
 
     private void TriggerIngestInBackground(
@@ -260,8 +395,6 @@ public class ChartService : IChartService
                     + "correlationId={CorrelationId}",
                     symbol, tfInfo.BybitInterval, startMs, endMs, correlationId);
 
-                // Replace the in-progress lock with a short error-cooldown so that the
-                // next client request retries quickly rather than waiting the full IngestLockTtlSeconds.
                 _ = _cache.SetAsync(
                     ingestKey,
                     IngestErrorCooldown,

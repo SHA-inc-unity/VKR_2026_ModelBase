@@ -10,7 +10,7 @@
 | ------ | ---------- | ----- | -------- |
 | [microservice_infra](microservice_infra/README.md) | Docker Compose, Redpanda, MinIO, Nginx | `9092`, `8080`, `9000`, `9001`, `8501`, `8443` | Общая инфраструктура платформы: Kafka, S3 claim-check, локальный ingress/download endpoint backend-стека и HTTPS admin facade для split deployment |
 | [microservice_data](microservice_data/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Kafka, MinIO | `8100` | Владелец рыночных данных, датасета, export и фоновых jobs |
-| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, Redis | `3000` (local stack), `443` (`onlyadmin`, default) | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов. В local-стеке идёт через infra-nginx, в split deployment может публиковаться как отдельная online-head нода |
+| [microservice_admin](microservice_admin/README.md) | Next.js 14, React 18, TypeScript, Kafka, Redis | `3000` (local stack), `80/443` (`onlyadmin` public proxy) | Admin UI и операторская панель платформы; не исполняет jobs, а только управляет и наблюдает jobs других сервисов. В local-стеке идёт через infra-nginx, в split deployment публикуется как отдельная online-head нода с TLS proxy на `/admin` |
 | [microservice_analitic](microservice_analitic/README.md) | Python 3.12, CatBoost, FastAPI, PostgreSQL, Redis | API: `8000` | ML-сервис: обучение, прогнозы, аналитика рынка |
 | [microservice_account](microservice_account/README.md) | .NET 8, ASP.NET Core, PostgreSQL, Redis | `7510` | Сервис аутентификации и управления аккаунтами (Clean Architecture) |
 | [microservice_gateway](microservice_gateway/README.md) | .NET 8, ASP.NET Core | `7520` | Mobile BFF Gateway — маршрутизация и агрегация запросов |
@@ -79,15 +79,18 @@ runtime не идут.
 Backend-хост можно поднять в режиме `noadmin`: локально стартуют infra,
 data, analitic, account и gateway, но без `microservice_admin`. Отдельно
 можно поднять `microservice_admin` в режиме `onlyadmin` на другой машине
-как **online-head**: admin сам публикует `443:3000`, остаётся на basePath
-`/admin` и работает против внешних Kafka/HTTP endpoints через namespace
-переменных `ONLINE_*`.
+как **online-head**: Next.js остаётся на внутреннем `admin-online:3000`, а
+browser-facing трафик принимает `admin-online-proxy` на host-портах `80/443`,
+делает redirect на `/admin` и использует TLS-сертификат с admin-host. По
+умолчанию этот путь рассчитан на `https://sha-trade.tech/admin/` и
+`https://www.sha-trade.tech/admin/`.
 
 Важное уточнение для split deployment:
 
-- рабочая UI-точка admin-панели находится на **admin-host** по адресу `http://<admin-host>:443/admin/`
-- в текущем compose `admin-online` публикует plain HTTP на `443`; URL вида `https://<admin-host>:443/admin/` не будет работать, пока перед `admin-online` не появится отдельный TLS reverse proxy/terminator
-- bare URL `http://<admin-host>:443/` не является канонической точкой входа, потому что `admin-online` работает с `basePath=/admin`
+- рабочая UI-точка admin-панели находится на **admin-host** по адресу `https://sha-trade.tech/admin/` или `https://www.sha-trade.tech/admin/`
+- `onlyadmin` принимает запросы и на `80`, и на `443`: `80` делает redirect на HTTPS, `443` завершает TLS и проксирует `/admin/*` в `admin-online:3000`
+- сертификат для browser-facing admin-head по умолчанию монтируется с admin-host путей `/etc/letsencrypt/live/sha-trade.tech/fullchain.pem` и `/etc/letsencrypt/live/sha-trade.tech/privkey.pem`
+- bare URL `https://sha-trade.tech/` не является канонической точкой входа: proxy делает `301` на `/admin/`
 - на **backend-host** в режиме `noadmin` порт `8501` не должен считаться адресом admin-панели; там остаётся только infra-nginx/download ingress, а локальный `/admin/*` без поднятого `microservice_admin` не является рабочей UI-точкой
 
 Primary split path для этих двух машин — **HTTPS admin facade на backend-host `:8443`** через `ADMIN_BACKEND_BASE_URL` и `ADMIN_SHARED_TOKEN`.
@@ -150,7 +153,7 @@ Host-specific настройки хранятся в `.env` конкретног
 - `microservice_account/.env` — bind address и порт account API
 - `microservice_gateway/.env` — bind address, порт gateway API и `ADMIN_SHARED_TOKEN` для admin facade
 - `microservice_data/.env` — `PUBLIC_DOWNLOAD_BASE_URL` для browser-facing download origin
-- `microservice_admin/.env` — `ONLINE_BACKEND_HOST`, derived `ONLINE_*`, `ADMIN_BACKEND_BASE_URL`, `ADMIN_BACKEND_SHARED_TOKEN` и `ADMIN_BACKEND_TLS_INSECURE` для remote admin-head
+- `microservice_admin/.env` — `ONLINE_BACKEND_HOST`, derived `ONLINE_*`, `ADMIN_BACKEND_BASE_URL`, `ADMIN_BACKEND_SHARED_TOKEN`, `ADMIN_BACKEND_TLS_INSECURE`, browser-facing `ADMIN_HTTP_PORT` / `ADMIN_HTTPS_PORT`, публичные домены `ADMIN_PRIMARY_DOMAIN` / `ADMIN_SECONDARY_DOMAIN` и cert paths `ADMIN_TLS_CERT_PATH` / `ADMIN_TLS_KEY_PATH` для remote admin-head
 
 Правила:
 
@@ -158,7 +161,7 @@ Host-specific настройки хранятся в `.env` конкретног
 - изменения `.env` не подхватываются на лету: после правки нужно заново выполнить `start` или `restart` для соответствующего сервиса/хоста
 - в split deployment browser-facing backend URL живёт в `PUBLIC_DOWNLOAD_BASE_URL` и `ADMIN_BACKEND_BASE_URL`
 - для ограничения publish-ed private ports на backend-host используй bind-address переменные `REDPANDA_BIND_ADDR`, `MINIO_BIND_ADDR`, `ACCOUNT_BIND_ADDR`, `GATEWAY_BIND_ADDR`
-- launcher для split deployment теперь сам собирает недостающие значения: на backend-host в `noadmin` — browser-facing base URL, `ADMIN_BACKEND_PORT` и, если нужно, автоматически генерирует `ADMIN_SHARED_TOKEN`; на admin-host в `onlyadmin` — backend host, `ADMIN_BACKEND_BASE_URL` и спрашивает уже сгенерированный backend token для `ADMIN_BACKEND_SHARED_TOKEN`
+- launcher для split deployment теперь сам собирает недостающие значения: на backend-host в `noadmin` — browser-facing base URL, `ADMIN_BACKEND_PORT` и, если нужно, автоматически генерирует `ADMIN_SHARED_TOKEN`; на admin-host в `onlyadmin` — backend host, `ADMIN_BACKEND_BASE_URL`, спрашивает уже сгенерированный backend token для `ADMIN_BACKEND_SHARED_TOKEN` и при пустых ключах дописывает `ADMIN_HTTP_PORT=80`, `ADMIN_HTTPS_PORT=443`, `ADMIN_PRIMARY_DOMAIN=sha-trade.tech`, `ADMIN_SECONDARY_DOMAIN=www.sha-trade.tech`, `ADMIN_TLS_CERT_PATH` и `ADMIN_TLS_KEY_PATH`
 - backend TLS bootstrap больше не требует ручного `openssl req ...`: если `ADMIN_BACKEND_CERTS_DIR` пуст, `microservice_infra` автогенерирует self-signed cert на первом старте; existing cert files всегда приоритетнее autogenerated pair
 - самый безопасный путь для admin-host — передавать backend адрес аргументом launcher-а (`./start.sh all onlyadmin <backend-host>` / `./restart.sh all onlyadmin <backend-host>`), а не редактировать вручную `ONLINE_*` и `ADMIN_BACKEND_*`
 

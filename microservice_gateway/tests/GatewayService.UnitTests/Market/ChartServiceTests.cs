@@ -108,6 +108,9 @@ public sealed class ChartServiceTests
             dataMock.Setup(d => d.GetCoverageAsync(It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<CancellationToken>()))
                 .ReturnsAsync((CoverageResult?)null);
+            dataMock.Setup(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
+                    It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(IngestResult.Fail("not_configured"));
             data = dataMock.Object;
         }
 
@@ -148,7 +151,7 @@ public sealed class ChartServiceTests
     [Fact]
     public async Task Valid_limit_for_heavy_timeframe_passes_validation()
     {
-        // No data, but validation passes — should return pending
+        // No data and ingest not configured — request still validates and falls back to pending
         var sut = CreateSut();
         var result = await sut.GetChartAsync("BTCUSDT", "5m", 200);
         result.IsSuccess.Should().BeTrue();
@@ -180,19 +183,30 @@ public sealed class ChartServiceTests
     // ── No data → pending ─────────────────────────────────────────────────
 
     [Fact]
-    public async Task No_coverage_data_returns_pending_status()
+        public async Task No_coverage_data_triggers_sync_ingest_and_returns_ok_when_rows_arrive()
     {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var stepMs = 300_000L;
+        var limit = 200;
+        var rows = BuildRows(nowMs, limit, stepMs);
+
         var dataMock = new Mock<IDataServiceClient>();
         dataMock.Setup(d => d.GetCoverageAsync("BTCUSDT", "5", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new CoverageResult(false, "", 0, 0, 0, 0));
+        dataMock.Setup(d => d.IngestAsync("BTCUSDT", "5", It.IsAny<long>(), It.IsAny<long>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(IngestResult.Ok("btcusdt_5", limit));
+        dataMock.Setup(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
+            It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RowsResult.From(rows));
 
         var sut = CreateSut(data: dataMock.Object);
         var result = await sut.GetChartAsync("BTCUSDT", "5m", 200);
 
         result.IsSuccess.Should().BeTrue();
-        result.Value!.Status.Should().Be("pending");
-        result.Value.Candles.Should().BeEmpty();
-        result.Value.RetryAfterMs.Should().BeGreaterThan(0);
+        result.Value!.Status.Should().Be("ok");
+        result.Value.Candles.Should().HaveCount(limit);
+        result.Value.RetryAfterMs.Should().BeNull();
     }
 
     [Fact]
@@ -205,6 +219,8 @@ public sealed class ChartServiceTests
 
         result.IsSuccess.Should().BeTrue();
         result.Value!.Status.Should().Be("pending");
+        dataMock.Verify(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()), Times.Never);
         dataMock.Verify(d => d.FireAndForgetIngest(It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<long>(), It.IsAny<long>(),
             It.IsAny<Action>(), It.IsAny<Action<Exception>>()), Times.Never);
@@ -228,6 +244,9 @@ public sealed class ChartServiceTests
         dataMock.Setup(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
                 It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(RowsResult.From(rows));
+        dataMock.Setup(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(IngestResult.Fail("not_needed"));
 
         var sut = CreateSut(data: dataMock.Object);
         var result = await sut.GetChartAsync("BTCUSDT", "5m", limit);
@@ -259,6 +278,9 @@ public sealed class ChartServiceTests
         dataMock.Setup(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
                 It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(RowsResult.From(rows));
+        dataMock.Setup(d => d.IngestAsync("BTCUSDT", "5", It.IsAny<long>(), It.IsAny<long>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(IngestResult.Ok("btcusdt_5", limit - available));
 
         var sut = CreateSut(data: dataMock.Object);
         var result = await sut.GetChartAsync("BTCUSDT", "5m", limit);
@@ -268,6 +290,40 @@ public sealed class ChartServiceTests
         result.Value.Candles.Should().HaveCount(available);
         result.Value.RetryAfterMs.Should().BeGreaterThan(0);
         result.Value.Meta.Coverage.Should().Be("partial");
+    }
+
+    [Fact]
+    public async Task Partial_data_is_rehydrated_synchronously_and_can_return_ok()
+    {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var stepMs = 300_000L;
+        var limit = 200;
+        var available = 80;
+
+        var coverage = new CoverageResult(true, "btcusdt_5", available,
+            nowMs - (long)(available - 1) * stepMs, nowMs, 0.40);
+        var partialRows = BuildRows(nowMs, available, stepMs);
+        var fullRows = BuildRows(nowMs, limit, stepMs);
+
+        var dataMock = new Mock<IDataServiceClient>();
+        dataMock.Setup(d => d.GetCoverageAsync("BTCUSDT", "5", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(coverage);
+        dataMock.SetupSequence(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
+                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(RowsResult.From(partialRows))
+                .ReturnsAsync(RowsResult.From(fullRows));
+        dataMock.Setup(d => d.IngestAsync("BTCUSDT", "5", It.IsAny<long>(), It.IsAny<long>(),
+                It.IsAny<CancellationToken>()))
+                .ReturnsAsync(IngestResult.Ok("btcusdt_5", limit - available));
+
+        var sut = CreateSut(data: dataMock.Object);
+        var result = await sut.GetChartAsync("BTCUSDT", "5m", limit);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value!.Status.Should().Be("ok");
+        result.Value.Candles.Should().HaveCount(limit);
+        result.Value.RetryAfterMs.Should().BeNull();
+        result.Value.Meta.Coverage.Should().Be("full");
     }
 
     // ── Response metadata ─────────────────────────────────────────────────
@@ -288,6 +344,9 @@ public sealed class ChartServiceTests
         dataMock.Setup(d => d.GetRowsAsync(It.IsAny<string>(), It.IsAny<long>(), It.IsAny<long>(),
                 It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(RowsResult.From(rows));
+        dataMock.Setup(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(IngestResult.Fail("not_needed"));
 
         var sut = CreateSut(data: dataMock.Object);
         var result = await sut.GetChartAsync("BTCUSDT", "5m", limit);

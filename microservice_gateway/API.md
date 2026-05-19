@@ -535,8 +535,9 @@ GET /api/v1/market/config
 2. Проверяет cache.
 3. Проверяет ingest lock.
 4. Читает coverage и rows из data-service.
-5. Если данных не хватает, может запустить background ingest.
-6. Возвращает одно из состояний: `ok`, `partial`, `pending`.
+5. Если символ известен gateway, но локального окна не хватает, gateway пытается синхронно догрузить нужный диапазон через `cmd.data.dataset.ingest` и перечитывает rows в том же HTTP-запросе.
+6. Если ingest lock уже занят другим запросом, ingest упал/истёк по timeout или data-service ответил `claim_check`, gateway возвращает fallback-состояние `partial` или `pending`.
+7. Возвращает одно из состояний: `ok`, `partial`, `pending`.
 
 ### Market Chart: request
 
@@ -553,6 +554,8 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 | `symbol` | string | yes | должен входить в `symbols` из `/api/v1/market/config` |
 | `timeframe` | string | yes | должен входить в `timeframes[].id` из `/api/v1/market/config` |
 | `limit` | number | yes | должен входить в grid для класса выбранного timeframe |
+
+Если `symbol` отсутствует в `/api/v1/market/config`, gateway вернёт `400 INVALID_SYMBOL` и не будет запускать ingest. Если `symbol` валиден, но таблицы/окна ещё нет в Postgres, gateway сначала попробует лениво гидрировать нужную часть датасета, а уже потом ответить графиком.
 
 ### Market Chart: success response example (`status = "ok"`)
 
@@ -593,7 +596,7 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 }
 ```
 
-### Market Chart: pending response example (`status = "pending"`)
+### Market Chart: pending response example (`status = "pending"`, fallback path)
 
 ```json
 {
@@ -643,7 +646,7 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 
 - не пытаться самостоятельно вычислять допустимые `limit`;
 - сначала всегда использовать `/api/v1/market/config`;
-- `pending` и `partial` — это штатные продуктовые состояния, а не hard error;
+- `pending` и `partial` — это штатные продуктовые состояния, а не hard error; теперь они означают, что текущий запрос не смог сам закончить lazy hydrate окна;
 - если data-service вернул `claim_check` для слишком большого payload, gateway сейчас **не** скачивает claim-check объект напрямую, а отдаёт `pending`-подобный retry scenario. Поэтому для UI безопаснее уменьшить `limit`, если этот кейс повторяется.
 
 ### Market Chart: errors
@@ -803,7 +806,7 @@ Authorization: Bearer <access-token>
 | `dashboard.meta.degradedSections` не пустой | рендерить доступные карточки, а не падать целым экраном |
 | `news.degraded == true` | empty state «новости временно недоступны» |
 | `notifications.degraded == true` | empty state «уведомления временно недоступны» |
-| `market/chart.status == pending` | skeleton + retry |
+| `market/chart.status == pending` | skeleton + retry; обычно это означает, что lazy hydrate ещё не завершился или уже выполняется другим запросом |
 | `market/chart.status == partial` | график на частичных данных + non-blocking retry |
 
 ---

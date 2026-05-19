@@ -35,23 +35,34 @@ registry `cgr.dev` может быть недоступен, а `docker compose 
 
 ### 2. Online head (`admin-online`)
 
-- отдельный compose-service под profile `online`
-- публикует `443:3000` напрямую на своей машине по умолчанию (`ADMIN_PORT` можно переопределить)
+- отдельная online-head пара под profile `online`: внутренний `admin-online` + browser-facing `admin-online-proxy`
+- `admin-online` остаётся на внутреннем `3000`, а `admin-online-proxy` публикует `80/443` на своей машине по умолчанию (`ADMIN_HTTP_PORT` / `ADMIN_HTTPS_PORT`)
 - не требует `modelline_net`
 - используется в split deployment, когда backend-хост поднят в режиме `noadmin`, а admin живёт отдельно
 - внешние адреса берутся из namespace `ONLINE_*`: `ONLINE_KAFKA_BOOTSTRAP_SERVERS`, `ONLINE_REDPANDA_ADMIN_URL`, `ONLINE_ACCOUNT_URL`, `ONLINE_GATEWAY_URL`, `ONLINE_MINIO_URL`, `ONLINE_REDIS_URL`
 - для split deployment эти `ONLINE_*` должны указывать на backend host/domain, а не на `localhost`
 
-Канонический URL для браузера в этом режиме: `http://<admin-host>:443/admin/`.
-`admin-online` работает с `basePath=/admin`, поэтому bare `http://<admin-host>:443/`
+Канонические browser URL в этом режиме: `https://sha-trade.tech/admin/` и
+`https://www.sha-trade.tech/admin/`.
+`admin-online` работает с `basePath=/admin`, поэтому bare `https://sha-trade.tech/`
 не должен считаться правильной точкой входа. Если backend-хост запущен в
 режиме `noadmin`, то его собственный `8501` тоже не является адресом панели:
 UI живёт только на отдельном admin-host.
 
-Этот URL по умолчанию именно `http`, а не `https`: compose публикует
-`${ADMIN_PORT:-443}:3000` напрямую без TLS. Если нужен браузерный вход
-`https://<admin-host>:443/admin/` или `https://admin.example.com/admin/`,
-перед `admin-online` должен стоять отдельный reverse proxy/TLS-terminator.
+`admin-online-proxy` принимает оба browser-facing порта:
+
+- `80` — redirect на `https://$host/...`
+- `443` — TLS termination + proxy `/admin/*` → `admin-online:3000`
+
+По умолчанию proxy читает домены и сертификат из runtime env:
+
+- `ADMIN_PRIMARY_DOMAIN=sha-trade.tech`
+- `ADMIN_SECONDARY_DOMAIN=www.sha-trade.tech`
+- `ADMIN_TLS_CERT_PATH=/etc/letsencrypt/live/sha-trade.tech/fullchain.pem`
+- `ADMIN_TLS_KEY_PATH=/etc/letsencrypt/live/sha-trade.tech/privkey.pem`
+
+То есть отдельный внешний reverse proxy для production-onlyadmin теперь не
+нужен: browser-facing TLS завершает сам compose-сервис `admin-online-proxy`.
 
 Практически это означает следующее: если admin-head живёт на одном сервере, а backend на другом, пустые `ONLINE_*` оставлять нельзя. Иначе `admin-online` будет пытаться ходить в локальные `localhost:*`, а dashboard покажет `fetch failed` / `unreachable`. Для published backend ports дефолты у `admin-online` такие:
 
@@ -60,7 +71,7 @@ UI живёт только на отдельном admin-host.
 
 Но при реальном split deployment их нужно переопределять на адрес backend-хоста, например `95.165.27.159:7510` и `95.165.27.159:7520`.
 
-Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST`, автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`, предлагает `ADMIN_BACKEND_BASE_URL` с default `https://<host>:8443` и, если `ADMIN_BACKEND_SHARED_TOKEN` ещё пустой, просит вставить сюда токен, уже сгенерированный на backend-host.
+Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST`, автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`, предлагает `ADMIN_BACKEND_BASE_URL` с default `https://<host>:8443`, при пустых ключах дописывает `ADMIN_HTTP_PORT` / `ADMIN_HTTPS_PORT`, `ADMIN_PRIMARY_DOMAIN` / `ADMIN_SECONDARY_DOMAIN`, `ADMIN_TLS_CERT_PATH` / `ADMIN_TLS_KEY_PATH` и, если `ADMIN_BACKEND_SHARED_TOKEN` ещё пустой, просит вставить сюда токен, уже сгенерированный на backend-host.
 
 Если backend facade отвечает `401`, `admin-online` теперь показывает
 конкретную причину: отсутствует `ADMIN_BACKEND_SHARED_TOKEN` на admin-host

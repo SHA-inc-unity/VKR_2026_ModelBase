@@ -50,12 +50,12 @@
 | Файл | Назначение |
 | ---- | ---------- |
 | `IChartService.cs` | интерфейс chart-сервиса |
-| `ChartService.cs` | ядро: кэш → coverage → ingest-lock → rows; ingest lock снимается и при ошибке (cooldown); window-scoped coverage |
+| `ChartService.cs` | ядро: кэш → coverage → sync lazy ingest missing window → rows; при первом запросе по валидному symbol/timeframe пытается синхронно догрузить нужный диапазон и только потом вернуть candles. `pending`/`partial` остаются fallback-состояниями при занятом ingest-lock, timeout/error ingest или `claim_check`; ingest-lock при ошибке переводится в cooldown. |
 | `ChartRequestQueue.cs` | coalescing-декоратор: идентичные `(symbol, timeframe, limit)` запросы разделяют один downstream-вызов; каждый caller имеет независимый `CancellationToken` |
 | `IMarketCacheService.cs` / `MarketCacheService.cs` | Redis-кэш с stampede protection (`SetIfNotExistsAsync`) |
 | `IMarketConfigService.cs` / `MarketConfigService.cs` | конфиг символов и таймфреймов |
 | `IBybitSymbolProvider.cs` / `BybitSymbolProvider.cs` | получение активных символов с Bybit |
-| `IDataServiceClient.cs` / `DataServiceClient.cs` | Kafka-клиент к data-сервису; различает inline rows и `claim_check`, чтобы chart-path не путал large payload с пустым результатом |
+| `IDataServiceClient.cs` / `DataServiceClient.cs` | Kafka-клиент к data-сервису; различает inline rows и `claim_check`, а также умеет делать synchronous `cmd.data.dataset.ingest` для lazy hydrate chart-window перед ответом клиенту |
 | `MarketSettings.cs` | strongly-typed конфиг market-блока (включает 4 queue-поля) |
 | `TimeframeMap.cs` | маппинг таймфреймов ID → Bybit interval |
 | `CandleCountGrid.cs` | валидация и маппинг количества свечей |
