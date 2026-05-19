@@ -77,6 +77,12 @@ self-signed сертификат для `:8443`. Если в каталоге у
 
 Для local/full stack default остаётся прежним: `REDPANDA_EXTERNAL_HOST=localhost`.
 
+Во внутренней docker-сети admin facade на `:8443` проксирует `/api/admin/*`
+в `gateway-service:5020`. Если direct `http://<backend-host>:7520/health`
+жив, а `https://<backend-host>:8443/api/admin/*` отдаёт `502`, сначала
+проверь корректность upstream alias в `nginx/nginx.conf` и то, что
+`gateway-service` действительно подключён к `modelline_net`.
+
 ## Запуск
 
 ```powershell
