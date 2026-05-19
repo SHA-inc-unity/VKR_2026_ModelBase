@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Confluent.Kafka;
+using Confluent.Kafka.Admin;
 using Microsoft.Extensions.Options;
 
 namespace GatewayService.API.Kafka;
@@ -13,6 +14,10 @@ namespace GatewayService.API.Kafka;
 /// </summary>
 public sealed class KafkaRequestClient : IHostedService, IDisposable
 {
+    private static readonly TimeSpan ReplyInboxStartupBudget = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan ReplyInboxRetryDelay = TimeSpan.FromSeconds(1);
+
+    private readonly IAdminClient _admin;
     private readonly IProducer<string, string> _producer;
     private readonly IConsumer<string, string> _consumer;
     private readonly ILogger<KafkaRequestClient> _log;
@@ -31,6 +36,11 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
 
         var bootstrap = opts.Value.BootstrapServers;
 
+        _admin = new AdminClientBuilder(new AdminClientConfig
+        {
+            BootstrapServers = bootstrap,
+        }).Build();
+
         _producer = new ProducerBuilder<string, string>(new ProducerConfig
         {
             BootstrapServers      = bootstrap,
@@ -45,7 +55,7 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
             GroupId                        = $"gateway-reply-{instanceId}",
             AutoOffsetReset                = AutoOffsetReset.Latest,
             EnableAutoCommit               = true,
-            AllowAutoCreateTopics          = true,
+            AllowAutoCreateTopics          = false,
             TopicMetadataRefreshIntervalMs = 5000,
         })
         .SetErrorHandler((_, err) =>
@@ -58,13 +68,13 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
         .Build();
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        await EnsureReplyInboxTopicAsync(cancellationToken);
         _consumer.Subscribe(_replyInbox);
         _loopTask = Task.Run(() => ConsumeLoopAsync(_loopCts.Token), _loopCts.Token);
         _log.LogInformation("KafkaRequestClient started, reply inbox: {Inbox}", _replyInbox);
-        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -167,8 +177,52 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
 
     public void Dispose()
     {
+        _admin.Dispose();
         _producer.Dispose();
         _consumer.Dispose();
         _loopCts?.Dispose();
+    }
+
+    private async Task EnsureReplyInboxTopicAsync(CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + ReplyInboxStartupBudget;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                await _admin.CreateTopicsAsync(
+                    [new TopicSpecification
+                    {
+                        Name = _replyInbox,
+                        NumPartitions = 1,
+                        ReplicationFactor = 1,
+                    }],
+                    new CreateTopicsOptions
+                    {
+                        RequestTimeout = ReplyInboxStartupBudget,
+                        OperationTimeout = ReplyInboxStartupBudget,
+                    });
+
+                _log.LogInformation("KafkaRequestClient created reply inbox topic {Inbox}", _replyInbox);
+                await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+                return;
+            }
+            catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code == ErrorCode.TopicAlreadyExists))
+            {
+                _log.LogDebug("KafkaRequestClient reply inbox topic already exists: {Inbox}", _replyInbox);
+                await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+                return;
+            }
+            catch (Exception ex) when (DateTime.UtcNow < deadline)
+            {
+                _log.LogWarning(ex,
+                    "KafkaRequestClient failed to create reply inbox {Inbox}; retrying",
+                    _replyInbox);
+                await Task.Delay(ReplyInboxRetryDelay, ct);
+            }
+        }
     }
 }

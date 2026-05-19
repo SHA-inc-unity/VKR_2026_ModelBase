@@ -7,6 +7,10 @@ The gateway is the **single entry point** for the mobile app. It aggregates resp
 Downstream IPC is **Kafka-only** (Redpanda broker). The former HTTP client to
 `microservice_account` was replaced with `KafkaRequestClient` (async
 request/reply on a per-instance `reply.gateway.{instanceId}` inbox).
+На старте gateway теперь явно создаёт этот reply-inbox topic через Kafka
+Admin API и только потом подписывается на него, чтобы admin facade не
+зависал в `504 Kafka request timed out`, когда topic ещё не материализован
+или leader не успел появиться.
 
 ---
 
