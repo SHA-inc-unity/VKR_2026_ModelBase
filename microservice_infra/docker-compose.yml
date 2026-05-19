@@ -187,6 +187,19 @@ services:
     networks:
       - modelline_net
 
+  # One-shot TLS bootstrap for the remote admin facade.
+  # Existing files in ADMIN_BACKEND_CERTS_DIR are preserved.
+  nginx-cert-init:
+    build:
+      context: .
+      dockerfile: nginx/cert-init.Dockerfile
+    container_name: modelline-nginx-cert-init
+    restart: "no"
+    environment:
+      CERT_DIR: /certs
+    volumes:
+      - ${ADMIN_BACKEND_CERTS_DIR:-./nginx/certs}:/certs
+
   # Nginx reverse proxy — единственный внешний вход в ModelLine.
   #
   # Публикуется как host-порт 8501 (override через NGINX_PORT). Внутри
@@ -201,17 +214,17 @@ services:
   #
   # Split deployment (8443):
   #   Дополнительный TLS-сервер на порту 8443 — admin facade для удалённого
-  #   admin-хоста. Требует монтирования TLS-сертификата:
-  #     ADMIN_BACKEND_CERTS_DIR=<host-path-to-dir-with-tls.crt-and-tls.key>
-  #   Сгенерировать самоподписанный:
-  #     openssl req -x509 -newkey rsa:4096 -keyout tls.key -out tls.crt \
-  #       -days 365 -nodes -subj '/CN=modelline-backend'
+  #   admin-хоста. Если каталог сертификатов пустой, self-signed cert
+  #   будет автоматически создан через nginx-cert-init.
   nginx:
     image: nginx:1.27-alpine
     container_name: modelline-nginx
     restart: unless-stopped
     depends_on:
-      - minio
+      minio:
+        condition: service_started
+      nginx-cert-init:
+        condition: service_completed_successfully
     ports:
       - "${NGINX_PORT:-8501}:80"
       - "${ADMIN_BACKEND_PORT:-8443}:8443"

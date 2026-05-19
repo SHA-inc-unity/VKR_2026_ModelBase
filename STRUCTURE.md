@@ -13,7 +13,7 @@
                         │         microservice_infra           │
                         │  Redpanda (Kafka) :9092              │
                         │  MinIO (S3)       :9000 (internal)   │
-                        │  Nginx (proxy)    :8501 (host)       │
+                        │  Nginx (proxy)    :8501/:8443 (host) │
                         │  modelline_net (docker bridge)       │
                         └──────────────┬───────────────────────┘
                                        │ Kafka IPC only
@@ -36,7 +36,7 @@
                    /modelline-blobs/* → minio:9000  (signed dataset downloads)
 
        Split deployment:
-             backend-host         → noadmin
+             backend-host         → noadmin (8443 TLS facade с auto-cert bootstrap)
              remote admin-host    → onlyadmin (admin-head на :443/admin)
              split transport      → HTTPS admin facade :8443
 ```
@@ -60,7 +60,7 @@
 | `.github/instructions/` | File Instructions для агентного workflow внутри репозитория |
 | `.gitignore` | Git-правила: Python, .NET, Docker, IDE, OS, ML-артефакты |
 | `microservicestarter/` | Единый менеджер запуска всех сервисов |
-| `microservice_infra/` | Shared инфраструктура: Redpanda + MinIO |
+| `microservice_infra/` | Shared инфраструктура: Redpanda + MinIO + nginx ingress + one-shot TLS bootstrap |
 | `microservice_analitic/` | ML-сервис: обучение, прогнозы (Python) |
 | `microservice_data/` | Data-сервис: PostgreSQL + Kafka (C#/.NET 8) |
 | `microservice_admin/` | Admin UI: Next.js + Kafka (TypeScript) |
@@ -381,7 +381,7 @@
 
 | Компонент | Порт (host) | Назначение |
 | ---------------- | ----------- | ---------- |
-| Nginx | `8501` | Browser-facing ingress local/full-стека и download ingress backend-host'а: `/admin/*` → admin:3000, `/modelline-blobs/*` → minio:9000 |
+| Nginx | `8501`, `8443` | Browser-facing ingress local/full-стека и download ingress backend-host'а: `/admin/*` → admin:3000, `/modelline-blobs/*` → minio:9000. На `8443` держит HTTPS admin facade; при пустом cert-dir TLS bootstrap делает one-shot `nginx-cert-init`. |
 | Redpanda | `9092` | Kafka-API broker. Внутри сети: `redpanda:29092` |
 | Redpanda Console | `8080` | Web UI топиков |
 | MinIO | `9000` | S3 claim-check хранилище (внутренний; наружу не публикуется как download path — для браузера используется `8501/modelline-blobs/*`) |

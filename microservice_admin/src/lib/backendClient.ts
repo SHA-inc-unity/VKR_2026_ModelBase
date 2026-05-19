@@ -21,8 +21,19 @@ export const ADMIN_BACKEND_BASE_URL =
 export const ADMIN_BACKEND_SHARED_TOKEN =
   process.env.ADMIN_BACKEND_SHARED_TOKEN ?? '';
 
+export const ADMIN_BACKEND_TLS_INSECURE =
+  /^(1|true|yes|on)$/i.test(process.env.ADMIN_BACKEND_TLS_INSECURE ?? '');
+
 /** True when the admin should use the HTTP facade instead of direct Kafka. */
 export const isSplitMode = ADMIN_BACKEND_BASE_URL.length > 0;
+
+if (
+  isSplitMode &&
+  ADMIN_BACKEND_TLS_INSECURE &&
+  ADMIN_BACKEND_BASE_URL.startsWith('https://')
+) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
 
 // ── Topic → path mapping ──────────────────────────────────────────────────────
 
