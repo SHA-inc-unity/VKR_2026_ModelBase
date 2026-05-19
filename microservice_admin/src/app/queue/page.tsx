@@ -10,6 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useDatasetJobs } from '@/hooks/useDatasetJobs';
 import { useDatasetJobsFeed } from '@/hooks/useDatasetJobsFeed';
+import { Topics } from '@/lib/topics';
 import { cn } from '@/lib/utils';
 import { useLocale } from '@/lib/i18nContext';
 
@@ -29,6 +30,21 @@ interface RuntimeLogResponse {
   logs: RuntimeLogEntry[];
 }
 
+const QUEUE_HISTORY_TOPICS = new Set<string>([
+  Topics.CMD_DATA_DATASET_JOBS_START,
+  Topics.CMD_DATA_DATASET_JOBS_CANCEL,
+  Topics.CMD_DATA_DATASET_DELETE_ROWS,
+  Topics.CMD_DATA_DATASET_CLEAN_APPLY,
+  Topics.CMD_DATA_DATASET_EXPORT,
+  Topics.CMD_DATA_DATASET_IMPORT_CSV,
+  Topics.CMD_DATA_DATASET_UPSERT_OHLCV,
+  Topics.CMD_ANALITIC_DATASET_LOAD,
+  Topics.CMD_ANALITIC_DATASET_LOAD_OHLCV,
+  Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES,
+  Topics.CMD_ANALITIC_ANOMALY_DBSCAN,
+  Topics.CMD_ANALYTICS_TRAIN_START,
+]);
+
 const LEVEL_BADGE: Record<RuntimeLogLevel, 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'info'> = {
   info: 'info',
   success: 'success',
@@ -45,6 +61,89 @@ function formatTime(value: string): string {
 function formatFields(fields?: Record<string, unknown>): string {
   if (!fields || Object.keys(fields).length === 0) return '';
   return JSON.stringify(fields, null, 2);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function formatRange(startMs?: unknown, endMs?: unknown): string | null {
+  if (typeof startMs !== 'number' || typeof endMs !== 'number') return null;
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  const days = Math.max(1, Math.round((endMs - startMs) / 86_400_000));
+  return `${start.toLocaleDateString()} - ${end.toLocaleDateString()} (${days}d)`;
+}
+
+function humanizeTopic(topic: string): string {
+  switch (topic) {
+    case Topics.CMD_DATA_DATASET_JOBS_START: return 'Dataset job start';
+    case Topics.CMD_DATA_DATASET_JOBS_CANCEL: return 'Dataset job cancel';
+    case Topics.CMD_DATA_DATASET_DELETE_ROWS: return 'Delete dataset rows';
+    case Topics.CMD_DATA_DATASET_CLEAN_APPLY: return 'Apply dataset clean';
+    case Topics.CMD_DATA_DATASET_EXPORT: return 'Export dataset';
+    case Topics.CMD_DATA_DATASET_IMPORT_CSV: return 'Import CSV';
+    case Topics.CMD_DATA_DATASET_UPSERT_OHLCV: return 'Upsert OHLCV';
+    case Topics.CMD_ANALITIC_DATASET_LOAD: return 'Load analitic dataset session';
+    case Topics.CMD_ANALITIC_DATASET_LOAD_OHLCV: return 'Load missing OHLCV';
+    case Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES: return 'Recompute features';
+    case Topics.CMD_ANALITIC_ANOMALY_DBSCAN: return 'Run DBSCAN';
+    case Topics.CMD_ANALYTICS_TRAIN_START: return 'Start training';
+    default: return topic;
+  }
+}
+
+function buildHistorySummary(item: RuntimeLogEntry): { request: string; result: string } {
+  const fields = item.fields ?? {};
+  const topic = typeof fields.topic === 'string' ? fields.topic : item.event;
+  const payloadSummary = asRecord(fields.payloadSummary);
+  const responseSummary = asRecord(fields.responseSummary);
+
+  const targetTable = (payloadSummary?.target_table ?? payloadSummary?.table ?? payloadSummary?.target_symbol) as string | undefined;
+  const timeframe = (payloadSummary?.target_timeframe ?? payloadSummary?.timeframe) as string | undefined;
+  const type = payloadSummary?.type as string | undefined;
+  const range = formatRange(
+    payloadSummary?.target_start_ms ?? payloadSummary?.start_ms,
+    payloadSummary?.target_end_ms ?? payloadSummary?.end_ms,
+  );
+
+  const requestParts = [humanizeTopic(topic)];
+  if (type) requestParts.push(type);
+  if (targetTable) requestParts.push(String(targetTable));
+  if (timeframe && targetTable !== timeframe) requestParts.push(String(timeframe));
+  if (range) requestParts.push(range);
+
+  const resultParts: string[] = [];
+  if (item.level === 'error') {
+    resultParts.push(item.message ?? 'Request failed');
+  } else {
+    if (responseSummary?.status) resultParts.push(String(responseSummary.status));
+    if (responseSummary?.job_id) resultParts.push(`job ${String(responseSummary.job_id).slice(0, 8)}`);
+    if (responseSummary?.deduped === true) resultParts.push('deduped');
+    if (typeof responseSummary?.rows_written === 'number') resultParts.push(`${responseSummary.rows_written} rows written`);
+    if (typeof responseSummary?.rows_updated === 'number') resultParts.push(`${responseSummary.rows_updated} rows updated`);
+    if (typeof responseSummary?.rows_deleted === 'number') resultParts.push(`${responseSummary.rows_deleted} rows deleted`);
+    if (typeof responseSummary?.rows_affected === 'number') resultParts.push(`${responseSummary.rows_affected} rows affected`);
+    if (typeof responseSummary?.audit_id === 'number') resultParts.push(`audit #${responseSummary.audit_id}`);
+    if (resultParts.length === 0) resultParts.push('Accepted');
+  }
+
+  return {
+    request: requestParts.join(' · '),
+    result: resultParts.join(' · '),
+  };
+}
+
+function isQueueHistoryItem(item: RuntimeLogEntry): boolean {
+  if (item.source !== 'api/kafka') return false;
+  if (item.event !== 'request:success' && item.event !== 'request:backend-error' && item.event !== 'request:unexpected-error') {
+    return false;
+  }
+  const topic = typeof item.fields?.topic === 'string' ? item.fields.topic : null;
+  return topic !== null && QUEUE_HISTORY_TOPICS.has(topic);
 }
 
 export default function QueuePage() {
@@ -92,8 +191,9 @@ export default function QueuePage() {
   const runningJobs = useMemo(() => jobs.filter(job => job.status === 'running').length, [jobs]);
   const queuedJobs = useMemo(() => jobs.filter(job => job.status === 'queued').length, [jobs]);
   const finishedJobs = useMemo(() => jobs.filter(job => job.finished).length, [jobs]);
-  const errors = useMemo(() => logs.filter(item => item.level === 'error').length, [logs]);
-  const lastLog = logs[0];
+  const historyItems = useMemo(() => logs.filter(isQueueHistoryItem), [logs]);
+  const errors = useMemo(() => historyItems.filter(item => item.level === 'error').length, [historyItems]);
+  const lastLog = historyItems[0];
 
   return (
     <div className="space-y-4 lg:space-y-5">
@@ -205,33 +305,39 @@ export default function QueuePage() {
                       <TableCell><Skeleton className="h-4 w-full" /></TableCell>
                     </TableRow>
                   ))
-                ) : logs.length === 0 ? (
+                ) : historyItems.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={5} className="h-28 text-center text-muted-foreground">
                       {t('queue.noRequests')}
                     </TableCell>
                   </TableRow>
                 ) : (
-                  logs.map(item => (
-                    <TableRow key={item.id} className="align-top">
-                      <TableCell className="font-mono text-xs text-muted-foreground">{formatTime(item.ts)}</TableCell>
-                      <TableCell>
-                        <Badge variant={LEVEL_BADGE[item.level]} className="uppercase">{item.level}</Badge>
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{item.source}</TableCell>
-                      <TableCell className="font-mono text-xs">{item.event}</TableCell>
-                      <TableCell>
-                        <div className="max-w-[980px] space-y-1">
-                          {item.message && <div className="text-sm text-foreground">{item.message}</div>}
-                          {item.fields && (
-                            <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded bg-background/40 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                              {formatFields(item.fields)}
-                            </pre>
-                          )}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))
+                  historyItems.map(item => {
+                    const summary = buildHistorySummary(item);
+                    return (
+                      <TableRow key={item.id} className="align-top">
+                        <TableCell className="font-mono text-xs text-muted-foreground">{formatTime(item.ts)}</TableCell>
+                        <TableCell>
+                          <Badge variant={LEVEL_BADGE[item.level]} className="uppercase">{item.level}</Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{item.source}</TableCell>
+                        <TableCell className="font-mono text-xs">{typeof item.fields?.topic === 'string' ? item.fields.topic : item.event}</TableCell>
+                        <TableCell>
+                          <div className="max-w-[980px] space-y-1">
+                            <div className="text-sm text-foreground">{summary.request}</div>
+                            <div className={cn('text-xs', item.level === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
+                              {summary.result}
+                            </div>
+                            {item.fields && (
+                              <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded bg-background/40 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                                {formatFields(item.fields)}
+                              </pre>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
                 )}
               </TableBody>
             </Table>

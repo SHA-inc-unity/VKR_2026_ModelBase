@@ -131,6 +131,30 @@ function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
   if (!deferRebuild) rebuildSnapshot();
 }
 
+async function fetchJobsByIds(jobIds: string[], deferRebuild = false): Promise<boolean> {
+  const uniqueIds = Array.from(new Set(jobIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return false;
+
+  let changed = false;
+  await Promise.all(uniqueIds.map(async (jobId) => {
+    try {
+      const resp = await kafkaCall(
+        Topics.CMD_DATA_DATASET_JOBS_GET,
+        { job_id: jobId },
+        { timeoutMs: 10_000 },
+      ) as { job?: DatasetJobWire };
+      if (!resp?.job?.job_id) return;
+      mergeJobWire(resp.job, true);
+      changed = true;
+    } catch {
+      // Best-effort refresh only.
+    }
+  }));
+
+  if (changed && !deferRebuild) rebuildSnapshot();
+  return changed;
+}
+
 /** Apply a progress event from EVT_DATA_DATASET_JOB_PROGRESS. */
 export function applyJobProgress(e: DatasetJobProgressEvent): void {
   mergeJobWire({
@@ -203,15 +227,29 @@ export function seedQueuedJob(args: {
  */
 export async function refreshActiveJobs(): Promise<void> {
   try {
+    const localActiveIds = Array.from(_jobs.values())
+      .filter(job => !job.finished)
+      .map(job => job.job_id);
     const resp = await kafkaCall(
       Topics.CMD_DATA_DATASET_JOBS_LIST,
       { status_group: 'active', limit: 50 },
       { timeoutMs: 10_000 },
     ) as { jobs?: DatasetJobWire[] };
-    if (!resp?.jobs) return;
-    for (const j of resp.jobs) {
+    const activeJobs = resp?.jobs ?? [];
+    const activeIds = new Set(activeJobs.map(job => job.job_id));
+
+    for (const j of activeJobs) {
       mergeJobWire(j, true);
     }
+
+    // If a locally-running job disappeared from the active list and we missed
+    // its completed SSE event, reconcile it through JOBS_GET so the UI does
+    // not stay stuck in a stale running/queued state until page reload.
+    const disappearedIds = localActiveIds.filter(jobId => !activeIds.has(jobId));
+    if (disappearedIds.length > 0) {
+      await fetchJobsByIds(disappearedIds, true);
+    }
+
     rebuildSnapshot();
   } catch {
     // Best-effort hydration; SSE will still populate live updates.
@@ -224,26 +262,7 @@ export async function refreshActiveJobs(): Promise<void> {
  * transition.
  */
 export async function refreshJobsByIds(jobIds: string[]): Promise<void> {
-  const uniqueIds = Array.from(new Set(jobIds.filter(Boolean)));
-  if (uniqueIds.length === 0) return;
-
-  let changed = false;
-  await Promise.all(uniqueIds.map(async (jobId) => {
-    try {
-      const resp = await kafkaCall(
-        Topics.CMD_DATA_DATASET_JOBS_GET,
-        { job_id: jobId },
-        { timeoutMs: 10_000 },
-      ) as { job?: DatasetJobWire };
-      if (!resp?.job?.job_id) return;
-      mergeJobWire(resp.job, true);
-      changed = true;
-    } catch {
-      // Best-effort refresh only.
-    }
-  }));
-
-  if (changed) rebuildSnapshot();
+  await fetchJobsByIds(jobIds);
 }
 
 /** Cancel a job by id. Returns true if the cancel command was accepted. */
