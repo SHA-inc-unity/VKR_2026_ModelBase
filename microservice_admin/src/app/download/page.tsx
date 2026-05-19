@@ -7,9 +7,9 @@ import { kafkaCall, newCorrelationId } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
 import { useEvents } from '@/hooks/useEvents';
-import { applyJobProgress, applyJobCompleted, refreshActiveJobs, refreshJobsByIds, seedQueuedJob, useDatasetJobs } from '@/hooks/useDatasetJobs';
+import { refreshActiveJobs, refreshJobsByIds, seedQueuedJob, useDatasetJobs } from '@/hooks/useDatasetJobs';
+import { useDatasetJobsFeed } from '@/hooks/useDatasetJobsFeed';
 import type { DatasetJobView } from '@/hooks/useDatasetJobs';
-import DatasetJobsPanel from '@/components/DatasetJobsPanel';
 import {
   SYMBOLS,
   TIMEFRAMES,
@@ -242,6 +242,8 @@ function humanizeJobStage(stage?: string | null): string {
   }
 }
 
+const INGEST_EXECUTION_SLOT_COUNT = 4;
+
 function AllIngestProgress({
   statuses,
   meta,
@@ -299,7 +301,7 @@ function AllIngestProgress({
       <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-4">
         <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
           <div className="text-muted-foreground">Execution slots</div>
-          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{runningRows.length} / 2</div>
+          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{runningRows.length} / {INGEST_EXECUTION_SLOT_COUNT}</div>
         </div>
         <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
           <div className="text-muted-foreground">Queue</div>
@@ -324,7 +326,7 @@ function AllIngestProgress({
       <div className="space-y-2">
         <div className="text-[11px] font-medium text-foreground">Execution slots</div>
         <div className="grid gap-2">
-          {[0, 1].map(slotIdx => {
+          {Array.from({ length: Math.max(INGEST_EXECUTION_SLOT_COUNT, runningRows.length) }, (_, slotIdx) => {
             const row = runningRows[slotIdx];
             if (!row) {
               return (
@@ -593,15 +595,8 @@ export default function DatasetPage() {
         });
       });
     },
-    EVT_DATA_DATASET_JOB_PROGRESS:  (ev) => applyJobProgress(ev),
-    EVT_DATA_DATASET_JOB_COMPLETED: (ev) => applyJobCompleted(ev),
   });
-
-  // Phase G hydration: on mount, fetch any jobs that are still active so
-  // refreshing the page doesn't lose progress visibility.
-  useEffect(() => {
-    void refreshActiveJobs();
-  }, []);
+  useDatasetJobsFeed();
 
   const liveIngestJobIds = allJobs
     .filter(job => job.type === 'ingest' && !job.finished)
@@ -1552,8 +1547,6 @@ export default function DatasetPage() {
       <header className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight">Dataset</h1>
       </header>
-
-      <DatasetJobsPanel />
 
       {/* ── 2-column: Config left | Coverage right ── */}
       <div className="grid grid-cols-1 lg:grid-cols-[380px,1fr] gap-4 sm:gap-6 items-start">

@@ -86,12 +86,22 @@ shared token.
 но даёт оператору быстрый просмотр текущей admin-side цепочки прямо из
 ModelLine без доступа к shell.
 
+Детальная живая очередь вынесена в отдельную страницу **Queue** — седьмой
+пункт меню после Logs. Она совмещает `DatasetJobsPanel` и тот же
+process-local request-stream из `/api/logs`, поэтому оператор видит в одном
+месте и активные/недавно завершённые dataset jobs, и входящий поток admin
+`/api/*` / backend-facade запросов. Download-экран после этого оставляет у
+себя только компактный `AllIngestProgress`, без верхнего списка всех jobs.
+
 Dataset jobs на странице Download теперь страхуются не только SSE: пока
 экран отслеживает активные ingest jobs, admin дополнительно делает
 best-effort polling `cmd.data.dataset.jobs.list` + `cmd.data.dataset.jobs.get`
 раз в 5 с. Это устраняет ложный UI-сценарий, когда backend уже перевёл job
 в `running` или terminal-state, но browser пропустил progress/completed
 event и продолжал показывать `queued` / `stalled`.
+
+`AllIngestProgress` на Download синхронизирован с backend runner по
+ёмкости ingest-очереди и теперь отображает 4 execution slot-а вместо 2.
 
 Backend-host теперь сам поднимает `:8443` без ручной подготовки `tls.crt` / `tls.key`: `microservice_infra` автогенерирует self-signed сертификат в `ADMIN_BACKEND_CERTS_DIR`, если каталог пустой. Чтобы этот split-path работал без дополнительного trust-store bootstrap, `admin-online` по умолчанию получает `ADMIN_BACKEND_TLS_INSECURE=1` и принимает self-signed backend cert. `/api/health` вычисляет split-mode из runtime env на каждый запрос и в split-mode проверяет только `ADMIN_BACKEND_BASE_URL/health`, а не прямые `ONLINE_*` endpoints. После установки доверенного сертификата на backend-host переведи admin-host на `ADMIN_BACKEND_TLS_INSECURE=0`.
 

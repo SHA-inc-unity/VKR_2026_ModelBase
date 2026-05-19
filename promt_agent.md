@@ -16,6 +16,8 @@
 - `microservice_admin/src/lib/adminRuntimeLog.ts`: server-only ring buffer последних admin diagnostics; `/api/health`, `/api/kafka` и `backendClient.ts` пишут туда те же этапы, которые печатают в container logs.
 - Корневой `.gitignore` раньше глобально игнорировал любые каталоги `logs/`, из-за чего `microservice_admin/src/app/logs` и `src/app/api/logs` не попадали в git и давали `404` на admin-host при одинаковом `HEAD`. Добавлены точечные unignore-правила для этих route-каталогов.
 - `microservice_admin/src/hooks/useDatasetJobs.ts` + `src/app/download/page.tsx`: добавлен fallback polling `cmd.data.dataset.jobs.list` / `cmd.data.dataset.jobs.get` для tracked ingest jobs. Это убирает UI-баг, где backend уже исполнял dataset jobs, а Download-экран оставался в ложном `queued/stalled`, если SSE не донёс progress/completed event.
+- `microservice_data/src/DataService.API/Jobs/DatasetJobRunner.cs`: ingest concurrency поднят с 2 до 4 при сохранении отдельного heavy-TF gate на `1m`/`3m`. `microservice_admin/src/app/download/page.tsx` синхронизирован на 4 execution slot-а, а большой `Active dataset jobs` panel вынесен в новую вкладку `/queue`.
+- `microservice_admin/src/app/queue/page.tsx` + `src/hooks/useDatasetJobsFeed.ts`: добавлена 7-я вкладка Queue. Она показывает live dataset jobs и request-stream из process-local admin runtime buffer в одном месте; Download теперь оставляет у себя только scoped ingest progress.
 
 ### 2026-05-18
 

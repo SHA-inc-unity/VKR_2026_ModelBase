@@ -16,11 +16,11 @@ public sealed class DatasetJobRunner : BackgroundService
     // and Bybit rate-limit budget reasonable. Single-instance deployment
     // — these are process-local semaphores.
     //
-    // Ingest cap reduced from 4 to 2: at 8 parallel windows × 2 jobs = 16 concurrent
-    // HTTP requests, still well within the shared 96 r/s budget.
+    // Ingest cap raised back to 4: at 8 parallel windows × 4 jobs = 32 concurrent
+    // HTTP requests, still within the shared 96 r/s budget for a single instance.
     private static readonly Dictionary<string, int> Caps = new(StringComparer.OrdinalIgnoreCase)
     {
-        [DatasetJobType.Ingest]          = 2,
+        [DatasetJobType.Ingest]          = 4,
         [DatasetJobType.DetectAnomalies] = 8,
         [DatasetJobType.ComputeFeatures] = 2,
         [DatasetJobType.CleanApply]      = 2,

@@ -14,6 +14,7 @@ const translations = {
     'nav.compare':   'Compare',
     'nav.anomaly':   'Anomaly',
     'nav.logs':      'Logs',
+    'nav.queue':     'Queue',
     'nav.kafka':     'Kafka',
 
     // ── Common ───────────────────────────────────────────────────────────
@@ -124,6 +125,17 @@ const translations = {
     'logs.event':       'Event',
     'logs.details':     'Details',
     'logs.noEvents':    'No events',
+
+    // ── Queue ────────────────────────────────────────────────────────────
+    'queue.title':         'Queue',
+    'queue.activeJobs':    'Active Jobs',
+    'queue.runningJobs':   'Running',
+    'queue.queuedJobs':    'Queued',
+    'queue.finishedJobs':  'Finished',
+    'queue.requestErrors': 'Request Errors',
+    'queue.requests':      'API / Server Request Stream',
+    'queue.clear':         'Clear',
+    'queue.noRequests':    'No requests yet',
   },
 
   ru: {
@@ -134,6 +146,7 @@ const translations = {
     'nav.compare':   'Сравнение',
     'nav.anomaly':   'Аномалии',
     'nav.logs':      'Логи',
+    'nav.queue':     'Очередь',
     'nav.kafka':     'Kafka',
 
     // ── Common ───────────────────────────────────────────────────────────
@@ -244,6 +257,17 @@ const translations = {
     'logs.event':       'Событие',
     'logs.details':     'Детали',
     'logs.noEvents':    'Событий нет',
+
+    // ── Queue ────────────────────────────────────────────────────────────
+    'queue.title':         'Очередь',
+    'queue.activeJobs':    'Активные jobs',
+    'queue.runningJobs':   'Выполняются',
+    'queue.queuedJobs':    'В очереди',
+    'queue.finishedJobs':  'Завершены',
+    'queue.requestErrors': 'Ошибки запросов',
+    'queue.requests':      'Поток запросов API / server',
+    'queue.clear':         'Очистить',
+    'queue.noRequests':    'Запросов пока нет',
   },
 } as const;
 

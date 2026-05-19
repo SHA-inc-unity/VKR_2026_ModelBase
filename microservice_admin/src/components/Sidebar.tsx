@@ -10,6 +10,7 @@ import {
   GitCompare,
   ShieldAlert,
   ScrollText,
+  ListOrdered,
   Zap,
   ChevronLeft,
   ChevronRight,
@@ -26,6 +27,7 @@ const NAV_KEYS = [
   { href: '/compare',  key: 'nav.compare'   as const, icon: GitCompare },
   { href: '/anomaly',  key: 'nav.anomaly'   as const, icon: ShieldAlert },
   { href: '/logs',     key: 'nav.logs'      as const, icon: ScrollText },
+  { href: '/queue',    key: 'nav.queue'     as const, icon: ListOrdered },
 ] as const;
 
 type Mode = 'expanded-collapsible' | 'icon-only' | 'bottom-nav';

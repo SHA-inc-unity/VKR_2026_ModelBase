@@ -282,7 +282,7 @@ in background; until it succeeds callers get `{ error, code:
 
 | Constraint | Value | Purpose |
 | ---------- | ----- | ------- |
-| Max concurrent ingest jobs | 2 | Prevents Bybit rate-limit saturation across jobs |
+| Max concurrent ingest jobs | 4 | Keeps dataset queue moving faster while staying within the shared Bybit 96 r/s budget |
 | Heavy-TF ingest slot | 1 | At most one `1m`/`3m` ingest runs at a time |
 
 **Per-timeframe API parallelism** inside a single ingest job:
