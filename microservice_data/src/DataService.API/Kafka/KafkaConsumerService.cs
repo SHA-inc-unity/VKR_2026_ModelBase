@@ -5,6 +5,7 @@ using Confluent.Kafka;
 using DataService.API.Bybit;
 using DataService.API.Database;
 using DataService.API.Dataset;
+using DataService.API.Markets;
 using DataService.API.Minio;
 using DataService.API.Settings;
 using Microsoft.Extensions.Options;
@@ -21,7 +22,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly KafkaProducer              _producer;
     private readonly DatasetRepository          _repo;
     private readonly DatasetJobsRepository      _jobsRepo;
-    private readonly BybitApiClient             _bybit;
+    private readonly MarketDataClientFactory    _markets;
     private readonly MinioClaimCheckService     _minio;
     // Browser-facing origin для presigned URL'ов, которые получает admin
     // и в итоге показывает в браузере (CSV/ZIP экспорт, anomaly report).
@@ -59,6 +60,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         Topics.CmdDataDatasetComputeFeatures,
         Topics.CmdDataDatasetImportCsv,
         Topics.CmdDataDatasetUpsertOhlcv,
+        Topics.CmdDataDatasetRepairOhlcv,
         Topics.CmdDataDatasetColumnStats,
         Topics.CmdDataDatasetColumnHistogram,
     };
@@ -71,20 +73,21 @@ public sealed partial class KafkaConsumerService : BackgroundService
     // complete report is published to MinIO so the UI can fetch it via a
     // presigned URL on demand.
     private const int AnomalyInlineRowSample = 200;
+    private const string EvtAnaliticDatasetRepairProgress = "events.analitic.dataset.repair.progress";
 
     public KafkaConsumerService(
         IOptions<DataServiceSettings> opts,
         KafkaProducer producer,
         DatasetRepository repo,
         DatasetJobsRepository jobsRepo,
-        BybitApiClient bybit,
+        MarketDataClientFactory markets,
         MinioClaimCheckService minio,
         ILogger<KafkaConsumerService> log)
     {
         _producer                = producer;
         _repo                    = repo;
         _jobsRepo                = jobsRepo;
-        _bybit                   = bybit;
+        _markets                 = markets;
         _minio                   = minio;
         _browserDownloadBaseUrl  = opts.Value.Minio.PublicDownloadBaseUrl;
         _internalDownloadBaseUrl = opts.Value.Minio.Endpoint;
@@ -305,6 +308,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataDatasetCleanApply      => await HandleCleanApplyAsync(payload, ct),
             Topics.CmdDataDatasetAuditLog        => await HandleAuditLogAsync(payload, ct),
             Topics.CmdDataDatasetUpsertOhlcv     => await HandleUpsertOhlcvAsync(payload, ct),
+            Topics.CmdDataDatasetRepairOhlcv     => await HandleRepairOhlcvAsync(payload, correlationId, ct),
             Topics.CmdDataDatasetJobsStart       => await HandleJobsStartAsync(payload, ct),
             Topics.CmdDataDatasetJobsCancel      => await HandleJobsCancelAsync(payload, ct),
             Topics.CmdDataDatasetJobsGet         => await HandleJobsGetAsync(payload, ct),
@@ -411,6 +415,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         var table = TryGetString(p, "table");
         var symbol    = TryGetString(p, "symbol");
         var timeframe = TryGetString(p, "timeframe");
+        var exchange  = TryGetString(p, "exchange") ?? "bybit";
         long? stepMs = null;
 
         if (string.IsNullOrEmpty(table))
@@ -421,7 +426,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             {
                 var (key, _, tfStep) = DatasetCore.NormalizeTimeframe(timeframe);
                 stepMs = tfStep;
-                table  = DatasetCore.MakeTableName(symbol, key);
+                table  = DatasetCore.MakeTableName(symbol, key, exchange);
             }
             catch (ArgumentException ex) { return new { error = ex.Message }; }
         }
@@ -751,11 +756,12 @@ public sealed partial class KafkaConsumerService : BackgroundService
     {
         var symbol    = TryGetString(p, "symbol");
         var timeframe = TryGetString(p, "timeframe");
+        var exchange  = TryGetString(p, "exchange") ?? "bybit";
         if (string.IsNullOrEmpty(symbol) || string.IsNullOrEmpty(timeframe))
             return new { error = "missing fields: symbol, timeframe" };
 
         string table;
-        try { table = DatasetCore.MakeTableName(symbol, timeframe); }
+        try { table = DatasetCore.MakeTableName(symbol, timeframe, exchange); }
         catch (ArgumentException ex) { return new { error = ex.Message }; }
 
         var cov = await _repo.GetCoverageIfExistsAsync(table, ct);
@@ -858,20 +864,23 @@ public sealed partial class KafkaConsumerService : BackgroundService
     {
         var symbol    = TryGetString(p, "symbol");
         var timeframe = TryGetString(p, "timeframe");
+        var exchange  = TryGetString(p, "exchange") ?? "bybit";
         if (string.IsNullOrEmpty(symbol) || string.IsNullOrEmpty(timeframe))
             return new { error = "missing fields: symbol, timeframe" };
 
-        return new { table = DatasetCore.MakeTableName(symbol, timeframe) };
+        return new { table = DatasetCore.MakeTableName(symbol, timeframe, exchange) };
     }
 
     private async Task<object> HandleInstrumentDetailsAsync(JsonElement p, CancellationToken ct)
     {
         var category = TryGetString(p, "category");
         var symbol   = TryGetString(p, "symbol");
+        var exchange = (TryGetString(p, "exchange") ?? "bybit").Trim().ToLowerInvariant();
         if (string.IsNullOrEmpty(category) || string.IsNullOrEmpty(symbol))
             return new { error = "missing fields: category, symbol" };
 
-        var (launchMs, fundingMs) = await _bybit.FetchInstrumentDetailsAsync(category, symbol, ct);
+        var market = _markets.GetRequiredClient(exchange);
+        var (launchMs, fundingMs) = await market.FetchInstrumentDetailsAsync(category, symbol, ct);
         return new { launch_ms = launchMs, funding_interval_ms = fundingMs };
     }
 
@@ -905,6 +914,23 @@ public sealed partial class KafkaConsumerService : BackgroundService
         return _producer.PublishEventAsync(Topics.EvtDataIngestProgress, payload, ct);
     }
 
+    private Task PublishAnaliticRepairProgressAsync(
+        string correlationId, string stage, string label,
+        string status, int progress, string? detail, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(correlationId)) return Task.CompletedTask;
+        var payload = new
+        {
+            correlation_id = correlationId,
+            stage,
+            label,
+            status,
+            progress,
+            detail,
+        };
+        return _producer.PublishEventAsync(EvtAnaliticDatasetRepairProgress, payload, ct);
+    }
+
     private async Task<object> HandleIngestAsync(
         JsonElement p, string correlationId, CancellationToken ct)
     {
@@ -912,6 +938,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         var timeframe = TryGetString(p, "timeframe");
         var startMs   = TryGetInt64(p, "start_ms");
         var endMs     = TryGetInt64(p, "end_ms");
+        var exchange  = (TryGetString(p, "exchange") ?? "bybit").Trim().ToLowerInvariant();
         if (string.IsNullOrEmpty(symbol) || string.IsNullOrEmpty(timeframe)
             || startMs is null || endMs is null)
         {
@@ -927,7 +954,8 @@ public sealed partial class KafkaConsumerService : BackgroundService
             long stepMs;
             (key, interval, stepMs) = DatasetCore.NormalizeTimeframe(timeframe);
             var (s, e) = DatasetCore.NormalizeWindow(startMs.Value, endMs.Value, stepMs);
-            var table = DatasetCore.MakeTableName(symbol, key);
+            var table = DatasetCore.MakeTableName(symbol, key, exchange);
+            var market = _markets.GetRequiredClient(exchange);
 
             // ── Stage: prepare ────────────────────────────────────────────
             currentStage = "prepare"; currentLabel = "Подготовка таблицы";
@@ -966,7 +994,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
                 "running", 0, null, ct);
 
             var lastPublishedPage = 0;
-            var klineTask = _bybit.FetchKlinesAsync(
+            var klineTask = market.FetchKlinesAsync(
                 symbol.ToUpperInvariant(), interval, fetchStart, e, stepMs, 0, ct,
                 onPageDone: (done, total) =>
                 {
@@ -984,7 +1012,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             const string fundingLabel = "Загрузка funding rate";
             await PublishIngestProgressAsync(correlationId, fundingStage, fundingLabel,
                 "running", 0, null, ct);
-            var fundingTask = _bybit.FetchFundingRatesAsync(
+            var fundingTask = market.FetchFundingRatesAsync(
                 symbol.ToUpperInvariant(), fetchFundingStart, missingEnd, fundingIntervalMs, ct);
 
             // ── Stage: fetch_oi ──────────────────────────────────────────
@@ -992,7 +1020,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             const string oiLabelText = "Загрузка open interest";
             await PublishIngestProgressAsync(correlationId, oiStage, oiLabelText,
                 "running", 0, null, ct);
-            var oiTask = _bybit.FetchOpenInterestAsync(
+            var oiTask = market.FetchOpenInterestAsync(
                 symbol.ToUpperInvariant(), oiLabel, fetchOiStart, missingEnd, oiIntervalMs, ct);
 
             // Await each independently so we can emit "done" per stage.
@@ -1034,7 +1062,6 @@ public sealed partial class KafkaConsumerService : BackgroundService
             var oiFfill      = BuildForwardFill(oi);
 
             // Build MarketRow list only for timestamps that are missing.
-            var exchange = "bybit";
             var rows = new List<DatasetRepository.MarketRow>(missing.Count);
             foreach (var ts in missing)
             {
@@ -2201,6 +2228,170 @@ public sealed partial class KafkaConsumerService : BackgroundService
     }
 
     // ── OHLCV upsert (Analitic-orchestrated repair) ───────────────────────
+
+    /// <summary>
+    /// Handle <c>cmd.data.dataset.repair_ohlcv</c>: exchange-aware OHLCV repair
+    /// that reuses the data-service market clients and upserts only raw OHLCV
+    /// columns, preserving all non-OHLCV fields.
+    /// </summary>
+    private async Task<object> HandleRepairOhlcvAsync(
+        JsonElement p, string correlationId, CancellationToken ct)
+    {
+        var symbol    = TryGetString(p, "symbol");
+        var timeframe = TryGetString(p, "timeframe");
+        var startMs   = TryGetInt64(p, "start_ms");
+        var endMs     = TryGetInt64(p, "end_ms");
+        var exchange  = (TryGetString(p, "exchange") ?? "bybit").Trim().ToLowerInvariant();
+        var progressCorrelationId = TryGetString(p, "progress_correlation_id") ?? correlationId;
+        if (string.IsNullOrWhiteSpace(symbol) || string.IsNullOrWhiteSpace(timeframe)
+            || startMs is null || endMs is null)
+        {
+            return new { error = "missing fields: symbol, timeframe, start_ms, end_ms" };
+        }
+
+        var startedAt = DateTimeOffset.UtcNow;
+        string? currentStage = null;
+        string? currentLabel = null;
+
+        try
+        {
+            var (key, interval, stepMs) = DatasetCore.NormalizeTimeframe(timeframe);
+            var (s, e) = DatasetCore.NormalizeWindow(startMs.Value, endMs.Value, stepMs);
+            var table = DatasetCore.MakeTableName(symbol, key, exchange);
+            var market = _markets.GetRequiredClient(exchange);
+
+            currentStage = "prepare";
+            currentLabel = "Подготовка";
+            await PublishAnaliticRepairProgressAsync(
+                progressCorrelationId, currentStage, currentLabel,
+                "running", 0, null, ct);
+
+            await _repo.CreateTableIfNotExistsAsync(table, ct);
+
+            await PublishAnaliticRepairProgressAsync(
+                progressCorrelationId, currentStage, currentLabel,
+                "done", 100, table, ct);
+
+            currentStage = "fetch";
+            currentLabel = "Загрузка свечей";
+            await PublishAnaliticRepairProgressAsync(
+                progressCorrelationId, currentStage, currentLabel,
+                "running", 0, null, ct);
+
+            var lastPublishedPage = 0;
+            var klines = await market.FetchKlinesAsync(
+                symbol.ToUpperInvariant(), interval, s, e, stepMs, 0, ct,
+                onPageDone: (done, total) =>
+                {
+                    if (done != total && done - lastPublishedPage < 10) return;
+                    lastPublishedPage = done;
+                    var pct = total > 0 ? (int)Math.Min(99, (long)done * 100 / total) : 0;
+                    _ = PublishAnaliticRepairProgressAsync(
+                        progressCorrelationId, currentStage, currentLabel,
+                        "running", pct, $"{done} / {total} страниц", CancellationToken.None);
+                });
+
+            await PublishAnaliticRepairProgressAsync(
+                progressCorrelationId, currentStage, currentLabel,
+                "done", 100, $"{klines.Count:N0} свечей", ct);
+
+            currentStage = "upsert";
+            currentLabel = "Запись в базу";
+            await PublishAnaliticRepairProgressAsync(
+                progressCorrelationId, currentStage, currentLabel,
+                "running", 0, $"{klines.Count:N0} строк", ct);
+
+            if (klines.Count == 0)
+            {
+                await PublishAnaliticRepairProgressAsync(
+                    progressCorrelationId, currentStage, currentLabel,
+                    "done", 100, "нет данных", ct);
+                return new
+                {
+                    table,
+                    rows_fetched = 0,
+                    rows_affected = 0,
+                    elapsed_sec = Math.Round((DateTimeOffset.UtcNow - startedAt).TotalSeconds, 2),
+                };
+            }
+
+            long totalAffected = 0;
+            long sentRows = 0;
+            for (var offset = 0; offset < klines.Count; offset += DatasetConstants.UpsertBatchSize)
+            {
+                var size = Math.Min(DatasetConstants.UpsertBatchSize, klines.Count - offset);
+                var batch = new List<DatasetRepository.OhlcvRow>(size);
+                for (var i = offset; i < offset + size; i++)
+                {
+                    var row = klines[i];
+                    batch.Add(new DatasetRepository.OhlcvRow(
+                        row.TimestampMs,
+                        row.Open,
+                        row.High,
+                        row.Low,
+                        row.Close,
+                        row.Volume,
+                        row.Turnover));
+                }
+
+                totalAffected += await _repo.BulkUpdateOhlcvAsync(
+                    table, symbol, exchange, key, batch, ct);
+                sentRows += batch.Count;
+
+                await PublishAnaliticRepairProgressAsync(
+                    progressCorrelationId, currentStage, currentLabel,
+                    "running",
+                    Math.Min(99, (int)(sentRows * 100 / klines.Count)),
+                    $"{sentRows:N0}/{klines.Count:N0} строк",
+                    ct);
+            }
+
+            await PublishAnaliticRepairProgressAsync(
+                progressCorrelationId, currentStage, currentLabel,
+                "done", 100, $"{totalAffected:N0} обновлено", ct);
+
+            return new
+            {
+                table,
+                rows_fetched = klines.Count,
+                rows_affected = totalAffected,
+                elapsed_sec = Math.Round((DateTimeOffset.UtcNow - startedAt).TotalSeconds, 2),
+            };
+        }
+        catch (ArgumentException ex)
+        {
+            if (currentStage is not null && currentLabel is not null)
+            {
+                await PublishAnaliticRepairProgressAsync(
+                    progressCorrelationId, currentStage, currentLabel,
+                    "error", 0, ex.Message, ct);
+            }
+            return new { error = ex.Message };
+        }
+        catch (InvalidOperationException ex)
+        {
+            if (currentStage is not null && currentLabel is not null)
+            {
+                await PublishAnaliticRepairProgressAsync(
+                    progressCorrelationId, currentStage, currentLabel,
+                    "error", 0, ex.Message, ct);
+            }
+            return new { error = ex.Message };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "repair_ohlcv failed for {Exchange}:{Symbol}:{Timeframe}",
+                exchange, symbol, timeframe);
+            if (currentStage is not null && currentLabel is not null)
+            {
+                await PublishAnaliticRepairProgressAsync(
+                    progressCorrelationId, currentStage, currentLabel,
+                    "error", 0, ex.Message, ct);
+            }
+            return new { error = ex.Message };
+        }
+    }
 
     /// <summary>
     /// Handle <c>cmd.data.dataset.upsert_ohlcv</c>: merges OHLCV rows into an

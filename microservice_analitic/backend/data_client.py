@@ -367,11 +367,12 @@ async def _handle_quality_check(envelope) -> dict:
 
 
 async def _handle_load_ohlcv(envelope) -> dict:
-    """Fetch OHLCV from Bybit and upsert into the existing table."""
+    """Delegate exchange-aware OHLCV repair to microservice_data."""
     from .dataset.repair import load_ohlcv
     payload = envelope.payload or {}
     symbol    = payload.get("symbol")
     timeframe = payload.get("timeframe")
+    exchange  = payload.get("exchange") or "bybit"
     start_ms  = payload.get("start_ms")
     end_ms    = payload.get("end_ms")
     if not symbol or not timeframe or start_ms is None or end_ms is None:
@@ -380,6 +381,7 @@ async def _handle_load_ohlcv(envelope) -> dict:
     return await load_ohlcv(
         symbol=str(symbol),
         timeframe=str(timeframe),
+        exchange=str(exchange),
         start_ms=int(start_ms),
         end_ms=int(end_ms),
         correlation_id=envelope.correlation_id or "",
@@ -394,12 +396,14 @@ async def _handle_recompute_features(envelope) -> dict:
     payload = envelope.payload or {}
     symbol    = payload.get("symbol")
     timeframe = payload.get("timeframe")
+    exchange  = payload.get("exchange") or "bybit"
     if not symbol or not timeframe:
         return {"error": "missing fields: symbol, timeframe"}
     client = _client_obj()
     return await recompute_features(
         symbol=str(symbol),
         timeframe=str(timeframe),
+        exchange=str(exchange),
         correlation_id=envelope.correlation_id or "",
         request=lambda topic, p, **kw: client.request(topic, p, **kw),
         publish=lambda topic, env: client.send(topic, env),

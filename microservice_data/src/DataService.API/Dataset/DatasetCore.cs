@@ -23,9 +23,25 @@ public static class DatasetCore
         return (key, tf.Interval, tf.StepMs);
     }
 
-    /// <summary>Build a PostgreSQL table name: {symbol}_{timeframe}.</summary>
-    public static string MakeTableName(string symbol, string timeframe) =>
-        $"{symbol.ToLowerInvariant()}_{timeframe.ToLowerInvariant()}";
+    /// <summary>
+    /// Build a PostgreSQL table name.
+    ///
+    /// Legacy Bybit datasets keep the historical shape `{symbol}_{timeframe}`
+    /// so existing tables remain readable without migration. Other exchanges
+    /// are isolated into their own tables: `{exchange}_{symbol}_{timeframe}`.
+    /// </summary>
+    public static string MakeTableName(string symbol, string timeframe, string? exchange = null)
+    {
+        var normalizedExchange = string.IsNullOrWhiteSpace(exchange)
+            ? "bybit"
+            : exchange.Trim().ToLowerInvariant();
+        var normalizedSymbol = symbol.Trim().ToLowerInvariant();
+        var normalizedTimeframe = timeframe.Trim().ToLowerInvariant();
+
+        return normalizedExchange == "bybit"
+            ? $"{normalizedSymbol}_{normalizedTimeframe}"
+            : $"{normalizedExchange}_{normalizedSymbol}_{normalizedTimeframe}";
+    }
 
     /// <summary>Round timestamp down to candle boundary.</summary>
     public static long FloorToStep(long timestampMs, long stepMs) =>

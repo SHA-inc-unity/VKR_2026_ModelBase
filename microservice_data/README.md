@@ -28,13 +28,13 @@
 | `cmd.data.dataset.find_missing` | in | req/reply | Missing timestamps (ms) for a stepped grid |
 | `cmd.data.dataset.rows` | in | req/reply | Row slice (projects `timestamp_ms`) |
 | `cmd.data.dataset.export` | in | req/reply | CSV export: streaming per-table (→ presigned URL) or bundled multi-table ZIP (→ presigned URL) |
-| `cmd.data.dataset.export_full` | in | req/reply | **Composite "load this dataset" command** for downstream services. Payload `{symbol, timeframe, max_rows?}` → server resolves the table name, validates existence + row-count cap, and streams the full table to MinIO in one round-trip. Response `{table_name, row_count, presigned_url}` or `{error: "table_not_found" \| "empty_table" \| "row_count_exceeds_limit", …}`. Replaces the make_table → coverage → export sequence used by microservice_analitic. |
+| `cmd.data.dataset.export_full` | in | req/reply | **Composite "load this dataset" command** for downstream services. Payload `{symbol, timeframe, exchange?="bybit", max_rows?}` → server resolves the exchange-aware table name, validates existence + row-count cap, and streams the full table to MinIO in one round-trip. Response `{table_name, row_count, presigned_url}` or `{error: "table_not_found" \| "empty_table" \| "row_count_exceeds_limit", …}`. Replaces the make_table → coverage → export sequence used by microservice_analitic. |
 | `cmd.data.dataset.table_schema` | in | req/reply | Column names + types |
 | `cmd.data.dataset.normalize_timeframe` | in | req/reply | Resolve timeframe alias |
-| `cmd.data.dataset.make_table_name` | in | req/reply | Build canonical `{symbol}_{timeframe}` |
-| `cmd.data.dataset.instrument_details` | in | req/reply | Bybit instrument launch + first-funding timestamps |
+| `cmd.data.dataset.make_table_name` | in | req/reply | Build canonical table name: legacy Bybit datasets stay `{symbol}_{timeframe}`, non-Bybit datasets are isolated as `{exchange}_{symbol}_{timeframe}` |
+| `cmd.data.dataset.instrument_details` | in | req/reply | Exchange-routed instrument metadata (`bybit`, `binance`, `kraken`) |
 | `cmd.data.dataset.constants` | in | req/reply | Supported timeframes + page limits |
-| `cmd.data.dataset.ingest` | in | req/reply | **Fetch Bybit → RSI → upsert** in the given window |
+| `cmd.data.dataset.ingest` | in | req/reply | **Fetch exchange market data → RSI → upsert** in the given window |
 | `cmd.data.dataset.delete_rows` | in | req/reply | Delete rows by range or TRUNCATE whole table |
 | `cmd.data.dataset.column_stats` | in | req/reply | df.info()-style per-column stats (non-null/min/max/mean/std) — значения приводятся в `float8`. Опциональные поля: `columns` (string[]) — запросить только эти колонки; `count_only` (bool) — пропустить MIN/MAX/AVG/STDDEV (только COUNT — многократно быстрее на больших таблицах) |
 | `cmd.data.dataset.column_histogram` | in | req/reply | Distribution histogram for a single numeric column |
@@ -43,15 +43,23 @@
 | `cmd.data.dataset.clean.preview` | in | req/reply | Counts only (no mutation). Returns `{ table, counts: { drop_duplicates, fix_ohlc, fill_zero_streaks, delete_by_timestamps, fill_gaps } }` |
 | `cmd.data.dataset.clean.apply` | in | req/reply | Mutates DB. Requires `confirm: true`. Holds `pg_advisory_lock` keyed by table name. Writes `dataset_audit_log(id, table_name, operation, params JSONB, rows_affected, applied_at)`. Returns `{ table, audit_id, rows_affected, total }` |
 | `cmd.data.dataset.upsert_ohlcv` | in | req/reply | Insert/update the six OHLCV-raw columns (open/high/low/close/volume/turnover) keyed by `timestamp_utc`. All other columns (funding_rate, open_interest, rsi, derived features) are preserved on conflict. Phase-4 candle-source-of-truth: every row must carry a complete O/H/L/C tuple sourced from the same kline; rows with partial OHLC or with prices that violate `low ≤ min(open, close) ≤ max(open, close) ≤ high` are rejected. Payload: `{ table, symbol, exchange, timeframe, rows:[{ts_ms, open, high, low, close, volume, turnover}] }`. Returns `{ rows_affected, rows_rejected, rejection_reasons }`. |
+| `cmd.data.dataset.repair_ohlcv` | in | req/reply | Exchange-aware OHLCV repair for downstream orchestration (currently `microservice_analitic`). Payload `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit", progress_correlation_id? }`. The handler resolves the canonical table name, fetches OHLCV through the selected market client (`bybit` / `binance` / `kraken`), upserts only OHLCV-raw columns via `BulkUpdateOhlcvAsync`, and publishes `prepare → fetch → upsert` progress in `events.analitic.dataset.repair.progress` using the forwarded correlation id. Returns `{ table, rows_fetched, rows_affected, elapsed_sec }` or `{ error }`. |
 | `cmd.data.dataset.compute_features` | in | req/reply | Idempotent SQL pass: `ALTER TABLE … ADD COLUMN IF NOT EXISTS` + `UPDATE` via window functions over raw OHLC/OI/RSI → 27 feature columns. Payload `{ table }` → `{ status, table, rows_updated }`. Ботх SQL commands run with `commandTimeout: 0` (no Npgsql timeout) — the windowed UPDATE over 1m tables (>2.5 M rows) routinely exceeds the default 30 s limit. |
 | `events.data.ingest.progress` | out | event | Staged ingest progress (fire-and-forget, no reply) |
 
 ### Ingest pipeline (`cmd.data.dataset.ingest`)
 
-Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handler currently supports only `bybit`; dataset jobs that request any other exchange are rejected early with `{ error, code: "unsupported_exchange" }`. The handler:
+Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handler routes requests through an exchange-specific market client. Supported exchanges today:
 
-1. Resolves the timeframe (alias-aware) and the canonical table name
-   `{symbol}_{timeframe}` in `crypt_date`.
+- `bybit` — full perpetual pipeline: klines + funding + open interest.
+- `binance` — full USDT-margined futures pipeline: klines + funding + open interest.
+- `kraken` — OHLC-only pipeline via public spot OHLC; funding/open-interest stay empty, and the upstream Kraken API exposes only the most recent 720 base candles.
+
+The handler:
+
+1. Resolves the timeframe (alias-aware) and the canonical table name in
+   `crypt_date`: `{symbol}_{timeframe}` for legacy Bybit tables, or
+   `{exchange}_{symbol}_{timeframe}` for other exchanges.
 2. Creates the target table if missing — schema:
    `timestamp_utc TIMESTAMPTZ PRIMARY KEY, symbol VARCHAR, exchange VARCHAR,
     timeframe VARCHAR, open_price NUMERIC, high_price NUMERIC,
@@ -60,23 +68,19 @@ Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handl
 3. Computes the set of **missing timestamps** via
    `generate_series(start, end, step) EXCEPT existing`. If the set is empty,
    returns early — no Bybit traffic at all.
-4. Fetches the three Bybit feeds in parallel. Each feed is itself sliced into
-   independent time-windows and fetched concurrently under
-   `DatasetConstants.MaxParallelApiWorkers` — **no server cursors**, all three
-   clients follow the same pattern:
-   - **`/v5/market/kline`** over `[fetchStart, e]` (where
-     `fetchStart = s − warmup*stepMs`, warmup covers RSI-14). Returns 7 fields:
-     `[startMs, open, high, low, close, volume, turnover]`.
-     Window size: `PageLimitKline × stepMs`.
-   - **`/v5/market/funding/history`** over
-     `[missingStart − fundingIntervalMs, missingEnd]` only — one 8h bucket
-     back as forward-fill buffer. Window size:
-     `PageLimitFunding × fundingIntervalMs` (default 8h).
-   - **`/v5/market/open-interest`** at
-     `ChooseOpenInterestInterval(stepMs)`, over
-     `[missingStart − oiIntervalMs, missingEnd]` — one interval back as
-     forward-fill buffer. Window size: `PageLimitOpenInterest × intervalMs`.
-5. Forward-fills funding rate + OI onto candle timestamps.
+4. Fetches market feeds in parallel through the selected exchange client.
+    Each feed is sliced into independent time-windows and fetched concurrently
+    under `DatasetConstants.MaxParallelApiWorkers` — **no server cursors**.
+    - **Bybit** keeps the existing `/v5/market/kline`,
+       `/v5/market/funding/history` and `/v5/market/open-interest` flow.
+    - **Binance** uses `/fapi/v1/klines`, `/fapi/v1/fundingRate` and
+       `/futures/data/openInterestHist` with the same incremental windowing
+       strategy.
+    - **Kraken** uses `/0/public/OHLC`; unsupported higher-level timeframes
+       (`3m`, `120m`, `360m`, `720m`) are aggregated from smaller upstream bars
+       inside the client.
+5. Forward-fills funding rate + OI onto candle timestamps when the selected
+    exchange provides these feeds. For Kraken both series stay `NULL`.
 6. Computes **Wilder's RSI (period 14)** over the warmup+main series
    (seeded with a simple average of the first 14 deltas, then recursive
    smoothing). The computation is **parallelised** across
@@ -254,7 +258,7 @@ operations cannot starve light ones that share the same PostgreSQL pool:
 | Tier | Limit | Topics |
 | ---- | ----- | ------ |
 | Outer (all handlers) | 32 in-flight | every `cmd.data.*` topic |
-| Inner (heavy ops) | 4 in-flight | `dataset.export`, `dataset.ingest`, `dataset.detect_anomalies`, `dataset.clean.preview`, `dataset.clean.apply`, `dataset.compute_features`, `dataset.import_csv`, `dataset.upsert_ohlcv`, `dataset.column_stats`, `dataset.column_histogram` |
+| Inner (heavy ops) | 4 in-flight | `dataset.export`, `dataset.ingest`, `dataset.detect_anomalies`, `dataset.clean.preview`, `dataset.clean.apply`, `dataset.compute_features`, `dataset.import_csv`, `dataset.upsert_ohlcv`, `dataset.repair_ohlcv`, `dataset.column_stats`, `dataset.column_histogram` |
 
 Light commands (`health`, `db.ping`, `list_tables`, `coverage`,
 `timestamps`, `find_missing`, `rows`, `browse`, `table_schema`,

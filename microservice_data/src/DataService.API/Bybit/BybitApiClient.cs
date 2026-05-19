@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using DataService.API.Dataset;
+using DataService.API.Markets;
 
 namespace DataService.API.Bybit;
 
@@ -8,7 +9,7 @@ namespace DataService.API.Bybit;
 /// HTTP client for Bybit public REST API with retry and lock-free instrument cache.
 /// Port of Python BybitApiClient.
 /// </summary>
-public sealed class BybitApiClient
+public sealed class BybitApiClient : IMarketDataClient
 {
     private readonly HttpClient _http;
     private readonly ILogger<BybitApiClient> _log;
@@ -24,6 +25,8 @@ public sealed class BybitApiClient
         _log  = log;
         _rate = rate;
     }
+
+    public string Exchange => "bybit";
 
     /// <summary>
     /// GET the given URL with retry, returning the parsed JSON document.

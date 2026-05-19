@@ -44,17 +44,16 @@ public sealed partial class KafkaConsumerService
             ? paramsElement.GetRawText()
             : "{}";
 
-        if (type == DatasetJobType.Ingest)
+        var effectiveExchange = TryGetString(payload, "target_exchange")
+            ?? TryGetString(paramsElement, "exchange")
+            ?? "bybit";
+        if (type == DatasetJobType.Ingest && !Markets.MarketDataClientFactory.IsSupportedExchange(effectiveExchange))
         {
-            var exchange = TryGetString(paramsElement, "exchange") ?? "bybit";
-            if (!string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase))
+            return new
             {
-                return new
-                {
-                    error = $"unsupported exchange: {exchange}",
-                    code = "unsupported_exchange",
-                };
-            }
+                error = $"unsupported exchange: {effectiveExchange}",
+                code = "unsupported_exchange",
+            };
         }
 
         // For ingest jobs we ALWAYS know the target table from
@@ -75,7 +74,7 @@ public sealed partial class KafkaConsumerService
             try
             {
                 effectiveTargetTable = Dataset.DatasetCore.MakeTableName(
-                    rawTargetSymbol!, rawTargetTimeframe!);
+                    rawTargetSymbol!, rawTargetTimeframe!, effectiveExchange);
             }
             catch (ArgumentException)
             {

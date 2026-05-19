@@ -1,7 +1,7 @@
 using System.Text.Json;
-using DataService.API.Bybit;
 using DataService.API.Database;
 using DataService.API.Dataset;
+using DataService.API.Markets;
 
 namespace DataService.API.Jobs;
 
@@ -53,12 +53,12 @@ public sealed class IngestJobHandler : IDatasetJobHandler
 {
     public string Type => DatasetJobType.Ingest;
     private readonly DatasetRepository _repo;
-    private readonly BybitApiClient _bybit;
+    private readonly MarketDataClientFactory _markets;
 
-    public IngestJobHandler(DatasetRepository repo, BybitApiClient bybit)
+    public IngestJobHandler(DatasetRepository repo, MarketDataClientFactory markets)
     {
         _repo = repo;
-        _bybit = bybit;
+        _markets = markets;
     }
 
     public async Task ExecuteAsync(JobContext ctx)
@@ -70,12 +70,10 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         var startMs   = p.L("start_ms")  ?? throw new ArgumentException("start_ms required");
         var endMs     = p.L("end_ms")    ?? throw new ArgumentException("end_ms required");
 
-        if (!string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException($"unsupported exchange: {exchange}");
-
         var (key, interval, stepMs) = DatasetCore.NormalizeTimeframe(timeframe);
         var (s, e) = DatasetCore.NormalizeWindow(startMs, endMs, stepMs);
-        var table = DatasetCore.MakeTableName(symbol, key);
+        var table = DatasetCore.MakeTableName(symbol, key, exchange);
+        var market = _markets.GetRequiredClient(exchange);
 
         // ── prepare ────────────────────────────────────────────
         var stagePrep = await ctx.StartStageAsync("prepare");
@@ -107,7 +105,7 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         var stageFetch = await ctx.StartStageAsync("fetch");
         await ctx.ReportAsync("fetch_klines", 5, $"missing={missing.Count}, fetching market data", total: missing.Count);
 
-        var klineT = _bybit.FetchKlinesAsync(
+        var klineT = market.FetchKlinesAsync(
             symbol.ToUpperInvariant(), interval, fetchStart, e, stepMs, maxParallel, ctx.CancellationToken,
             onPageDone: (done, total) =>
             {
@@ -117,9 +115,9 @@ public sealed class IngestJobHandler : IDatasetJobHandler
                     _ = ctx.ReportAsync("fetch_klines", pct, $"{done}/{total} pages", total: missing.Count);
                 }
             });
-        var fundingT = _bybit.FetchFundingRatesAsync(
+        var fundingT = market.FetchFundingRatesAsync(
             symbol.ToUpperInvariant(), missing[0] - fundingMs, missing[^1], fundingMs, ctx.CancellationToken);
-        var oiT = _bybit.FetchOpenInterestAsync(
+        var oiT = market.FetchOpenInterestAsync(
             symbol.ToUpperInvariant(), oiLabel, missing[0] - oiIntervalMs, missing[^1], oiIntervalMs, ctx.CancellationToken);
 
         var klines  = await klineT;

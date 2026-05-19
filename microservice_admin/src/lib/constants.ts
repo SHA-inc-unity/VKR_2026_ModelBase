@@ -27,8 +27,13 @@ export const TF_STEP_MS: Record<string, number> = {
   '1d':   86_400_000,
 };
 
-export function makeTableName(symbol: string, timeframe: string): string {
-  return `${symbol.toLowerCase()}_${timeframe}`;
+export function makeTableName(symbol: string, timeframe: string, exchange = 'bybit'): string {
+  const normalizedExchange = exchange.trim().toLowerCase();
+  const normalizedSymbol = symbol.toLowerCase();
+  const normalizedTimeframe = timeframe.toLowerCase();
+  return normalizedExchange === 'bybit'
+    ? `${normalizedSymbol}_${normalizedTimeframe}`
+    : `${normalizedExchange}_${normalizedSymbol}_${normalizedTimeframe}`;
 }
 
 /** Format an epoch-ms timestamp as ISO `YYYY-MM-DD` in UTC. */

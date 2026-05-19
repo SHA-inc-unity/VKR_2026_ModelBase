@@ -36,8 +36,32 @@ public static class ServiceCollectionExtensions
             configuration.GetSection(KafkaSettings.SectionName));
         services.Configure<MarketSettings>(
             configuration.GetSection(MarketSettings.SectionName));
+        services.Configure<CorsSettings>(
+            configuration.GetSection(CorsSettings.SectionName));
         services.Configure<AdminSettings>(
             configuration.GetSection("Admin"));
+
+        var corsSettings = configuration.GetSection(CorsSettings.SectionName).Get<CorsSettings>() ?? new();
+
+        services.AddCors(options =>
+        {
+            options.AddPolicy(CorsSettings.PolicyName, policy =>
+            {
+                policy.AllowAnyHeader()
+                      .AllowAnyMethod()
+                      .SetPreflightMaxAge(TimeSpan.FromSeconds(corsSettings.PreflightMaxAgeSeconds));
+
+                if (corsSettings.AllowAnyOrigin
+                    || corsSettings.AllowedOrigins.Length == 0
+                    || corsSettings.AllowedOrigins.Contains("*", StringComparer.Ordinal))
+                {
+                    policy.AllowAnyOrigin();
+                    return;
+                }
+
+                policy.WithOrigins(corsSettings.AllowedOrigins);
+            });
+        });
 
         // Admin API key filter — scoped so IOptions<AdminSettings> resolves cleanly
         services.AddScoped<AdminApiKeyFilter>();

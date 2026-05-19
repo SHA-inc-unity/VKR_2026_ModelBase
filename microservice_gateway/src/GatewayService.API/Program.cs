@@ -1,5 +1,6 @@
 using GatewayService.API.Extensions;
 using GatewayService.API.Kafka;
+using GatewayService.API.Settings;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using GatewayService.API.Middleware;
@@ -44,6 +45,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseMiddleware<GlobalExceptionMiddleware>();
+app.UseCors(CorsSettings.PolicyName);
 app.UseAuthentication();
 app.UseAuthorization();
 

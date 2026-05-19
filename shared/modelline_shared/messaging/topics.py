@@ -28,6 +28,7 @@ CMD_DATA_DATASET_CONSTANTS     = "cmd.data.dataset.constants"
 CMD_DATA_DATASET_DELETE_ROWS   = "cmd.data.dataset.delete_rows"
 CMD_DATA_DATASET_IMPORT_CSV    = "cmd.data.dataset.import_csv"
 CMD_DATA_DATASET_UPSERT_OHLCV  = "cmd.data.dataset.upsert_ohlcv"
+CMD_DATA_DATASET_REPAIR_OHLCV  = "cmd.data.dataset.repair_ohlcv"
 
 # ── data: dataset inspection / anomaly / clean ───────────────────────────────
 CMD_DATA_DATASET_COLUMN_STATS      = "cmd.data.dataset.column_stats"

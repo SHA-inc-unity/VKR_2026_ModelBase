@@ -76,28 +76,23 @@
   `repair_action` (`load_ohlcv` или `recompute_features`), который admin использует
   для соответствующей кнопки. Ответ:
   `{ table, total_rows, groups: [{ id, label, columns, fill_pct, status, repair_action }] }`.
-- `cmd.analitic.dataset.load_ohlcv` — догрузка OHLCV-свечей через Bybit
-  `/v5/market/kline` (`backend/dataset/repair.py`) **без перезаписи** остальных
-  колонок таблицы. Pipeline: `prepare` (вызов `cmd.data.dataset.make_table`) →
-  `fetch` (параллельный fan-out по `MAX_PARALLEL_API_WORKERS` окнам
-  `PAGE_LIMIT_KLINE=1000`) → `upsert` (`cmd.data.dataset.upsert_ohlcv`,
-  **батчами по `_UPSERT_BATCH_SIZE=4 500` строк** — каждое Kafka-сообщение
-  ≈ 675 КБ × 150 б/строка < 1 МБ aiokafka-лимита).
-  Таймаут на батч: `max(300, batch_size / 5000)` с (минимум **5 мин**,
-  +1 с на каждые 5 000 строк батча). При ошибке любого батча операция
-  немедленно прерывается. Прогресс стадии upsert отражает накопленный
-  процент по всем батчам.
-  Прогресс по стадиям публикуется в `events.analitic.dataset.repair.progress`.
-  Payload: `{ symbol, timeframe, start_ms, end_ms, exchange="bybit"? }`.
-  Ответ: `{ table, rows_affected, elapsed_sec }` или `{ error }`.
+- `cmd.analitic.dataset.load_ohlcv` — догрузка OHLCV-свечей **для выбранной
+  биржи** без перезаписи остальных колонок таблицы. `backend/dataset/repair.py`
+  больше не ходит во внешние API сам: он делегирует `cmd.data.dataset.repair_ohlcv`
+  в `microservice_data`, а data-service уже использует свои exchange-clients
+  (`bybit` / `binance` / `kraken`) и выполняет `prepare → fetch → upsert` на
+  стороне владельца данных. Прогресс по стадиям по-прежнему публикуется в
+  `events.analitic.dataset.repair.progress`, поэтому UI не меняет форму
+  progress-блока. Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`.
+  Ответ: `{ table, rows_fetched, rows_affected, elapsed_sec }` или `{ error }`.
 - `cmd.analitic.dataset.recompute_features` — пересчёт OHLCV-производных
   (`backend/dataset/repair.py`). Pipeline: `prepare` → `recompute`
-  (`cmd.data.dataset.compute_features`). Таймаут recompute-запроса
+  (`cmd.data.dataset.make_table_name(exchange-aware)` → `cmd.data.dataset.compute_features`). Таймаут recompute-запроса
   **адаптивный по таймфрейму**: `1m → 3600 с` (1 ч), `3m/5m → 1800 с` (30 мин),
   остальные → `600 с` (10 мин). Вынесено в константы `_RECOMPUTE_TIMEOUT` и
   `_RECOMPUTE_TIMEOUT_DEFAULT`.
   Прогресс в `events.analitic.dataset.repair.progress`.
-  Payload: `{ symbol, timeframe }`. Ответ: `{ table, rows_updated, elapsed_sec }`.
+  Payload: `{ symbol, timeframe, exchange?="bybit" }`. Ответ: `{ table, rows_updated, elapsed_sec }`.
 
 ### Kafka-события (`events.analitic.*`)
 
@@ -128,11 +123,11 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
-| Сервис            | Адрес                  | Описание                                          |
-| ----------------- | ---------------------- | ------------------------------------------------- |
-| REST API          | `localhost:8000`       | FastAPI + Swagger `/docs`                         |
-| Redis             | `redis:6379` (compose) | KV-store настроек, не публикуется в host          |
-| microservice_data | Kafka (внутри)         | Источник данных (PostgreSQL, Bybit)               |
+| Сервис            | Адрес                  | Описание                                                                                                      |
+| ----------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------- |
+| REST API          | `localhost:8000`       | FastAPI + Swagger `/docs`                                                                                     |
+| Redis             | `redis:6379` (compose) | KV-store настроек, не публикуется в host                                                                      |
+| microservice_data | Kafka                  | Источник данных (PostgreSQL + market clients `bybit/binance/kraken`)                                          |
 
 ---
 

@@ -57,11 +57,11 @@ const EXCHANGES = [
 ] as const;
 type DatasetExchange = typeof EXCHANGES[number]['value'];
 
-function coverageCacheKey(symbol: string, timeframe: string) {
-  return `modelline:dataset-coverage:v1:${symbol}:${timeframe}`;
+function coverageCacheKey(symbol: string, timeframe: string, exchange: DatasetExchange) {
+  return `modelline:dataset-coverage:v1:${exchange}:${symbol}:${timeframe}`;
 }
-function allCoverageCacheKey(symbol: string) {
-  return `modelline:dataset-allcoverage:v1:${symbol}`;
+function allCoverageCacheKey(symbol: string, exchange: DatasetExchange) {
+  return `modelline:dataset-allcoverage:v1:${exchange}:${symbol}`;
 }
 
 function todayStr() { return new Date().toISOString().slice(0, 10); }
@@ -155,15 +155,26 @@ const INITIAL_REPAIR_STAGES_RECOMPUTE: RepairStage[] = [
   { id: 'recompute', label: 'Пересчёт фич', status: 'pending', progress: 0 },
 ];
 
-// Parse the canonical "{symbol_lower}_{timeframe}" table name back into
-// (SYMBOL, timeframe). Handles cases where the symbol itself contains
-// underscores by treating the trailing token as the timeframe.
-function parseTableName(table: string): { symbol: string; timeframe: string } | null {
-  const i = table.lastIndexOf('_');
-  if (i <= 0 || i === table.length - 1) return null;
+// Parse the canonical table name back into (exchange, SYMBOL, timeframe).
+// Legacy Bybit tables remain `{symbol}_{timeframe}`; other exchanges are
+// stored as `{exchange}_{symbol}_{timeframe}`.
+function parseTableName(table: string): { exchange: DatasetExchange; symbol: string; timeframe: string } | null {
+  const parts = table.split('_');
+  if (parts.length < 2) return null;
+  const timeframe = parts.at(-1);
+  if (!timeframe) return null;
+  let exchange: DatasetExchange = 'bybit';
+  let symbolParts = parts.slice(0, -1);
+  const maybeExchange = symbolParts[0]?.toLowerCase();
+  if (maybeExchange && EXCHANGES.some((item) => item.value === maybeExchange)) {
+    exchange = maybeExchange as DatasetExchange;
+    symbolParts = symbolParts.slice(1);
+  }
+  if (symbolParts.length === 0) return null;
   return {
-    symbol:    table.slice(0, i).toUpperCase(),
-    timeframe: table.slice(i + 1),
+    exchange,
+    symbol: symbolParts.join('_').toUpperCase(),
+    timeframe,
   };
 }
 
@@ -539,8 +550,8 @@ export default function DatasetPage() {
   useEffect(() => {
     async function tryRestoreCache() {
       const [cachedCov, cachedAll] = await Promise.all([
-        cacheRead<CoverageResult>(coverageCacheKey(symbol, timeframe)),
-        cacheRead<AllCoverageItem[]>(allCoverageCacheKey(symbol)),
+        cacheRead<CoverageResult>(coverageCacheKey(symbol, timeframe, exchange)),
+        cacheRead<AllCoverageItem[]>(allCoverageCacheKey(symbol, exchange)),
       ]);
       setCoverage(cachedCov ?? null);
       setAllCoverages(cachedAll ?? null);
@@ -704,7 +715,7 @@ export default function DatasetPage() {
         const results = await Promise.all(
           TIMEFRAMES.map(async tf => {
             try {
-              const table = makeTableName(symbol, tf);
+              const table = makeTableName(symbol, tf, exchange);
               const cv = await kafkaCall<TableCoverage>(
                 Topics.CMD_DATA_DATASET_COVERAGE,
                 { table },
@@ -722,9 +733,9 @@ export default function DatasetPage() {
           }),
         );
         setAllCoverages(results);
-        void cacheWrite(allCoverageCacheKey(symbol), results, CACHE_COVERAGE_TTL);
+        void cacheWrite(allCoverageCacheKey(symbol, exchange), results, CACHE_COVERAGE_TTL);
       } else {
-        const table   = makeTableName(symbol, timeframe);
+        const table   = makeTableName(symbol, timeframe, exchange);
         const startMs = new Date(dateFrom).getTime();
         const endMs   = new Date(dateTo + 'T23:59:59').getTime();
         const cv = await kafkaCall<TableCoverage>(
@@ -745,7 +756,7 @@ export default function DatasetPage() {
           gaps: Math.max(0, expected - rows),
         };
         setCoverage(result);
-        void cacheWrite(coverageCacheKey(symbol, timeframe), result, CACHE_COVERAGE_TTL);
+        void cacheWrite(coverageCacheKey(symbol, timeframe, exchange), result, CACHE_COVERAGE_TTL);
       }
     } catch {
       // Best-effort: failures here are non-fatal — the user can click
@@ -916,11 +927,11 @@ export default function DatasetPage() {
       const infos = [...fromEnriched, ...fromLegacy];
       setTables(infos);
       void cacheWrite(CACHE_TABLES_KEY, infos, CACHE_TABLES_TTL);
-      addEntry({ action: 'Check', params: { symbol, timeframe }, result: `${infos.length} tables`, durationMs: Date.now() - t0 });
+      addEntry({ action: 'Check', params: { symbol, timeframe, exchange }, result: `${infos.length} tables`, durationMs: Date.now() - t0 });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast(msg, 'error');
-      addEntry({ action: 'Check', params: { symbol, timeframe }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
+      addEntry({ action: 'Check', params: { symbol, timeframe, exchange }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
     } finally {
       operationLockRef.current = false;
       setLoadingList(false);
@@ -938,7 +949,7 @@ export default function DatasetPage() {
         const results = await Promise.all(
           TIMEFRAMES.map(async tf => {
             try {
-              const table = makeTableName(symbol, tf);
+              const table = makeTableName(symbol, tf, exchange);
               const cv = await kafkaCall<TableCoverage>(
                 Topics.CMD_DATA_DATASET_COVERAGE,
                 { table },
@@ -956,11 +967,11 @@ export default function DatasetPage() {
           }),
         );
         setAllCoverages(results);
-        void cacheWrite(allCoverageCacheKey(symbol), results, CACHE_COVERAGE_TTL);
-        addEntry({ action: 'Check', params: { symbol, timeframe: 'ALL', dateFrom, dateTo }, result: `${results.length} timeframes`, durationMs: Date.now() - t0 });
+        void cacheWrite(allCoverageCacheKey(symbol, exchange), results, CACHE_COVERAGE_TTL);
+        addEntry({ action: 'Check', params: { symbol, timeframe: 'ALL', exchange, dateFrom, dateTo }, result: `${results.length} timeframes`, durationMs: Date.now() - t0 });
       } else {
         setAllCoverages(null);
-        const table   = makeTableName(symbol, timeframe);
+        const table   = makeTableName(symbol, timeframe, exchange);
         const startMs = new Date(dateFrom).getTime();
         const endMs   = new Date(dateTo + 'T23:59:59').getTime();
 
@@ -985,13 +996,13 @@ export default function DatasetPage() {
           gaps,
         };
         setCoverage(result);
-        void cacheWrite(coverageCacheKey(symbol, timeframe), result, CACHE_COVERAGE_TTL);
-        addEntry({ action: 'Check', params: { symbol, timeframe, dateFrom, dateTo }, result: `${coveragePct.toFixed(1)}% coverage`, durationMs: Date.now() - t0 });
+        void cacheWrite(coverageCacheKey(symbol, timeframe, exchange), result, CACHE_COVERAGE_TTL);
+        addEntry({ action: 'Check', params: { symbol, timeframe, exchange, dateFrom, dateTo }, result: `${coveragePct.toFixed(1)}% coverage`, durationMs: Date.now() - t0 });
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast(msg, 'error');
-      addEntry({ action: 'Check', params: { symbol, timeframe, dateFrom, dateTo }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
+      addEntry({ action: 'Check', params: { symbol, timeframe, exchange, dateFrom, dateTo }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
     } finally {
       operationLockRef.current = false;
       setLoadingCov(false);
@@ -1072,7 +1083,7 @@ export default function DatasetPage() {
             seedQueuedJob({
               jobId: res.job_id,
               type: 'ingest',
-              target_table: makeTableName(symbol, tf),
+              target_table: makeTableName(symbol, tf, exchange),
             });
             if (res.deduped) toast(`${tf}: уже загружается (job deduped)`, 'info');
           } catch (e) {
@@ -1125,7 +1136,7 @@ export default function DatasetPage() {
         seedQueuedJob({
           jobId: res.job_id,
           type: 'ingest',
-          target_table: makeTableName(symbol, timeframe),
+          target_table: makeTableName(symbol, timeframe, exchange),
         });
         keepIngestBusy = true;
         if (res.deduped) {
@@ -1169,7 +1180,7 @@ export default function DatasetPage() {
         let totalDeleted = 0;
         let successes = 0;
         for (const tf of TIMEFRAMES) {
-          const table = makeTableName(symbol, tf);
+          const table = makeTableName(symbol, tf, exchange);
           try {
             const res = await kafkaCall<{ rows_deleted?: number; error?: string }>(
               Topics.CMD_DATA_DATASET_DELETE_ROWS,
@@ -1185,14 +1196,14 @@ export default function DatasetPage() {
         }
         const msg = `Deleted ${totalDeleted.toLocaleString()} rows across ${successes} timeframes`;
         toast(msg, 'success');
-        addEntry({ action: 'Check', params: { symbol, timeframe: 'ALL' }, result: msg, durationMs: Date.now() - t0 });
+        addEntry({ action: 'Check', params: { symbol, timeframe: 'ALL', exchange }, result: msg, durationMs: Date.now() - t0 });
         handleListTables();
       } finally {
         operationLockRef.current = false;
         setLoadingDelete(false);
       }
     } else {
-      const table = makeTableName(symbol, timeframe);
+      const table = makeTableName(symbol, timeframe, exchange);
       const confirmed = typeof window !== 'undefined' && window.confirm(
         `Удалить все строки из таблицы ${table}? Это действие нельзя отменить.`,
       );
@@ -1209,12 +1220,12 @@ export default function DatasetPage() {
         const count = res.rows_deleted ?? 0;
         const msg = `Deleted ${count.toLocaleString()} rows from ${table}`;
         toast(msg, 'success');
-        addEntry({ action: 'Check', params: { symbol, timeframe }, result: msg, durationMs: Date.now() - t0 });
+        addEntry({ action: 'Check', params: { symbol, timeframe, exchange }, result: msg, durationMs: Date.now() - t0 });
         handleListTables();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         toast(msg, 'error');
-        addEntry({ action: 'Check', params: { symbol, timeframe }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
+        addEntry({ action: 'Check', params: { symbol, timeframe, exchange }, result: `Error: ${msg}`, durationMs: Date.now() - t0 });
       } finally {
         operationLockRef.current = false;
         setLoadingDelete(false);
@@ -1238,11 +1249,11 @@ export default function DatasetPage() {
     let url: string;
     let filename: string;
     if (timeframe === 'ALL') {
-      url = `${base}/api/export/csv?symbol=${encodeURIComponent(symbol)}&timeframe=ALL`
+      url = `${base}/api/export/csv?symbol=${encodeURIComponent(symbol)}&timeframe=ALL&exchange=${encodeURIComponent(exchange)}`
           + `&start_ms=${startMs}&end_ms=${endMs}`;
       filename = `${symbol}_ALL.zip`;
     } else {
-      const table = makeTableName(symbol, timeframe);
+      const table = makeTableName(symbol, timeframe, exchange);
       url = `${base}/api/export/csv?table=${encodeURIComponent(table)}`
           + `&start_ms=${startMs}&end_ms=${endMs}`;
       filename = `${table}.csv`;
@@ -1334,7 +1345,7 @@ export default function DatasetPage() {
         const endMs   = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1;
         const reply = await kafkaCall<{ rows_affected?: number; error?: string }>(
           Topics.CMD_ANALITIC_DATASET_LOAD_OHLCV,
-          { symbol: parsed.symbol, timeframe: parsed.timeframe, start_ms: startMs, end_ms: endMs },
+          { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange, start_ms: startMs, end_ms: endMs },
           { correlationId: cid, timeoutMs: 600_000 },
         );
         if (reply.error) {
@@ -1344,14 +1355,14 @@ export default function DatasetPage() {
         }
         addEntry({
           action: 'Download',
-          params: { symbol: parsed.symbol, timeframe: parsed.timeframe, dateFrom, dateTo },
+          params: { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange, dateFrom, dateTo },
           result: reply.error ? `Error: ${reply.error}` : `${reply.rows_affected ?? 0} rows`,
           durationMs: Date.now() - t0,
         });
       } else {
         const reply = await kafkaCall<{ rows_updated?: number; error?: string }>(
           Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES,
-          { symbol: parsed.symbol, timeframe: parsed.timeframe },
+          { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange },
           { correlationId: cid, timeoutMs: 600_000 },
         );
         if (reply.error) {
@@ -1361,7 +1372,7 @@ export default function DatasetPage() {
         }
         addEntry({
           action: 'Download',
-          params: { symbol: parsed.symbol, timeframe: parsed.timeframe },
+          params: { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange },
           result: reply.error ? `Error: ${reply.error}` : `${reply.rows_updated ?? 0} rows`,
           durationMs: Date.now() - t0,
         });
@@ -1391,18 +1402,18 @@ export default function DatasetPage() {
       const endMs   = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1;
       const reply = await kafkaCall<{ rows_affected?: number; error?: string }>(
         Topics.CMD_ANALITIC_DATASET_LOAD_OHLCV,
-        { symbol: parsed.symbol, timeframe: parsed.timeframe, start_ms: startMs, end_ms: endMs },
+        { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange, start_ms: startMs, end_ms: endMs },
         { timeoutMs: 600_000 },
       );
-      addEntry({ action: 'Download', params: { symbol: parsed.symbol, timeframe: parsed.timeframe, dateFrom, dateTo }, result: reply.error ? `Error: ${reply.error}` : `${reply.rows_affected ?? 0} rows`, durationMs: Date.now() - t0 });
+      addEntry({ action: 'Download', params: { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange, dateFrom, dateTo }, result: reply.error ? `Error: ${reply.error}` : `${reply.rows_affected ?? 0} rows`, durationMs: Date.now() - t0 });
       if (reply.error) throw new Error(reply.error);
     } else {
       const reply = await kafkaCall<{ rows_updated?: number; error?: string }>(
         Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES,
-        { symbol: parsed.symbol, timeframe: parsed.timeframe },
+        { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange },
         { timeoutMs: 600_000 },
       );
-      addEntry({ action: 'Download', params: { symbol: parsed.symbol, timeframe: parsed.timeframe }, result: reply.error ? `Error: ${reply.error}` : `${reply.rows_updated ?? 0} rows`, durationMs: Date.now() - t0 });
+      addEntry({ action: 'Download', params: { symbol: parsed.symbol, timeframe: parsed.timeframe, exchange: parsed.exchange }, result: reply.error ? `Error: ${reply.error}` : `${reply.rows_updated ?? 0} rows`, durationMs: Date.now() - t0 });
       if (reply.error) throw new Error(reply.error);
     }
     // Re-audit so the grid reflects the updated fill ratios.
@@ -1426,7 +1437,7 @@ export default function DatasetPage() {
     setQualityProgress(null);
     if (timeframe !== 'ALL') {
       setIsAllMode(false);
-      const table = makeTableName(symbol, timeframe);
+      const table = makeTableName(symbol, timeframe, exchange);
       setSelectedTable(table);
       await runQualityCheck(table);
     } else {
@@ -1452,7 +1463,7 @@ export default function DatasetPage() {
 
           const batchResults = await Promise.allSettled(
             batch.map(async tf => {
-              const table = makeTableName(symbol, tf);
+              const table = makeTableName(symbol, tf, exchange);
               const res = await kafkaCall<QualityReport | { error: string }>(
                 Topics.CMD_ANALITIC_DATASET_QUALITY_CHECK,
                 { table },

@@ -6,6 +6,7 @@ using GatewayService.API.Filters;
 using GatewayService.API.Kafka;
 using GatewayService.API.Middleware;
 using GatewayService.API.Settings;
+using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 
@@ -66,6 +67,7 @@ namespace GatewayService.API.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/admin")]
+[DisableCors]
 [ServiceFilter(typeof(AdminApiKeyFilter))]
 public sealed class AdminController : ControllerBase
 {

@@ -1,6 +1,6 @@
 # microservice_gateway API Reference
 
-Документ для frontend-команд и клиентских интеграций.
+Документ для frontend-команд и HTTP-интеграций с gateway, включая mobile/public API и backend facade для `microservice_admin`.
 
 Цель документа: дать один источник истины по HTTP-контрактам gateway, чтобы фронтенд понимал:
 
@@ -14,28 +14,32 @@
 
 ## Scope
 
-Этот документ описывает только HTTP API `microservice_gateway`.
+Этот документ описывает HTTP API `microservice_gateway` в двух плоскостях:
+
+- public/mobile routes (`/api/*`, `/health*`);
+- admin backend facade (`/api/admin/*`) для local/split интеграции `microservice_admin`.
 
 Что не входит в scope:
 
 - login / refresh / register контракты `microservice_account`;
 - внутренние Kafka-контракты между сервисами;
+- shape успешных downstream payload-ов за `/api/admin/*` глубже gateway-level HTTP semantics: gateway там прозрачно проксирует JSON владельца сервиса;
 - root-level deployment scripts;
 - swagger UI как источник истины для frontend-логики.
 
-Если frontend получает JWT от account-сервиса, дальше он работает с gateway по контрактам ниже.
+Если mobile/frontend получает JWT от account-сервиса, дальше он работает с gateway по контрактам ниже. Если `microservice_admin` работает через backend facade, он использует только HTTP `POST /api/admin/*` и не ходит в Kafka напрямую.
 
 ---
 
 ## Base URL
 
-Локально по умолчанию при запуске через Docker Compose:
+| Surface | Example URL |
+| ------- | ----------- |
+| Public/mobile API (local/direct) | `http://localhost:7520` |
+| Admin facade (local/direct) | `http://localhost:7520/api/admin/*` |
+| Admin facade (split backend-host) | `https://<backend-host>:8443/api/admin/*` |
 
-```text
-http://localhost:7520
-```
-
-Все пути ниже указаны относительно этого base URL.
+Все public/mobile пути ниже указаны относительно base URL gateway. Для admin facade ниже указаны полные route-prefix'ы `/api/admin/*`, потому что этот surface может жить и на прямом host-порту gateway, и за split TLS facade `:8443`.
 
 ---
 
@@ -47,6 +51,7 @@ http://localhost:7520
 4. Строить запросы `GET /api/v1/market/chart` только значениями из `/api/v1/market/config`.
 5. Для защищённых endpoint-ов передавать `Authorization: Bearer <accessToken>`.
 6. Не трактовать каждый `200` как «данные полные и готовы»: `dashboard`, `news`, `notifications`, `market/chart` поддерживают degraded/pending состояния внутри тела ответа.
+7. Если интеграция идёт из `microservice_admin`, использовать только `POST /api/admin/*` с `Authorization: Bearer <ADMIN_BACKEND_SHARED_TOKEN>` или `X-Admin-Api-Key`; успешный JSON gateway не нормализует, а возвращает как ответ владельца Kafka-команды.
 
 ---
 
@@ -60,6 +65,16 @@ http://localhost:7520
 | Health endpoint | plain text |
 | Correlation header | `X-Correlation-Id` присутствует в ответах |
 | Версионирование | только market API версионирован через `/api/v1/market/*`; остальные endpoint-ы пока без path-version |
+
+### Browser CORS rules
+
+| Сценарий | Текущее поведение gateway |
+| -------- | ------------------------- |
+| Public/protected client routes (`/api/*`, кроме `/api/admin/*`) | gateway отвечает `Access-Control-Allow-*` и допускает browser cross-origin requests |
+| Preflight `OPTIONS` для JWT-protected routes (`/api/dashboard`, и т.п.) | обрабатывается CORS middleware до auth, поэтому browser не упирается в `405` или raw auth challenge |
+| `/api/admin/*` | CORS намеренно отключён: этот surface рассчитан на server-to-server use из `microservice_admin`, а не на browser JavaScript |
+
+Если web-клиент работает по `https`, а backend URL остаётся `http`, browser policy mixed-content по-прежнему может блокировать вызов даже при корректном CORS. В таком случае нужен HTTPS или same-origin proxy path.
 
 ### JSON naming
 
@@ -92,6 +107,17 @@ Gateway сериализует JSON в `camelCase`.
 | Protected | нужен `Authorization: Bearer <JWT>` |
 | Optional-auth | endpoint работает без токена, но с токеном может дополнить ответ |
 
+### Admin facade conventions
+
+| Правило | Значение |
+| ------- | -------- |
+| Method | все `/api/admin/*` endpoint-ы используют `POST`, даже когда операция логически read-only |
+| Request body | gateway принимает JSON body и проксирует его в Kafka payload без переформатирования; если payload не нужен, можно послать `{}` |
+| Success payload | `200 OK` возвращает JSON downstream-владельца как есть, без envelope/wrapper от gateway |
+| Auth | `Authorization: Bearer <shared-token>` или `X-Admin-Api-Key` |
+| Gateway-managed failures | `401`, `503`, `504` нормализуются в `ErrorResponse` |
+| Browser CORS | intentionally disabled |
+
 ### Degraded vs Error
 
 В gateway есть два разных класса проблем:
@@ -120,7 +146,7 @@ Frontend должен различать эти сценарии.
 {
   "status": 401,
   "title": "Unauthorized",
-  "code": "auth_required",
+  "code": null,
   "detail": "Authentication is required.",
   "correlationId": "2de4b66e-8b79-4a3e-b3a1-7e5d65f89e74",
   "timestamp": "2026-05-15T18:22:00Z"
@@ -138,7 +164,7 @@ Frontend должен различать эти сценарии.
 | `correlationId` | string/null | идентификатор запроса для трассировки |
 | `timestamp` | string | время формирования ответа |
 
-### Admin facade auth errors
+### Admin facade-specific errors
 
 `/api/admin/*` — это split-deployment facade для `microservice_admin`.
 Эти endpoint-ы требуют shared secret из backend `ADMIN_SHARED_TOKEN`, который
@@ -149,6 +175,13 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 | ---- | ------ | --------------- |
 | `401` | `admin_token_missing` | Запрос пришёл без Bearer token и без `X-Admin-Api-Key` |
 | `401` | `admin_token_invalid` | Токен передан, но не совпадает с backend `ADMIN_SHARED_TOKEN` |
+| `503` | `admin_kafka_unavailable` | Gateway не смог отправить Kafka request: broker/connectivity/bootstrap path недоступен |
+| `504` | `admin_kafka_timeout` | Kafka request был отправлен, но reply не пришёл в timeout окна этого route |
+
+Смысл `503` и `504` у admin facade разный:
+
+- `503 admin_kafka_unavailable` означает transport failure до успешного publish в Kafka;
+- `504 admin_kafka_timeout` означает, что publish path прошёл, но владелец команды не вернул ответ вовремя.
 
 Пример mismatch:
 
@@ -182,6 +215,10 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 | GET | `/api/v1/market/chart` | None | свечной график |
 | GET | `/api/news` | None | лента новостей |
 | GET | `/api/notifications` | Required | уведомления пользователя |
+| POST | `/api/admin/health/*` | Shared token | backend facade для health-check команд admin |
+| POST | `/api/admin/dataset/*` | Shared token | backend facade для dataset/data-service команд |
+| POST | `/api/admin/analytic/*` | Shared token | backend facade для analytic dataset/anomaly команд |
+| POST | `/api/admin/analytics/*` | Shared token | backend facade для ML train/model/predict команд |
 
 ---
 
@@ -250,6 +287,109 @@ Healthy
 - docker/ops health probes gateway;
 - split-deployment admin probe;
 - мониторинг, которому нужна готовность Kafka-facing команд, а не только live HTTP process.
+
+---
+
+## POST /api/admin/*
+
+### Admin facade: назначение
+
+`/api/admin/*` — это HTTP facade для `microservice_admin` и других ops-интеграций, которым нельзя или не нужно работать с Kafka напрямую.
+
+Gateway остаётся единственной HTTP→Kafka точкой входа: он проверяет shared token, проставляет correlation id, публикует Kafka request/reply и возвращает downstream JSON как обычный HTTP-ответ.
+
+### Admin facade: auth and transport rules
+
+```http
+POST /api/admin/<route>
+Authorization: Bearer <ADMIN_BACKEND_SHARED_TOKEN>
+Content-Type: application/json
+```
+
+Допустимый альтернативный заголовок:
+
+```http
+X-Admin-Api-Key: <ADMIN_BACKEND_SHARED_TOKEN>
+```
+
+Правила:
+
+- success-ответ всегда `200 OK` с JSON downstream-владельца, без дополнительного envelope от gateway;
+- большинство route-ов используют обычный backend timeout, а тяжёлые route-ы вроде export/ingest/import/anomaly/train/predict/load-ohlcv идут через удлинённый timeout, но для клиента контракт остаётся тем же: `200` / `401` / `503` / `504`;
+- если route не требует payload, безопасно отправлять `{}`;
+- correlation id так же возвращается в `X-Correlation-Id`.
+
+### Admin facade: route map
+
+#### Health
+
+| Method | Route | Downstream intent |
+| ------ | ----- | ----------------- |
+| POST | `/api/admin/health/data` | proxy к `cmd.data.health` |
+| POST | `/api/admin/health/analytics` | proxy к `cmd.analytics.health` |
+
+#### Dataset / data-service
+
+| Method | Route | Downstream intent |
+| ------ | ----- | ----------------- |
+| POST | `/api/admin/dataset/list-tables` | список dataset tables |
+| POST | `/api/admin/dataset/coverage` | coverage по таблице/окну |
+| POST | `/api/admin/dataset/rows` | получить rows диапазона |
+| POST | `/api/admin/dataset/export` | инициировать CSV/ZIP export |
+| POST | `/api/admin/dataset/ingest` | one-shot ingest через data-service |
+| POST | `/api/admin/dataset/normalize-timeframe` | normalize timeframe id |
+| POST | `/api/admin/dataset/make-table-name` | canonical table naming |
+| POST | `/api/admin/dataset/instrument-details` | instrument metadata |
+| POST | `/api/admin/dataset/schema` | schema/columns таблицы |
+| POST | `/api/admin/dataset/find-missing` | поиск gaps в датасете |
+| POST | `/api/admin/dataset/timestamps` | список timestamps |
+| POST | `/api/admin/dataset/constants` | dataset constants/config |
+| POST | `/api/admin/dataset/delete-rows` | удалить строки по критерию |
+| POST | `/api/admin/dataset/import-csv` | импорт CSV в data-service |
+| POST | `/api/admin/dataset/upsert-ohlcv` | точечный upsert raw OHLCV |
+| POST | `/api/admin/dataset/column-stats` | column statistics |
+| POST | `/api/admin/dataset/column-histogram` | histogram численной колонки |
+| POST | `/api/admin/dataset/browse` | paginated browse сырого набора |
+| POST | `/api/admin/dataset/compute-features` | пересчёт derived features |
+| POST | `/api/admin/dataset/detect-anomalies` | anomaly detection |
+| POST | `/api/admin/dataset/clean-preview` | preview dataset clean-up |
+| POST | `/api/admin/dataset/clean-apply` | apply dataset clean-up |
+| POST | `/api/admin/dataset/audit-log` | audit log операций над dataset |
+| POST | `/api/admin/dataset/jobs/start` | создать queued dataset job |
+| POST | `/api/admin/dataset/jobs/cancel` | отменить dataset job |
+| POST | `/api/admin/dataset/jobs/get` | получить один dataset job |
+| POST | `/api/admin/dataset/jobs/list` | список dataset jobs |
+| POST | `/api/admin/dataset/db-ping` | DB connectivity ping |
+
+#### Analitic / dataset session / anomaly
+
+| Method | Route | Downstream intent |
+| ------ | ----- | ----------------- |
+| POST | `/api/admin/analytic/dataset/load` | загрузить dataset в analytic session |
+| POST | `/api/admin/analytic/dataset/unload` | выгрузить dataset из analytic session |
+| POST | `/api/admin/analytic/dataset/status` | статус analytic dataset session |
+| POST | `/api/admin/analytic/anomaly/dbscan` | DBSCAN anomaly run |
+| POST | `/api/admin/analytic/anomaly/isolation-forest` | Isolation Forest run |
+| POST | `/api/admin/analytic/dataset/distribution` | distribution/stat overview |
+| POST | `/api/admin/analytic/dataset/quality-check` | quality audit dataset |
+| POST | `/api/admin/analytic/dataset/load-ohlcv` | repair missing OHLCV через analytic orchestrator; body проксируется как есть, для non-Bybit repair передавай `exchange` |
+| POST | `/api/admin/analytic/dataset/recompute-features` | recompute features для exchange-aware таблицы; для non-Bybit передавай `exchange` |
+
+#### Analytics / ML
+
+| Method | Route | Downstream intent |
+| ------ | ----- | ----------------- |
+| POST | `/api/admin/analytics/train/start` | старт обучения |
+| POST | `/api/admin/analytics/train/status` | статус обучения |
+| POST | `/api/admin/analytics/model/list` | список моделей |
+| POST | `/api/admin/analytics/model/load` | загрузка модели |
+| POST | `/api/admin/analytics/predict` | prediction request |
+
+### Admin facade: frontend/admin notes
+
+- gateway не меняет shape успешного payload-а, поэтому frontend/admin code должен опираться на owner-docs сервисов `microservice_data` и `microservice_analitic`;
+- gateway-level часть контракта для `/api/admin/*` — это auth, HTTP status, correlation, timeout/unavailable semantics и точный route→Kafka mapping;
+- для quality-repair flow progress по-прежнему не идёт в ответе этого endpoint: он публикуется отдельно через SSE/admin event stream.
 
 ---
 
@@ -671,7 +811,7 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 | `candles[].tv` | number | turnover |
 | `meta.requested` | number | сколько свечей просили |
 | `meta.available` | number | сколько свечей реально вернулось |
-| `meta.coverage` | string | `full`, `partial`, `pending`, `empty` |
+| `meta.coverage` | string | `full`, `partial`, `pending` |
 | `status` | string | `ok`, `partial`, `pending` |
 | `retryAfterMs` | number/null | сколько ждать до следующего запроса |
 

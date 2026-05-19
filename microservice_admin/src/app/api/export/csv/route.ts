@@ -39,6 +39,7 @@ export async function GET(req: Request) {
     const table     = searchParams.get('table');
     const symbol    = searchParams.get('symbol');
     const timeframe = searchParams.get('timeframe');
+    const exchange  = searchParams.get('exchange') ?? 'bybit';
 
     if (!startMs || !endMs) {
       return Response.json(
@@ -66,8 +67,8 @@ export async function GET(req: Request) {
           { status: 400 },
         );
       }
-      const tables = TIMEFRAMES.map(tf => makeTableName(symbol, tf));
-      const exportPayload = { tables, symbol, start_ms: startNum, end_ms: endNum };
+      const tables = TIMEFRAMES.map(tf => makeTableName(symbol, tf, exchange));
+      const exportPayload = { tables, symbol, exchange, start_ms: startNum, end_ms: endNum };
 
       const reply = (isSplitMode
         ? await backendCall(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })

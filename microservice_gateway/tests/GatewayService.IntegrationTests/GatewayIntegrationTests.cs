@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using FluentAssertions;
@@ -68,6 +69,39 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayTestWebAppFac
     {
         var response = await _client.GetAsync("/api/dashboard");
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task News_cross_origin_get_includes_cors_headers()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/news?limit=20");
+        request.Headers.Add("Origin", "https://sha-trade.tech");
+
+        var response = await _client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        response.Headers.TryGetValues("Access-Control-Allow-Origin", out var origins).Should().BeTrue();
+        origins.Should().ContainSingle("*");
+    }
+
+    [Fact]
+    public async Task Dashboard_preflight_returns_cors_headers_before_auth()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Options, "/api/dashboard");
+        request.Headers.Add("Origin", "https://sha-trade.tech");
+        request.Headers.Add("Access-Control-Request-Method", "GET");
+        request.Headers.Add("Access-Control-Request-Headers", "authorization");
+
+        var response = await _client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        response.Headers.TryGetValues("Access-Control-Allow-Origin", out var origins).Should().BeTrue();
+        response.Headers.TryGetValues("Access-Control-Allow-Methods", out var methods).Should().BeTrue();
+        response.Headers.TryGetValues("Access-Control-Allow-Headers", out var headers).Should().BeTrue();
+
+        origins.Should().ContainSingle("*");
+        methods.Should().Contain(method => method.Contains("GET", StringComparison.OrdinalIgnoreCase));
+        headers.Should().Contain(header => header.Contains("authorization", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

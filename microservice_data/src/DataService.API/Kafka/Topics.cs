@@ -28,6 +28,7 @@ public static class Topics
     public const string CmdDataDatasetCleanApply      = "cmd.data.dataset.clean.apply";
     public const string CmdDataDatasetAuditLog        = "cmd.data.dataset.audit_log";
     public const string CmdDataDatasetUpsertOhlcv     = "cmd.data.dataset.upsert_ohlcv";
+    public const string CmdDataDatasetRepairOhlcv     = "cmd.data.dataset.repair_ohlcv";
 
     // ── Background-job control plane (Phase A of jobs redesign) ──────────
     // Replaces ad-hoc blocking req/reply for long-running ops. Heavy
@@ -74,6 +75,7 @@ public static class Topics
         CmdDataDatasetCleanApply,
         CmdDataDatasetAuditLog,
         CmdDataDatasetUpsertOhlcv,
+        CmdDataDatasetRepairOhlcv,
         CmdDataDatasetJobsStart,
         CmdDataDatasetJobsCancel,
         CmdDataDatasetJobsGet,

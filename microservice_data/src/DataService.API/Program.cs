@@ -4,6 +4,7 @@ using DataService.API.HealthChecks;
 using DataService.API.Jobs;
 using DataService.API.Kafka;
 using DataService.API.Minio;
+using DataService.API.Markets;
 using DataService.API.Settings;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -83,6 +84,15 @@ try
     {
         client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
     });
+    builder.Services.AddHttpClient<BinanceApiClient>(client =>
+    {
+        client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
+    });
+    builder.Services.AddHttpClient<KrakenApiClient>(client =>
+    {
+        client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
+    });
+    builder.Services.AddSingleton<MarketDataClientFactory>();
 
     // ── Kafka consumer (hosted service) ───────────────────────────────────
     builder.Services.AddHostedService<KafkaConsumerService>();
