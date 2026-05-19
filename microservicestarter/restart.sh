@@ -528,6 +528,9 @@ configure_admin_online_env() {
     set_env_value "$env_file" "ONLINE_MINIO_URL" "$backend_host:9000"
     set_env_value "$env_file" "ADMIN_BACKEND_BASE_URL" "$admin_backend_base_url"
     set_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "$admin_backend_shared_token"
+    if [[ -z "$(get_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE")" && "$admin_backend_base_url" == https://* ]]; then
+        set_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE" "1"
+    fi
 
     success "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_* для $admin_backend_base_url"
 }

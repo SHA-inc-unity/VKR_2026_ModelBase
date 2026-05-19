@@ -10,7 +10,6 @@
  * reachability status.
  */
 import { probeKafkaConnectivity } from '@/lib/kafka';
-import { isSplitMode, ADMIN_BACKEND_BASE_URL } from '@/lib/backendClient';
 import type { InfraHealthResponse, InfraServiceHealth } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -36,11 +35,17 @@ async function probe(url: string): Promise<InfraServiceHealth> {
 }
 
 export async function GET(): Promise<Response> {
+  const adminBackendBaseUrl = (process.env.ADMIN_BACKEND_BASE_URL ?? '').replace(/\/$/, '');
+  const adminBackendTlsInsecure = /^(1|true|yes|on)$/i.test(process.env.ADMIN_BACKEND_TLS_INSECURE ?? '');
+
   // ── Split-deployment: only probe the backend HTTPS endpoint ───────────────
-  if (isSplitMode) {
-    const backendProbe = await probe(`${ADMIN_BACKEND_BASE_URL}/health`);
+  if (adminBackendBaseUrl.length > 0) {
+    if (adminBackendTlsInsecure && adminBackendBaseUrl.startsWith('https://')) {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    }
+    const backendProbe = await probe(`${adminBackendBaseUrl}/health`);
     const body: InfraHealthResponse = {
-      connectionTarget: ADMIN_BACKEND_BASE_URL,
+      connectionTarget: adminBackendBaseUrl,
       kafka: {
         status: backendProbe.status,
         bootstrapServers: KAFKA_BOOTSTRAP_SERVERS,
