@@ -14,6 +14,7 @@
 
 - `microservice_admin`: добавлена страница `/logs` шестым пунктом sidebar после Anomaly. Она читает process-local admin runtime log buffer через `/api/logs`, автообновляется, умеет запускать быстрый connectivity check и показывает source/event/level/details без token/payload.
 - `microservice_admin/src/lib/adminRuntimeLog.ts`: server-only ring buffer последних admin diagnostics; `/api/health`, `/api/kafka` и `backendClient.ts` пишут туда те же этапы, которые печатают в container logs.
+- Корневой `.gitignore` раньше глобально игнорировал любые каталоги `logs/`, из-за чего `microservice_admin/src/app/logs` и `src/app/api/logs` не попадали в git и давали `404` на admin-host при одинаковом `HEAD`. Добавлены точечные unignore-правила для этих route-каталогов.
 
 ### 2026-05-18
 

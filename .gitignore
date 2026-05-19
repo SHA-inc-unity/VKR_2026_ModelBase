@@ -111,6 +111,10 @@ next-env.d.ts
 *.log
 *.log.[0-9]*
 logs/
+!microservice_admin/src/app/logs/
+!microservice_admin/src/app/logs/**
+!microservice_admin/src/app/api/logs/
+!microservice_admin/src/app/api/logs/**
 *.tmp
 *.tmp.*
 *.bak

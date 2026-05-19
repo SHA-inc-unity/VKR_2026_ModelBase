@@ -7,6 +7,7 @@
 ### 2026-05-19
 
 - `microservice_admin/src/components/Sidebar.tsx`, `src/app/logs/page.tsx`, `src/app/api/logs/route.ts`, `src/lib/adminRuntimeLog.ts`: в админку добавлен шестой пункт меню **Logs**. Страница показывает process-local runtime diagnostics из admin (`/api/health`, `/api/kafka`, `backendClient.ts`), умеет запускать быстрый health/data/analytics check и не сохраняет token/payload.
+- `.gitignore`: добавлены исключения для `microservice_admin/src/app/logs/**` и `microservice_admin/src/app/api/logs/**`, потому что общий шаблон `logs/` скрывал Next.js Logs routes из git и приводил к `404` на server deploy при формально одинаковом commit hash.
 
 ### 2026-05-18
 
