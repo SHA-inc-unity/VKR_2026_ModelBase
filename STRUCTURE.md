@@ -59,7 +59,7 @@
 | `docs/agents/` | Центральная Markdown-структура для агентной разработки: workflow, карта документов, сервисные профили, change log |
 | `.github/instructions/` | File Instructions для агентного workflow внутри репозитория |
 | `.gitignore` | Git-правила: Python, .NET, Docker, IDE, OS, ML-артефакты |
-| `microservicestarter/` | Единый менеджер запуска всех сервисов |
+| `microservicestarter/` | Единый менеджер запуска всех сервисов, включая preflight-проверку host-портов в bash launcher-е и lifecycle только для compose-стеков ModelLine |
 | `microservice_infra/` | Shared инфраструктура: Redpanda + MinIO + nginx ingress + one-shot TLS bootstrap |
 | `microservice_analitic/` | ML-сервис: обучение, прогнозы (Python) |
 | `microservice_data/` | Data-сервис: PostgreSQL + Kafka (C#/.NET 8) |

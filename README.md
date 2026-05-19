@@ -138,6 +138,7 @@ cd /path/to/ModelLine/microservicestarter
 - если менялся код, `Dockerfile`, `docker-compose.yml` или runtime `.env`, используй `restart`
 - если на admin-host менялся только backend host/IP или нужно просто поднять уже собранный `admin-online`, используй `start ... onlyadmin <backend-host>` без rebuild
 - для split deployment используй browser-facing backend host/domain для `ADMIN_BACKEND_BASE_URL`
+- `stop.sh` / `stop.ps1` останавливают только compose-стеки ModelLine; если `8443`, `8501` или другой publish-порт занят чужим контейнером, launcher теперь оборвётся заранее с явным сообщением и этот внешний контейнер нужно останавливать отдельно или уводить на другой порт
 
 ## Правила работы с конфигом
 

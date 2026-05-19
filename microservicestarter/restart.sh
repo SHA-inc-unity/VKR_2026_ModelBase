@@ -92,6 +92,20 @@ get_env_value() {
         || true
 }
 
+get_env_value_or_default() {
+    local env_file="$1"
+    local key="$2"
+    local default_value="$3"
+    local current_value
+
+    current_value="$(get_env_value "$env_file" "$key")"
+    if [[ -n "$current_value" ]]; then
+        printf '%s' "$current_value"
+    else
+        printf '%s' "$default_value"
+    fi
+}
+
 set_env_value() {
     local env_file="$1"
     local key="$2"
@@ -112,6 +126,120 @@ ensure_env_file() {
         cp "$env_example" "$env_file"
     fi
     printf '%s' "$env_file"
+}
+
+is_wildcard_bind_addr() {
+    local bind_addr="${1:-}"
+    [[ -z "$bind_addr" || "$bind_addr" == "0.0.0.0" || "$bind_addr" == "::" || "$bind_addr" == "[::]" ]]
+}
+
+compose_project_owns_container() {
+    local container_id="$1"
+    local compose_container_id
+
+    while IFS= read -r compose_container_id; do
+        [[ -z "$compose_container_id" ]] && continue
+        [[ "$compose_container_id" == "$container_id" ]] && return 0
+    done < <(docker compose ps -q 2>/dev/null || true)
+
+    return 1
+}
+
+get_docker_container_using_host_port() {
+    local port="$1"
+
+    docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' | awk -F '\t' -v port="$port" '
+        {
+            count = split($3, port_entries, /, /)
+            for (i = 1; i <= count; ++i) {
+                if (port_entries[i] ~ ":" port "->") {
+                    print $1 "\t" $2
+                    exit
+                }
+            }
+        }
+    '
+}
+
+get_non_docker_listener_using_host_port() {
+    local port="$1"
+    local listener_info=""
+
+    if command -v ss >/dev/null 2>&1; then
+        listener_info="$(ss -ltnp "( sport = :$port )" 2>/dev/null | awk 'NR==2 { $1=$1; print; exit }')"
+        if [[ -n "$listener_info" ]]; then
+            printf '%s' "$listener_info"
+            return 0
+        fi
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        listener_info="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 { print $1 " pid=" $2; exit }')"
+        if [[ -n "$listener_info" ]]; then
+            printf '%s' "$listener_info"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+require_host_port_available() {
+    local service_name="$1"
+    local env_file="$2"
+    local env_key="$3"
+    local bind_addr="$4"
+    local port="$5"
+    local purpose="$6"
+    local owner_info owner_id owner_name listener_info
+
+    [[ -n "$port" ]] || return 0
+    is_wildcard_bind_addr "$bind_addr" || return 0
+
+    owner_info="$(get_docker_container_using_host_port "$port")"
+    if [[ -n "$owner_info" ]]; then
+        owner_id="${owner_info%%$'\t'*}"
+        owner_name="${owner_info#*$'\t'}"
+        if ! compose_project_owns_container "$owner_id"; then
+            fail "[$service_name] Host-порт $port для $purpose уже занят контейнером '$owner_name'. stop.sh останавливает только compose-проекты ModelLine; останови/перенастрой внешний контейнер или измени $env_key в $env_file"
+        fi
+        return 0
+    fi
+
+    listener_info="$(get_non_docker_listener_using_host_port "$port" || true)"
+    if [[ -n "$listener_info" ]]; then
+        fail "[$service_name] Host-порт $port для $purpose уже занят другим процессом ($listener_info). Освободи порт или измени $env_key в $env_file"
+    fi
+}
+
+preflight_check_host_ports() {
+    local service_name="$1"
+    local mode="$2"
+    local svc_dir="$3"
+    local env_file="$svc_dir/.env"
+
+    case "$service_name" in
+        microservice_infra)
+            require_host_port_available "$service_name" "$env_file" "REDPANDA_EXTERNAL_PORT" "$(get_env_value_or_default "$env_file" "REDPANDA_BIND_ADDR" "")" "$(get_env_value_or_default "$env_file" "REDPANDA_EXTERNAL_PORT" "9092")" "Redpanda Kafka external listener"
+            require_host_port_available "$service_name" "$env_file" "REDPANDA_ADMIN_PORT" "$(get_env_value_or_default "$env_file" "REDPANDA_BIND_ADDR" "")" "$(get_env_value_or_default "$env_file" "REDPANDA_ADMIN_PORT" "9644")" "Redpanda admin API"
+            require_host_port_available "$service_name" "$env_file" "REDPANDA_CONSOLE_PORT" "" "$(get_env_value_or_default "$env_file" "REDPANDA_CONSOLE_PORT" "8080")" "Redpanda Console"
+            require_host_port_available "$service_name" "$env_file" "MINIO_API_PORT" "$(get_env_value_or_default "$env_file" "MINIO_BIND_ADDR" "")" "$(get_env_value_or_default "$env_file" "MINIO_API_PORT" "9000")" "MinIO API"
+            require_host_port_available "$service_name" "$env_file" "MINIO_CONSOLE_PORT" "" "$(get_env_value_or_default "$env_file" "MINIO_CONSOLE_PORT" "9001")" "MinIO Console"
+            require_host_port_available "$service_name" "$env_file" "NGINX_PORT" "" "$(get_env_value_or_default "$env_file" "NGINX_PORT" "8501")" "infra nginx ingress"
+            require_host_port_available "$service_name" "$env_file" "ADMIN_BACKEND_PORT" "" "$(get_env_value_or_default "$env_file" "ADMIN_BACKEND_PORT" "8443")" "backend HTTPS admin facade"
+            ;;
+        microservice_account)
+            require_host_port_available "$service_name" "$env_file" "ACCOUNT_API_PORT" "$(get_env_value_or_default "$env_file" "ACCOUNT_BIND_ADDR" "")" "$(get_env_value_or_default "$env_file" "ACCOUNT_API_PORT" "7510")" "Account API"
+            ;;
+        microservice_gateway)
+            require_host_port_available "$service_name" "$env_file" "GATEWAY_API_PORT" "$(get_env_value_or_default "$env_file" "GATEWAY_BIND_ADDR" "")" "$(get_env_value_or_default "$env_file" "GATEWAY_API_PORT" "7520")" "Gateway API"
+            ;;
+        microservice_admin)
+            if [[ "$mode" == "onlyadmin" ]]; then
+                require_host_port_available "$service_name" "$env_file" "ADMIN_PORT" "" "$(get_env_value_or_default "$env_file" "ADMIN_PORT" "443")" "admin-online HTTP entrypoint"
+            fi
+            ;;
+    esac
 }
 
 validate_backend_host() {
@@ -476,6 +604,7 @@ restart_service() {
     ensure_env_file "$svc_dir" >/dev/null
     pushd "$svc_dir" > /dev/null
     prepare_bind_mount_data_paths "$name"
+    preflight_check_host_ports "$name" "$mode" "$svc_dir"
 
     local base_tag="${name}-base:latest"
     local compose_content
