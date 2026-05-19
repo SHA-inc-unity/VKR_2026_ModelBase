@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
+using System.Threading;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
 using Microsoft.Extensions.Options;
@@ -25,9 +26,12 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
     private readonly string _replyInbox;
 
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pending = new();
+    private readonly TaskCompletionSource<bool> _replyInboxReady =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
+    private int _isReplyInboxReady;
 
     public KafkaRequestClient(IOptions<KafkaSettings> opts, ILogger<KafkaRequestClient> log)
     {
@@ -69,13 +73,14 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
         .Build();
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        await EnsureReplyInboxTopicAsync(cancellationToken);
-        _consumer.Subscribe(_replyInbox);
-        _loopTask = Task.Run(() => ConsumeLoopAsync(_loopCts.Token), _loopCts.Token);
-        _log.LogInformation("KafkaRequestClient started, reply inbox: {Inbox}", _replyInbox);
+        _loopTask = Task.Run(() => BootstrapAndConsumeAsync(_loopCts.Token), CancellationToken.None);
+        _log.LogInformation(
+            "KafkaRequestClient starting background bootstrap, reply inbox: {Inbox}",
+            _replyInbox);
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -97,6 +102,14 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
         string topic, object payload, TimeSpan timeout, CancellationToken ct = default)
     {
         var startedAt = Stopwatch.GetTimestamp();
+        await WaitForReplyInboxReadyAsync(startedAt, timeout, ct);
+
+        var remainingTimeout = timeout - Stopwatch.GetElapsedTime(startedAt);
+        if (remainingTimeout <= TimeSpan.Zero)
+        {
+            throw new TimeoutException($"Kafka request timed out waiting for reply inbox on {topic}");
+        }
+
         var correlationId = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[correlationId] = tcs;
@@ -106,7 +119,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
             topic,
             correlationId,
             _replyInbox,
-            (int)timeout.TotalMilliseconds,
+            (int)remainingTimeout.TotalMilliseconds,
             _pending.Count);
 
         try
@@ -129,7 +142,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
                 (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(timeout);
+            timeoutCts.CancelAfter(remainingTimeout);
 
             await using var _ = timeoutCts.Token.Register(() =>
             {
@@ -138,7 +151,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
                     topic,
                     correlationId,
                     _replyInbox,
-                    (int)timeout.TotalMilliseconds,
+                    (int)remainingTimeout.TotalMilliseconds,
                     _pending.Count);
                 tcs.TrySetException(new TimeoutException($"Kafka request timed out on {topic}"));
             });
@@ -165,6 +178,68 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
         finally
         {
             _pending.TryRemove(correlationId, out _);
+        }
+    }
+
+    private async Task BootstrapAndConsumeAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (Volatile.Read(ref _isReplyInboxReady) == 0)
+                {
+                    await EnsureReplyInboxTopicAsync(ct);
+                    _consumer.Subscribe(_replyInbox);
+                    Interlocked.Exchange(ref _isReplyInboxReady, 1);
+                    _replyInboxReady.TrySetResult(true);
+                    _log.LogInformation("KafkaRequestClient started, reply inbox: {Inbox}", _replyInbox);
+                }
+
+                await ConsumeLoopAsync(ct);
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "KafkaRequestClient bootstrap failed for reply inbox {Inbox}; retrying in {DelayMs} ms",
+                    _replyInbox,
+                    (int)ReplyInboxRetryDelay.TotalMilliseconds);
+                await Task.Delay(ReplyInboxRetryDelay, ct);
+            }
+        }
+    }
+
+    private async Task WaitForReplyInboxReadyAsync(
+        long startedAt,
+        TimeSpan timeout,
+        CancellationToken ct)
+    {
+        if (Volatile.Read(ref _isReplyInboxReady) == 1)
+        {
+            return;
+        }
+
+        var remainingTimeout = timeout - Stopwatch.GetElapsedTime(startedAt);
+        if (remainingTimeout <= TimeSpan.Zero)
+        {
+            throw new TimeoutException("Kafka reply inbox is not ready");
+        }
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(remainingTimeout);
+
+        try
+        {
+            await _replyInboxReady.Task.WaitAsync(timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException("Kafka reply inbox is not ready");
         }
     }
 
