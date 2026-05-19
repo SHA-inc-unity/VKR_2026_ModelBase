@@ -68,6 +68,7 @@
 - `stop.sh` / `stop.ps1` управляют только compose-стеками ModelLine из `services.conf` и не трогают сторонние контейнеры или чужие compose-проекты на том же хосте
 - bash-версии `start.sh` / `restart.sh` перед `docker compose up` теперь делают preflight host-port check для publish-единиц launcher-а (`8443`, `8501`, `7510`, `7520`, infra ports и `ADMIN_PORT` в `onlyadmin`) и падают сразу с явным сообщением, если порт занят внешним контейнером/процессом
 - preflight host-port check не должен блокировать обычный `restart`: уже запущенные контейнеры того же compose-проекта считаются своими и допускаются, пока конфликт реально не идёт от внешнего контейнера/процесса
+- Docker publish ranges вроде `9000-9001->9000-9001` тоже распознаются как владельцы отдельных портов, поэтому MinIO не должен сам блокировать повторный `restart`
 
 ## Repo-local runtime data
 

@@ -140,10 +140,33 @@ get_docker_container_using_host_port() {
     local port="$1"
 
     docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' | awk -F '\t' -v port="$port" '
+        function published_port_matches(entry, port, host_part, arrow_pos, dash_pos, start_port, end_port) {
+            arrow_pos = index(entry, "->")
+            if (arrow_pos == 0) {
+                return 0
+            }
+
+            host_part = substr(entry, 1, arrow_pos - 1)
+            sub(/^.*:/, "", host_part)
+
+            if (host_part == port) {
+                return 1
+            }
+
+            if (host_part ~ /^[0-9]+-[0-9]+$/) {
+                dash_pos = index(host_part, "-")
+                start_port = substr(host_part, 1, dash_pos - 1) + 0
+                end_port = substr(host_part, dash_pos + 1) + 0
+                return (port + 0) >= start_port && (port + 0) <= end_port
+            }
+
+            return 0
+        }
+
         {
             count = split($3, port_entries, /, /)
             for (i = 1; i <= count; ++i) {
-                if (port_entries[i] ~ ":" port "->") {
+                if (published_port_matches(port_entries[i], port)) {
                     print $1 "\t" $2
                     exit
                 }
