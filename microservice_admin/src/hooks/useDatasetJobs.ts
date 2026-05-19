@@ -45,6 +45,21 @@ export interface DatasetJobView {
 
 type Listener = () => void;
 
+type DatasetJobWire = {
+  job_id: string;
+  type: DatasetJobType;
+  status: DatasetJobStatus;
+  progress?: number;
+  stage?: string | null;
+  detail?: string | null;
+  target_table?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  completed?: number | null;
+  updated_at_ms?: number | null;
+  finished_at_ms?: number | null;
+};
+
 const _jobs = new Map<string, DatasetJobView>();
 const _listeners = new Set<Listener>();
 let _snapshot: DatasetJobView[] = [];
@@ -71,56 +86,76 @@ const TERMINAL: ReadonlySet<DatasetJobStatus> = new Set([
   'succeeded', 'failed', 'canceled', 'skipped',
 ]);
 
+function scheduleFinishedJobCleanup(jobId: string, status: DatasetJobStatus): void {
+  if (status !== 'succeeded' && status !== 'skipped') return;
+  setTimeout(() => {
+    const cur = _jobs.get(jobId);
+    if (cur && cur.finished && (cur.status === 'succeeded' || cur.status === 'skipped')) {
+      _jobs.delete(jobId);
+      rebuildSnapshot();
+    }
+  }, 30_000);
+}
+
+function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
+  if (!job?.job_id) return;
+
+  const prev = _jobs.get(job.job_id);
+  const finished = TERMINAL.has(job.status);
+  _jobs.set(job.job_id, {
+    job_id: job.job_id,
+    type: job.type,
+    status: job.status,
+    progress: typeof job.progress === 'number'
+      ? job.progress
+      : job.status === 'succeeded'
+        ? 100
+        : (prev?.progress ?? 0),
+    stage: job.stage ?? prev?.stage ?? null,
+    detail: job.detail ?? prev?.detail ?? null,
+    target_table: job.target_table ?? prev?.target_table ?? null,
+    error_code: job.error_code ?? prev?.error_code ?? null,
+    error_message: job.error_message ?? prev?.error_message ?? null,
+    completed: typeof job.completed === 'number' ? job.completed : prev?.completed,
+    finished,
+    last_update_ms:
+      typeof job.finished_at_ms === 'number' ? job.finished_at_ms :
+      typeof job.updated_at_ms === 'number' ? job.updated_at_ms :
+      Date.now(),
+  });
+
+  if (!prev?.finished && finished) {
+    scheduleFinishedJobCleanup(job.job_id, job.status);
+  }
+
+  if (!deferRebuild) rebuildSnapshot();
+}
+
 /** Apply a progress event from EVT_DATA_DATASET_JOB_PROGRESS. */
 export function applyJobProgress(e: DatasetJobProgressEvent): void {
-  if (!e?.job_id) return;
-  const prev = _jobs.get(e.job_id);
-  _jobs.set(e.job_id, {
+  mergeJobWire({
     job_id: e.job_id,
     type: e.type,
     status: e.status,
-    progress: typeof e.progress === 'number' ? e.progress : (prev?.progress ?? 0),
-    stage: e.stage ?? prev?.stage ?? null,
-    detail: e.detail ?? prev?.detail ?? null,
-    target_table: e.target_table ?? prev?.target_table ?? null,
-    error_code: prev?.error_code ?? null,
-    error_message: prev?.error_message ?? null,
-    finished: TERMINAL.has(e.status),
-    last_update_ms: Date.now(),
+    progress: e.progress,
+    stage: e.stage,
+    detail: e.detail,
+    target_table: e.target_table,
   });
-  rebuildSnapshot();
 }
 
 /** Apply a completion event from EVT_DATA_DATASET_JOB_COMPLETED. */
 export function applyJobCompleted(e: DatasetJobCompletedEvent): void {
-  if (!e?.job_id) return;
-  const prev = _jobs.get(e.job_id);
-  _jobs.set(e.job_id, {
+  mergeJobWire({
     job_id: e.job_id,
     type: e.type,
     status: e.status,
-    progress: e.status === 'succeeded' ? 100 : (prev?.progress ?? 0),
-    stage: prev?.stage ?? null,
-    detail: prev?.detail ?? null,
-    target_table: e.target_table ?? prev?.target_table ?? null,
-    error_code: e.error_code ?? null,
-    error_message: e.error_message ?? null,
-    completed: e.completed != null ? e.completed : prev?.completed,
-    finished: true,
-    last_update_ms: Date.now(),
+    target_table: e.target_table,
+    error_code: e.error_code,
+    error_message: e.error_message,
+    completed: e.completed,
+    finished_at_ms: typeof e.finished_at === 'string' ? Date.parse(e.finished_at) : null,
   });
-  rebuildSnapshot();
-  // Auto-evict succeeded jobs after 30s to keep panel tidy. Keep failed
-  // visible until explicitly dismissed.
-  if (e.status === 'succeeded' || e.status === 'skipped') {
-    setTimeout(() => {
-      const cur = _jobs.get(e.job_id);
-      if (cur && cur.finished) {
-        _jobs.delete(e.job_id);
-        rebuildSnapshot();
-      }
-    }, 30_000);
-  }
 }
 
 /** Manually dismiss a finished job from the panel. */
@@ -172,28 +207,43 @@ export async function refreshActiveJobs(): Promise<void> {
       Topics.CMD_DATA_DATASET_JOBS_LIST,
       { status_group: 'active', limit: 50 },
       { timeoutMs: 10_000 },
-    ) as { jobs?: Array<DatasetJobProgressEvent & { error_code?: string; error_message?: string }> };
+    ) as { jobs?: DatasetJobWire[] };
     if (!resp?.jobs) return;
     for (const j of resp.jobs) {
-      const prev = _jobs.get(j.job_id);
-      _jobs.set(j.job_id, {
-        job_id: j.job_id,
-        type: j.type,
-        status: j.status,
-        progress: typeof j.progress === 'number' ? j.progress : 0,
-        stage: j.stage ?? null,
-        detail: j.detail ?? null,
-        target_table: j.target_table ?? null,
-        error_code: j.error_code ?? null,
-        error_message: j.error_message ?? null,
-        finished: TERMINAL.has(j.status),
-        last_update_ms: prev?.last_update_ms ?? Date.now(),
-      });
+      mergeJobWire(j, true);
     }
     rebuildSnapshot();
   } catch {
     // Best-effort hydration; SSE will still populate live updates.
   }
+}
+
+/**
+ * Poll explicit job ids through JOBS_GET. Used as a fallback when the page
+ * tracks long-running ingest jobs and SSE misses a queued/running/terminal
+ * transition.
+ */
+export async function refreshJobsByIds(jobIds: string[]): Promise<void> {
+  const uniqueIds = Array.from(new Set(jobIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return;
+
+  let changed = false;
+  await Promise.all(uniqueIds.map(async (jobId) => {
+    try {
+      const resp = await kafkaCall(
+        Topics.CMD_DATA_DATASET_JOBS_GET,
+        { job_id: jobId },
+        { timeoutMs: 10_000 },
+      ) as { job?: DatasetJobWire };
+      if (!resp?.job?.job_id) return;
+      mergeJobWire(resp.job, true);
+      changed = true;
+    } catch {
+      // Best-effort refresh only.
+    }
+  }));
+
+  if (changed) rebuildSnapshot();
 }
 
 /** Cancel a job by id. Returns true if the cancel command was accepted. */

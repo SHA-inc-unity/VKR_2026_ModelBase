@@ -7,7 +7,7 @@ import { kafkaCall, newCorrelationId } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
 import { useEvents } from '@/hooks/useEvents';
-import { applyJobProgress, applyJobCompleted, refreshActiveJobs, seedQueuedJob, useDatasetJobs } from '@/hooks/useDatasetJobs';
+import { applyJobProgress, applyJobCompleted, refreshActiveJobs, refreshJobsByIds, seedQueuedJob, useDatasetJobs } from '@/hooks/useDatasetJobs';
 import type { DatasetJobView } from '@/hooks/useDatasetJobs';
 import DatasetJobsPanel from '@/components/DatasetJobsPanel';
 import {
@@ -602,6 +602,48 @@ export default function DatasetPage() {
   useEffect(() => {
     void refreshActiveJobs();
   }, []);
+
+  const liveIngestJobIds = allJobs
+    .filter(job => job.type === 'ingest' && !job.finished)
+    .map(job => job.job_id);
+  const trackedIngestJobIdsKey = Array.from(new Set([
+    ...(ingestJobId ? [ingestJobId] : []),
+    ...Object.values(allIngestJobIds),
+    ...liveIngestJobIds,
+  ].filter(Boolean))).sort().join('|');
+
+  useEffect(() => {
+    if (!trackedIngestJobIdsKey) return;
+
+    let disposed = false;
+    const pollTrackedJobs = async () => {
+      try {
+        await refreshActiveJobs();
+        if (disposed) return;
+
+        const jobIds = Array.from(new Set([
+          ...(ingestJobId ? [ingestJobId] : []),
+          ...Object.values(allIngestJobIdsRef.current),
+          ...allJobs
+            .filter(job => job.type === 'ingest' && !job.finished)
+            .map(job => job.job_id),
+        ].filter(Boolean)));
+        await refreshJobsByIds(jobIds);
+      } catch {
+        // SSE stays the primary path. Polling only prevents stale UI.
+      }
+    };
+
+    void pollTrackedJobs();
+    const timer = setInterval(() => {
+      void pollTrackedJobs();
+    }, 5_000);
+
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
+  }, [trackedIngestJobIdsKey, ingestJobId, allJobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Tick re-render every second so elapsed timers in running slots update.
   useEffect(() => {

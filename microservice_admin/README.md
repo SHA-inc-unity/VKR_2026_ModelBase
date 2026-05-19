@@ -86,6 +86,13 @@ shared token.
 но даёт оператору быстрый просмотр текущей admin-side цепочки прямо из
 ModelLine без доступа к shell.
 
+Dataset jobs на странице Download теперь страхуются не только SSE: пока
+экран отслеживает активные ingest jobs, admin дополнительно делает
+best-effort polling `cmd.data.dataset.jobs.list` + `cmd.data.dataset.jobs.get`
+раз в 5 с. Это устраняет ложный UI-сценарий, когда backend уже перевёл job
+в `running` или terminal-state, но browser пропустил progress/completed
+event и продолжал показывать `queued` / `stalled`.
+
 Backend-host теперь сам поднимает `:8443` без ручной подготовки `tls.crt` / `tls.key`: `microservice_infra` автогенерирует self-signed сертификат в `ADMIN_BACKEND_CERTS_DIR`, если каталог пустой. Чтобы этот split-path работал без дополнительного trust-store bootstrap, `admin-online` по умолчанию получает `ADMIN_BACKEND_TLS_INSECURE=1` и принимает self-signed backend cert. `/api/health` вычисляет split-mode из runtime env на каждый запрос и в split-mode проверяет только `ADMIN_BACKEND_BASE_URL/health`, а не прямые `ONLINE_*` endpoints. После установки доверенного сертификата на backend-host переведи admin-host на `ADMIN_BACKEND_TLS_INSECURE=0`.
 
 Dashboard на главной странице теперь явно показывает, к какому backend host/IP подключён текущий admin, отдельным заметным connection-блоком над stat cards. Источник один и предсказуемый: compose кладёт в runtime `BACKEND_CONNECTION_TARGET`, где local stack всегда показывает `localhost`, а `admin-online` берёт значение из `ONLINE_BACKEND_HOST`. Тот же блок теперь показывает и реальный `KAFKA_BOOTSTRAP_SERVERS`, который использует admin, плюс текст ошибки broker connectivity, если Kafka path недоступен. Дополнительно `connectionTarget` дублируется в верхней строке dashboard, в sidebar header под логотипом и в footer sidebar, чтобы оператор видел target backend на любой странице admin-панели.

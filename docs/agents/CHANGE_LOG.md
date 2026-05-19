@@ -8,6 +8,7 @@
 
 - `microservice_admin/src/components/Sidebar.tsx`, `src/app/logs/page.tsx`, `src/app/api/logs/route.ts`, `src/lib/adminRuntimeLog.ts`: в админку добавлен шестой пункт меню **Logs**. Страница показывает process-local runtime diagnostics из admin (`/api/health`, `/api/kafka`, `backendClient.ts`), умеет запускать быстрый health/data/analytics check и не сохраняет token/payload.
 - `.gitignore`: добавлены исключения для `microservice_admin/src/app/logs/**` и `microservice_admin/src/app/api/logs/**`, потому что общий шаблон `logs/` скрывал Next.js Logs routes из git и приводил к `404` на server deploy при формально одинаковом commit hash.
+- `microservice_admin/src/hooks/useDatasetJobs.ts`, `microservice_admin/src/app/download/page.tsx`, `microservice_admin/README.md`, `microservice_admin/STRUCTURE.md`: Download-экран dataset jobs получил fallback polling `cmd.data.dataset.jobs.list` + `cmd.data.dataset.jobs.get` каждые 5 с для tracked ingest jobs. Это устраняет ложный UI-сценарий, когда backend уже перевёл job в `running`/terminal-state, но admin пропустил SSE progress/completed event и продолжал показывать `queued` / `stalled`.
 
 ### 2026-05-18
 
