@@ -24,6 +24,13 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayTestWebAppFac
     }
 
     [Fact]
+    public async Task Readiness_health_check_returns_200_in_test_env()
+    {
+        var response = await _client.GetAsync("/health/ready");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
     public async Task Bootstrap_anonymous_returns_200_with_null_user()
     {
         var response = await _client.GetAsync("/api/app/bootstrap");

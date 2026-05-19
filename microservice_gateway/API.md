@@ -174,6 +174,7 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 | Method | Path | Auth | Основной сценарий |
 | ------ | ---- | ---- | ----------------- |
 | GET | `/health` | None | liveness probe |
+| GET | `/health/ready` | None | readiness probe (Kafka bootstrap included) |
 | GET | `/api/app/bootstrap` | Optional | старт приложения |
 | GET | `/api/account/me` | Required | профиль текущего пользователя |
 | GET | `/api/dashboard` | Required | главный экран с агрегированными данными |
@@ -210,6 +211,45 @@ Healthy
 
 - endpoint полезен для ops / monitoring / smoke-check;
 - для продуктовой логики фронтенда обычно не нужен.
+
+---
+
+## GET /health/ready
+
+### /health/ready: назначение
+
+Readiness-проверка gateway request/reply path.
+
+В отличие от `/health`, этот endpoint дополнительно проверяет, что bootstrap
+listener Kafka/Redpanda доступен по `Kafka:BootstrapServers` и gateway может
+делать metadata lookup к broker.
+
+### /health/ready: request
+
+```http
+GET /health/ready
+```
+
+Авторизация не требуется.
+
+### /health/ready: success response
+
+`200 OK`
+
+```text
+Healthy
+```
+
+### /health/ready: failure semantics
+
+Если ASP.NET процесс жив, но Kafka bootstrap недоступен, endpoint отвечает
+`503 Service Unavailable`.
+
+Это именно тот endpoint, который должны использовать:
+
+- docker/ops health probes gateway;
+- split-deployment admin probe;
+- мониторинг, которому нужна готовность Kafka-facing команд, а не только live HTTP process.
 
 ---
 

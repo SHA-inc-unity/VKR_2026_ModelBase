@@ -37,6 +37,24 @@ public sealed record ErrorResponse
         CorrelationId = correlationId
     };
 
+    public static ErrorResponse AdminTimeout(string code, string detail, string? correlationId = null) => new()
+    {
+        Status = 504,
+        Title = "Admin Facade Timeout",
+        Code = code,
+        Detail = detail,
+        CorrelationId = correlationId
+    };
+
+    public static ErrorResponse AdminUnavailable(string code, string detail, string? correlationId = null) => new()
+    {
+        Status = 503,
+        Title = "Admin Facade Upstream Unavailable",
+        Code = code,
+        Detail = detail,
+        CorrelationId = correlationId
+    };
+
     public static ErrorResponse InternalError(string? correlationId = null) => new()
     {
         Status = 500,

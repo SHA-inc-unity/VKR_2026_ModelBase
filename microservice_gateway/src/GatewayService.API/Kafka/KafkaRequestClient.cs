@@ -304,9 +304,9 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
 
     public void Dispose()
     {
-        _admin.Dispose();
-        _producer.Dispose();
-        _consumer.Dispose();
+        try { _admin.Dispose(); } catch (ObjectDisposedException) { }
+        try { _producer.Dispose(); } catch (ObjectDisposedException) { }
+        try { _consumer.Dispose(); } catch (ObjectDisposedException) { }
         _loopCts?.Dispose();
     }
 

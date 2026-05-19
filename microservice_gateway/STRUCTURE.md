@@ -19,7 +19,7 @@
 | ---- | -------- |
 | `GatewayService.sln` | Solution-файл .NET |
 | `Dockerfile` | Контейнеризация gateway |
-| `docker-compose.yml` | Локальный compose-стек gateway |
+| `docker-compose.yml` | Локальный compose-стек gateway; container healthcheck смотрит `GET /health/ready`, а не liveness-only `/health` |
 | `global.json` | Привязка .NET SDK |
 | `README.md` | Основная документация сервиса |
 | `API.md` | Подробная HTTP-спецификация для frontend: headers, auth, вход, выход, ошибки, degraded/pending semantics |
@@ -31,14 +31,14 @@
 
 | Папка / файл | Назначение |
 | ------------ | ---------- |
-| `Program.cs` | bootstrap приложения, DI, middleware pipeline |
+| `Program.cs` | bootstrap приложения, DI, middleware pipeline, health routing (`/health` liveness, `/health/ready` readiness) |
 | `Aggregators/` | BFF-оркестрация составных экранов и bootstrap-ответов |
 | `Clients/` | Downstream clients, включая Kafka request/reply к account service |
 | `Controllers/` | HTTP endpoints gateway |
 | `DTOs/` | Контракты ответов и ошибок; `ErrorResponse` включает optional `code` для машинно-читаемой диагностики |
 | `Extensions/` | Регистрация сервисов и инфраструктурных зависимостей |
 | `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade, различает `admin_token_missing` и `admin_token_invalid` |
-| `Kafka/` | Kafka settings, topics, `IKafkaRequestClient` и request client; `AdminTopics` — topic-константы admin facade. `KafkaRequestClient` bootstrap-ит per-instance reply-inbox `reply.gateway.{instanceId}` в background-loop и ретраит Kafka Admin create без падения всего gateway, поэтому `/health` не уходит в crash-loop при временной недоступности Kafka. Если create не подтверждён в пределах startup budget, клиент всё равно делает best-effort subscribe на reply inbox и не блокирует все Kafka-backed HTTP calls состоянием `reply inbox not ready`. Runtime diagnostics логируют `KafkaRequest start/produced/success/timeout/failed` с topic, replyInbox, duration и correlationId без payload. |
+| `Kafka/` | Kafka settings, topics, `IKafkaRequestClient`, `KafkaBrokerHealthCheck` и request client; `AdminTopics` — topic-константы admin facade. `KafkaRequestClient` bootstrap-ит per-instance reply-inbox `reply.gateway.{instanceId}` в background-loop и ретраит Kafka Admin create без падения всего gateway, поэтому `/health` не уходит в crash-loop при временной недоступности Kafka. Если create не подтверждён в пределах startup budget, клиент всё равно делает best-effort subscribe на reply inbox и не блокирует все Kafka-backed HTTP calls состоянием `reply inbox not ready`. `KafkaBrokerHealthCheck` отдельно проверяет bootstrap listener для `/health/ready` и compose healthcheck. Runtime diagnostics логируют `KafkaRequest start/produced/success/timeout/failed` с topic, replyInbox, duration и correlationId без payload. |
 | `Market/` | Полный market API — см. ниже |
 | `Middleware/` | CorrelationId, exception handling и другие cross-cutting middleware |
 | `Settings/` | strongly-typed конфиги; `AdminSettings` — конфиг admin facade (SharedToken, таймауты) |

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Confluent.Kafka;
+using GatewayService.API.DTOs;
 using GatewayService.API.Filters;
 using GatewayService.API.Kafka;
 using GatewayService.API.Middleware;
@@ -67,13 +69,16 @@ namespace GatewayService.API.Controllers;
 [ServiceFilter(typeof(AdminApiKeyFilter))]
 public sealed class AdminController : ControllerBase
 {
-    private readonly KafkaRequestClient _kafka;
+    private const string KafkaTimeoutCode = "admin_kafka_timeout";
+    private const string KafkaUnavailableCode = "admin_kafka_unavailable";
+
+    private readonly IKafkaRequestClient _kafka;
     private readonly ILogger<AdminController> _log;
     private readonly TimeSpan _defaultTimeout;
     private readonly TimeSpan _longTimeout;
 
     public AdminController(
-        KafkaRequestClient kafka,
+        IKafkaRequestClient kafka,
         IOptions<AdminSettings> opts,
         ILogger<AdminController> log)
     {
@@ -121,9 +126,32 @@ public sealed class AdminController : ControllerBase
                 (int)timeout.TotalMilliseconds,
                 (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
                 correlationId);
-            return StatusCode(504, new { error = tex.Message });
+            return StatusCode(504, ErrorResponse.AdminTimeout(
+                KafkaTimeoutCode,
+                tex.Message,
+                correlationId));
+        }
+        catch (Exception ex) when (IsKafkaTransportFailure(ex))
+        {
+            const string detail = "Gateway could not publish the Kafka request. Check Redpanda/Kafka broker connectivity and the bootstrap listener.";
+
+            _log.LogError(ex,
+                "AdminFacade request kafka-unavailable topic={Topic} path={Path} durationMs={DurationMs} correlationId={CorrelationId}",
+                topic,
+                HttpContext.Request.Path,
+                (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                correlationId);
+            return StatusCode(503, ErrorResponse.AdminUnavailable(
+                KafkaUnavailableCode,
+                detail,
+                correlationId));
         }
     }
+
+    private static bool IsKafkaTransportFailure(Exception ex) =>
+        ex is KafkaException
+        or ProduceException<string, string>
+        or TaskCanceledException;
 
     private Task<IActionResult> Forward(string topic, JsonElement? body, CancellationToken ct)
         => Forward(topic, body, _defaultTimeout, ct);

@@ -1,4 +1,7 @@
 using GatewayService.API.Extensions;
+using GatewayService.API.Kafka;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using GatewayService.API.Middleware;
 using Serilog;
 
@@ -10,9 +13,19 @@ builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configurati
 // ── Services ─────────────────────────────────────────────────────────────────
 builder.Services.AddGatewayServices(builder.Configuration);
 builder.Services.AddGatewaySwagger();
-builder.Services
-    .AddHealthChecks()
-    .AddCheck("self", () => Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy());
+var healthChecks = builder.Services.AddHealthChecks()
+    .AddCheck(
+        "self",
+        () => HealthCheckResult.Healthy(),
+        tags: ["live", "ready"]);
+
+if (!builder.Environment.IsEnvironment("Test"))
+{
+    healthChecks.AddCheck<KafkaBrokerHealthCheck>(
+        "kafka",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: ["ready"]);
+}
 
 // ── App ───────────────────────────────────────────────────────────────────────
 var app = builder.Build();
@@ -35,7 +48,14 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("live"),
+});
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+});
 
 app.Run();
 

@@ -5,7 +5,7 @@
  * account service and gateway directly.
  *
  * In split-deployment mode (ADMIN_BACKEND_BASE_URL set): skips all direct
- * backend probes and instead probes only the backend HTTPS endpoint itself,
+ * backend probes and instead probes only the backend readiness endpoint,
  * deriving the gateway/Redpanda/MinIO/account results from the combined backend
  * reachability status.
  */
@@ -97,7 +97,7 @@ export async function GET(): Promise<Response> {
     if (adminBackendTlsInsecure && adminBackendBaseUrl.startsWith('https://')) {
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     }
-    const backendProbe = await probe(`${adminBackendBaseUrl}/health`, 'backend-facade');
+    const backendProbe = await probe(`${adminBackendBaseUrl}/health/ready`, 'backend-facade');
     const body: InfraHealthResponse = {
       connectionTarget: adminBackendBaseUrl,
       kafka: {
@@ -132,7 +132,7 @@ export async function GET(): Promise<Response> {
     probe(`http://${REDPANDA_ADMIN_URL}/v1/status/ready`, 'redpanda'),
     probe(`http://${MINIO_URL}/minio/health/live`, 'minio'),
     probe(`http://${ACCOUNT_URL}/health`, 'account'),
-    probe(`http://${GATEWAY_URL}/health`, 'gateway'),
+    probe(`http://${GATEWAY_URL}/health/ready`, 'gateway'),
   ]);
 
   const unwrap = (r: PromiseSettledResult<InfraServiceHealth>): InfraServiceHealth =>
