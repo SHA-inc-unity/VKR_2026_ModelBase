@@ -133,9 +133,9 @@ const translations = {
     'queue.queuedJobs':    'Queued',
     'queue.finishedJobs':  'Finished',
     'queue.requestErrors': 'Request Errors',
-    'queue.requests':      'API / Server Request Stream',
+    'queue.requests':      'Queue History',
     'queue.clear':         'Clear',
-    'queue.noRequests':    'No requests yet',
+    'queue.noRequests':    'Queue history is empty',
   },
 
   ru: {
@@ -265,9 +265,9 @@ const translations = {
     'queue.queuedJobs':    'В очереди',
     'queue.finishedJobs':  'Завершены',
     'queue.requestErrors': 'Ошибки запросов',
-    'queue.requests':      'Поток запросов API / server',
+    'queue.requests':      'История очереди',
     'queue.clear':         'Очистить',
-    'queue.noRequests':    'Запросов пока нет',
+    'queue.noRequests':    'История очереди пока пуста',
   },
 } as const;
 

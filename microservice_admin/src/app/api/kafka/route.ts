@@ -3,6 +3,7 @@ import { kafkaRequest } from '@/lib/kafka';
 import { coalesce, coalesceTtlFor, makeKey } from '@/lib/kafkaCoalesce';
 import { isSplitMode, backendCall, BackendClientError } from '@/lib/backendClient';
 import { writeAdminRuntimeLog } from '@/lib/adminRuntimeLog';
+import { appendQueueHistory } from '@/lib/queueHistoryStore';
 import { Topics } from '@/lib/topics';
 
 const QUEUE_HISTORY_TOPICS = new Set<string>([
@@ -105,6 +106,7 @@ export async function POST(req: NextRequest) {
   let requestTopic: string | null = null;
   let queueTopic = false;
   let payloadSummary: Record<string, unknown> | null = null;
+  let requestId: string | null = null;
   try {
     const body = await req.json();
     const { topic, payload, timeoutMs, correlationId } = body as {
@@ -127,6 +129,7 @@ export async function POST(req: NextRequest) {
     }
 
     requestTopic = topic;
+    requestId = correlationId ?? crypto.randomUUID();
 
     const ttl = coalesceTtlFor(topic, body);
     queueTopic = QUEUE_HISTORY_TOPICS.has(topic);
@@ -185,6 +188,19 @@ export async function POST(req: NextRequest) {
           responseSummary: queueTopic ? buildResponseSummary(data) : null,
         },
       });
+      if (queueTopic && requestId) {
+        await appendQueueHistory({
+          id: requestId,
+          ts: new Date().toISOString(),
+          topic,
+          level: 'success',
+          durationMs: Date.now() - startedAt,
+          splitMode: true,
+          payloadSummary,
+          responseSummary: buildResponseSummary(data),
+          correlationId: correlationId ?? null,
+        });
+      }
       return NextResponse.json({ data });
     }
 
@@ -216,6 +232,19 @@ export async function POST(req: NextRequest) {
         responseSummary: queueTopic ? buildResponseSummary(data) : null,
       },
     });
+    if (queueTopic && requestId) {
+      await appendQueueHistory({
+        id: requestId,
+        ts: new Date().toISOString(),
+        topic,
+        level: 'success',
+        durationMs: Date.now() - startedAt,
+        splitMode: false,
+        payloadSummary,
+        responseSummary: buildResponseSummary(data),
+        correlationId: correlationId ?? null,
+      });
+    }
     return NextResponse.json({ data });
   } catch (err) {
     if (err instanceof BackendClientError) {
@@ -243,6 +272,21 @@ export async function POST(req: NextRequest) {
           payloadSummary,
         },
       });
+      if (queueTopic && requestId && requestTopic) {
+        await appendQueueHistory({
+          id: requestId,
+          ts: new Date().toISOString(),
+          topic: requestTopic,
+          level: 'error',
+          durationMs: Date.now() - startedAt,
+          splitMode: isSplitMode,
+          payloadSummary,
+          message: err.message,
+          code: err.code,
+          detail: err.detail,
+          correlationId: err.correlationId ?? null,
+        });
+      }
       return NextResponse.json({
         error: err.message,
         status,
@@ -268,6 +312,19 @@ export async function POST(req: NextRequest) {
         payloadSummary,
       },
     });
+    if (queueTopic && requestId && requestTopic) {
+      await appendQueueHistory({
+        id: requestId,
+        ts: new Date().toISOString(),
+        topic: requestTopic,
+        level: 'error',
+        durationMs: Date.now() - startedAt,
+        splitMode: isSplitMode,
+        payloadSummary,
+        message,
+        correlationId: null,
+      });
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

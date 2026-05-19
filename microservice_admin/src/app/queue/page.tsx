@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, Clock3, RefreshCw, Trash2 } from 'lucide-react';
+import { Activity, CheckCircle2, Clock3, RefreshCw, Trash2, XCircle } from 'lucide-react';
 import DatasetJobsPanel from '@/components/DatasetJobsPanel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,20 +14,25 @@ import { Topics } from '@/lib/topics';
 import { cn } from '@/lib/utils';
 import { useLocale } from '@/lib/i18nContext';
 
-type RuntimeLogLevel = 'info' | 'success' | 'warn' | 'error';
+type QueueHistoryLevel = 'success' | 'error';
 
-interface RuntimeLogEntry {
-  id: number;
+interface QueueHistoryEntry {
+  id: string;
   ts: string;
-  level: RuntimeLogLevel;
-  source: string;
-  event: string;
-  message?: string;
-  fields?: Record<string, unknown>;
+  topic: string;
+  level: QueueHistoryLevel;
+  durationMs: number;
+  splitMode: boolean;
+  payloadSummary?: Record<string, unknown> | null;
+  responseSummary?: Record<string, unknown> | null;
+  message?: string | null;
+  code?: string | null;
+  detail?: string | null;
+  correlationId?: string | null;
 }
 
-interface RuntimeLogResponse {
-  logs: RuntimeLogEntry[];
+interface QueueHistoryResponse {
+  items: QueueHistoryEntry[];
 }
 
 const QUEUE_HISTORY_TOPICS = new Set<string>([
@@ -45,10 +50,8 @@ const QUEUE_HISTORY_TOPICS = new Set<string>([
   Topics.CMD_ANALYTICS_TRAIN_START,
 ]);
 
-const LEVEL_BADGE: Record<RuntimeLogLevel, 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'info'> = {
-  info: 'info',
+const LEVEL_BADGE: Record<QueueHistoryLevel, 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'info'> = {
   success: 'success',
-  warn: 'warning',
   error: 'destructive',
 };
 
@@ -96,11 +99,10 @@ function humanizeTopic(topic: string): string {
   }
 }
 
-function buildHistorySummary(item: RuntimeLogEntry): { request: string; result: string } {
-  const fields = item.fields ?? {};
-  const topic = typeof fields.topic === 'string' ? fields.topic : item.event;
-  const payloadSummary = asRecord(fields.payloadSummary);
-  const responseSummary = asRecord(fields.responseSummary);
+function buildHistorySummary(item: QueueHistoryEntry): { request: string; result: string } {
+  const topic = item.topic;
+  const payloadSummary = asRecord(item.payloadSummary);
+  const responseSummary = asRecord(item.responseSummary);
 
   const targetTable = (payloadSummary?.target_table ?? payloadSummary?.table ?? payloadSummary?.target_symbol) as string | undefined;
   const timeframe = (payloadSummary?.target_timeframe ?? payloadSummary?.timeframe) as string | undefined;
@@ -119,6 +121,8 @@ function buildHistorySummary(item: RuntimeLogEntry): { request: string; result: 
   const resultParts: string[] = [];
   if (item.level === 'error') {
     resultParts.push(item.message ?? 'Request failed');
+    if (item.code) resultParts.push(item.code);
+    if (item.detail && item.detail !== item.message) resultParts.push(item.detail);
   } else {
     if (responseSummary?.status) resultParts.push(String(responseSummary.status));
     if (responseSummary?.job_id) resultParts.push(`job ${String(responseSummary.job_id).slice(0, 8)}`);
@@ -137,63 +141,69 @@ function buildHistorySummary(item: RuntimeLogEntry): { request: string; result: 
   };
 }
 
-function isQueueHistoryItem(item: RuntimeLogEntry): boolean {
-  if (item.source !== 'api/kafka') return false;
-  if (item.event !== 'request:success' && item.event !== 'request:backend-error' && item.event !== 'request:unexpected-error') {
-    return false;
-  }
-  const topic = typeof item.fields?.topic === 'string' ? item.fields.topic : null;
-  return topic !== null && QUEUE_HISTORY_TOPICS.has(topic);
-}
-
 export default function QueuePage() {
   const { t } = useLocale();
   const jobs = useDatasetJobs();
-  useDatasetJobsFeed(5_000);
+  useDatasetJobsFeed(1_500);
 
-  const [logs, setLogs] = useState<RuntimeLogEntry[]>([]);
+  const [history, setHistory] = useState<QueueHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const loadLogs = useCallback(async () => {
+  const loadHistory = useCallback(async () => {
     const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-    const res = await fetch(`${base}/api/logs?limit=250`, { cache: 'no-store' });
-    const data = await res.json() as RuntimeLogResponse;
-    setLogs(data.logs ?? []);
+    const res = await fetch(`${base}/api/queue/history?limit=250`, { cache: 'no-store' });
+    const data = await res.json() as QueueHistoryResponse;
+    const items = Array.isArray(data.items)
+      ? data.items.filter((item) => item?.topic && QUEUE_HISTORY_TOPICS.has(item.topic))
+      : [];
+    setHistory(items);
   }, []);
 
-  const refreshLogs = useCallback(async () => {
+  const refreshQueue = useCallback(async () => {
     setLoading(true);
     try {
-      await loadLogs();
+      await loadHistory();
     } finally {
       setLoading(false);
     }
-  }, [loadLogs]);
+  }, [loadHistory]);
 
-  const clearLogs = useCallback(async () => {
+  const clearQueue = useCallback(async () => {
     const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-    await fetch(`${base}/api/logs`, { method: 'DELETE' });
-    setLogs([]);
+    await fetch(`${base}/api/queue/history`, { method: 'DELETE' });
+    setHistory([]);
   }, []);
 
   useEffect(() => {
-    void refreshLogs();
-  }, [refreshLogs]);
+    void refreshQueue();
+  }, [refreshQueue]);
 
   useEffect(() => {
+    const refreshNow = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void loadHistory();
+    };
+
     const timer = window.setInterval(() => {
-      void loadLogs();
-    }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [loadLogs]);
+      refreshNow();
+    }, 2_000);
+
+    window.addEventListener('focus', refreshNow);
+    document.addEventListener('visibilitychange', refreshNow);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshNow);
+      document.removeEventListener('visibilitychange', refreshNow);
+    };
+  }, [loadHistory]);
 
   const activeJobs = useMemo(() => jobs.filter(job => !job.finished).length, [jobs]);
   const runningJobs = useMemo(() => jobs.filter(job => job.status === 'running').length, [jobs]);
   const queuedJobs = useMemo(() => jobs.filter(job => job.status === 'queued').length, [jobs]);
   const finishedJobs = useMemo(() => jobs.filter(job => job.finished).length, [jobs]);
-  const historyItems = useMemo(() => logs.filter(isQueueHistoryItem), [logs]);
-  const errors = useMemo(() => historyItems.filter(item => item.level === 'error').length, [historyItems]);
-  const lastLog = historyItems[0];
+  const errors = useMemo(() => history.filter(item => item.level === 'error').length, [history]);
+  const lastHistoryItem = history[0];
 
   return (
     <div className="space-y-4 lg:space-y-5">
@@ -201,17 +211,17 @@ export default function QueuePage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">{t('queue.title')}</h1>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span className="font-mono">admin-runtime + dataset jobs</span>
+            <span className="font-mono">dataset jobs + queue history</span>
             <span>·</span>
-            <span>{lastLog ? formatTime(lastLog.ts) : t('queue.noRequests')}</span>
+            <span>{lastHistoryItem ? formatTime(lastHistoryItem.ts) : t('queue.noRequests')}</span>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={refreshLogs} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={refreshQueue} disabled={loading}>
             <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
             {t('common.refresh')}
           </Button>
-          <Button variant="ghost" size="sm" onClick={clearLogs} disabled={logs.length === 0}>
+          <Button variant="ghost" size="sm" onClick={clearQueue} disabled={history.length === 0}>
             <Trash2 className="h-4 w-4" />
             {t('queue.clear')}
           </Button>
@@ -288,9 +298,9 @@ export default function QueuePage() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-[92px]">{t('common.time')}</TableHead>
-                  <TableHead className="w-[92px]">{t('logs.level')}</TableHead>
-                  <TableHead className="w-[150px]">{t('logs.source')}</TableHead>
-                  <TableHead className="w-[210px]">{t('logs.event')}</TableHead>
+                  <TableHead className="w-[110px]">{t('common.status')}</TableHead>
+                  <TableHead className="w-[120px]">Duration</TableHead>
+                  <TableHead className="w-[240px]">Operation</TableHead>
                   <TableHead>{t('logs.details')}</TableHead>
                 </TableRow>
               </TableHeader>
@@ -305,32 +315,41 @@ export default function QueuePage() {
                       <TableCell><Skeleton className="h-4 w-full" /></TableCell>
                     </TableRow>
                   ))
-                ) : historyItems.length === 0 ? (
+                ) : history.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={5} className="h-28 text-center text-muted-foreground">
                       {t('queue.noRequests')}
                     </TableCell>
                   </TableRow>
                 ) : (
-                  historyItems.map(item => {
+                  history.map(item => {
                     const summary = buildHistorySummary(item);
                     return (
                       <TableRow key={item.id} className="align-top">
                         <TableCell className="font-mono text-xs text-muted-foreground">{formatTime(item.ts)}</TableCell>
                         <TableCell>
-                          <Badge variant={LEVEL_BADGE[item.level]} className="uppercase">{item.level}</Badge>
+                          <Badge variant={LEVEL_BADGE[item.level]} className="inline-flex items-center gap-1 uppercase">
+                            {item.level === 'success' ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                            {item.level}
+                          </Badge>
                         </TableCell>
-                        <TableCell className="font-mono text-xs">{item.source}</TableCell>
-                        <TableCell className="font-mono text-xs">{typeof item.fields?.topic === 'string' ? item.fields.topic : item.event}</TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{item.durationMs} ms</TableCell>
+                        <TableCell className="font-mono text-xs">{item.topic}</TableCell>
                         <TableCell>
                           <div className="max-w-[980px] space-y-1">
                             <div className="text-sm text-foreground">{summary.request}</div>
                             <div className={cn('text-xs', item.level === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
                               {summary.result}
                             </div>
-                            {item.fields && (
+                            {(item.payloadSummary || item.responseSummary || item.code || item.correlationId) && (
                               <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded bg-background/40 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                                {formatFields(item.fields)}
+                                {formatFields({
+                                  splitMode: item.splitMode,
+                                  correlationId: item.correlationId,
+                                  code: item.code,
+                                  payloadSummary: item.payloadSummary,
+                                  responseSummary: item.responseSummary,
+                                })}
                               </pre>
                             )}
                           </div>

@@ -11,15 +11,29 @@ export function useDatasetJobsFeed(pollActiveMs = 0): void {
   });
 
   useEffect(() => {
-    void refreshActiveJobs();
+    const refreshNow = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void refreshActiveJobs();
+    };
+
+    refreshNow();
     if (pollActiveMs <= 0) return;
 
     const timer = window.setInterval(() => {
-      void refreshActiveJobs();
+      refreshNow();
     }, pollActiveMs);
+
+    const handleVisible = () => {
+      refreshNow();
+    };
+
+    window.addEventListener('focus', handleVisible);
+    document.addEventListener('visibilitychange', handleVisible);
 
     return () => {
       window.clearInterval(timer);
+      window.removeEventListener('focus', handleVisible);
+      document.removeEventListener('visibilitychange', handleVisible);
     };
   }, [pollActiveMs]);
 }
