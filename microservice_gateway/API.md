@@ -120,6 +120,7 @@ Frontend должен различать эти сценарии.
 {
   "status": 401,
   "title": "Unauthorized",
+  "code": "auth_required",
   "detail": "Authentication is required.",
   "correlationId": "2de4b66e-8b79-4a3e-b3a1-7e5d65f89e74",
   "timestamp": "2026-05-15T18:22:00Z"
@@ -132,9 +133,35 @@ Frontend должен различать эти сценарии.
 | ---- | --- | -------- |
 | `status` | number | HTTP status code |
 | `title` | string | короткое имя ошибки |
+| `code` | string/null | машинно-читаемый код ошибки, если endpoint может различать причины |
 | `detail` | string/null | человекочитаемое описание |
 | `correlationId` | string/null | идентификатор запроса для трассировки |
 | `timestamp` | string | время формирования ответа |
+
+### Admin facade auth errors
+
+`/api/admin/*` — это split-deployment facade для `microservice_admin`.
+Эти endpoint-ы требуют shared secret из backend `ADMIN_SHARED_TOKEN`, который
+admin-host отправляет как `Authorization: Bearer <token>` или
+`X-Admin-Api-Key`.
+
+| HTTP | `code` | Когда возникает |
+| ---- | ------ | --------------- |
+| `401` | `admin_token_missing` | Запрос пришёл без Bearer token и без `X-Admin-Api-Key` |
+| `401` | `admin_token_invalid` | Токен передан, но не совпадает с backend `ADMIN_SHARED_TOKEN` |
+
+Пример mismatch:
+
+```json
+{
+  "status": 401,
+  "title": "Admin Facade Unauthorized",
+  "code": "admin_token_invalid",
+  "detail": "Admin shared token was rejected by backend. ADMIN_BACKEND_SHARED_TOKEN must match ADMIN_SHARED_TOKEN on backend-host.",
+  "correlationId": "9ab711df23904364841b3269dc8f2c2a",
+  "timestamp": "2026-05-19T04:20:00Z"
+}
+```
 
 ### Важная оговорка
 

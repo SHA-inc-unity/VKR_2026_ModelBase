@@ -7,6 +7,7 @@ public sealed record ErrorResponse
 {
     public int Status { get; init; }
     public string Title { get; init; } = string.Empty;
+    public string? Code { get; init; }
     public string? Detail { get; init; }
     public string? CorrelationId { get; init; }
     public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.UtcNow;
@@ -24,6 +25,15 @@ public sealed record ErrorResponse
         Status = 401,
         Title = "Unauthorized",
         Detail = "Authentication is required.",
+        CorrelationId = correlationId
+    };
+
+    public static ErrorResponse AdminUnauthorized(string code, string detail, string? correlationId = null) => new()
+    {
+        Status = 401,
+        Title = "Admin Facade Unauthorized",
+        Code = code,
+        Detail = detail,
         CorrelationId = correlationId
     };
 

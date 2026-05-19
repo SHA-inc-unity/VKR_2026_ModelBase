@@ -35,9 +35,9 @@
 | `Aggregators/` | BFF-оркестрация составных экранов и bootstrap-ответов |
 | `Clients/` | Downstream clients, включая Kafka request/reply к account service |
 | `Controllers/` | HTTP endpoints gateway |
-| `DTOs/` | Контракты ответов и ошибок |
+| `DTOs/` | Контракты ответов и ошибок; `ErrorResponse` включает optional `code` для машинно-читаемой диагностики |
 | `Extensions/` | Регистрация сервисов и инфраструктурных зависимостей |
-| `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade |
+| `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade, различает `admin_token_missing` и `admin_token_invalid` |
 | `Kafka/` | Kafka settings, topics и request client; `AdminTopics` — topic-константы admin facade |
 | `Market/` | Полный market API — см. ниже |
 | `Middleware/` | CorrelationId, exception handling и другие cross-cutting middleware |

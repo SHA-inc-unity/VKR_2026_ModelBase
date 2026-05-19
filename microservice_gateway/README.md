@@ -93,6 +93,7 @@ The gateway **never returns 500 for downstream failures**. Instead:
 | `JWT_ISSUER` | No | `exchange-app` | JWT issuer claim |
 | `JWT_AUDIENCE` | No | `exchange-app-mobile` | JWT audience claim |
 | `KAFKA_BOOTSTRAP_SERVERS` | No | `redpanda:29092` | Kafka bootstrap (Redpanda) |
+| `ADMIN_SHARED_TOKEN` | Split deployment | — | Shared secret for `/api/admin/*`; admin-host must send the same value as `ADMIN_BACKEND_SHARED_TOKEN` via `Authorization: Bearer`. Mismatch returns `401` with `code=admin_token_invalid`. |
 
 Copy `.env.example` → `.env` and fill in the values.
 

@@ -58,7 +58,13 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     if (err instanceof BackendClientError) {
       const status = err.status >= 400 && err.status < 600 ? err.status : 500;
-      return NextResponse.json({ error: err.message }, { status });
+      return NextResponse.json({
+        error: err.message,
+        status,
+        code: err.code,
+        detail: err.detail,
+        correlationId: err.correlationId,
+      }, { status });
     }
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 500 });

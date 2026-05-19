@@ -1,3 +1,7 @@
+using System.Security.Cryptography;
+using System.Text;
+using GatewayService.API.DTOs;
+using GatewayService.API.Middleware;
 using GatewayService.API.Settings;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -25,7 +29,7 @@ public sealed class AdminApiKeyFilter : IAsyncActionFilter
 
     public AdminApiKeyFilter(IOptions<AdminSettings> opts, ILogger<AdminApiKeyFilter> log)
     {
-        _token = opts.Value.SharedToken;
+        _token = opts.Value.SharedToken.Trim();
         _log   = log;
     }
 
@@ -34,8 +38,10 @@ public sealed class AdminApiKeyFilter : IAsyncActionFilter
         if (string.IsNullOrEmpty(_token))
         {
             _log.LogWarning(
-                "AdminApiKeyFilter: Admin:SharedToken is empty — allowing unauthenticated access. " +
-                "Set a shared token in production.");
+                "AdminApiKeyFilter: code=admin_token_not_configured path={Path} correlationId={CorrelationId}. " +
+                "Admin:SharedToken is empty — allowing unauthenticated access. Set a shared token in production.",
+                context.HttpContext.Request.Path,
+                context.HttpContext.GetCorrelationId());
             await next();
             return;
         }
@@ -50,9 +56,36 @@ public sealed class AdminApiKeyFilter : IAsyncActionFilter
         if (string.IsNullOrEmpty(provided))
             provided = headers["X-Admin-Api-Key"].FirstOrDefault()?.Trim();
 
-        if (string.IsNullOrEmpty(provided) || provided != _token)
+        if (string.IsNullOrEmpty(provided))
         {
-            context.Result = new ObjectResult(new { error = "unauthorized" })
+            var correlationId = context.HttpContext.GetCorrelationId();
+            _log.LogWarning(
+                "AdminApiKeyFilter: code=admin_token_missing path={Path} remoteIp={RemoteIp} correlationId={CorrelationId}",
+                context.HttpContext.Request.Path,
+                context.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                correlationId);
+            context.Result = new ObjectResult(ErrorResponse.AdminUnauthorized(
+                "admin_token_missing",
+                "Admin shared token is missing. Send Authorization: Bearer <token> or X-Admin-Api-Key.",
+                correlationId))
+            {
+                StatusCode = StatusCodes.Status401Unauthorized,
+            };
+            return;
+        }
+
+        if (!TokenEquals(provided, _token))
+        {
+            var correlationId = context.HttpContext.GetCorrelationId();
+            _log.LogWarning(
+                "AdminApiKeyFilter: code=admin_token_invalid path={Path} remoteIp={RemoteIp} correlationId={CorrelationId}",
+                context.HttpContext.Request.Path,
+                context.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                correlationId);
+            context.Result = new ObjectResult(ErrorResponse.AdminUnauthorized(
+                "admin_token_invalid",
+                "Admin shared token was rejected by backend. ADMIN_BACKEND_SHARED_TOKEN must match ADMIN_SHARED_TOKEN on backend-host.",
+                correlationId))
             {
                 StatusCode = StatusCodes.Status401Unauthorized,
             };
@@ -60,5 +93,13 @@ public sealed class AdminApiKeyFilter : IAsyncActionFilter
         }
 
         await next();
+    }
+
+    private static bool TokenEquals(string provided, string expected)
+    {
+        var providedBytes = Encoding.UTF8.GetBytes(provided);
+        var expectedBytes = Encoding.UTF8.GetBytes(expected);
+        return providedBytes.Length == expectedBytes.Length &&
+               CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes);
     }
 }

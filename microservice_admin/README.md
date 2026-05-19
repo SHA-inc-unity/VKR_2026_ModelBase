@@ -62,6 +62,12 @@ UI живёт только на отдельном admin-host.
 
 Для launcher-сценария это больше не нужно делать вручную по одному ключу. `microservicestarter` в режиме `onlyadmin` принимает один backend host/IP аргументом или спрашивает его интерактивно, затем сохраняет `ONLINE_BACKEND_HOST`, автоматически заполняет derived `ONLINE_*` в `microservice_admin/.env`, предлагает `ADMIN_BACKEND_BASE_URL` с default `https://<host>:8443` и, если `ADMIN_BACKEND_SHARED_TOKEN` ещё пустой, просит вставить сюда токен, уже сгенерированный на backend-host.
 
+Если backend facade отвечает `401`, `admin-online` теперь показывает
+конкретную причину: отсутствует `ADMIN_BACKEND_SHARED_TOKEN` на admin-host
+или он не совпадает с backend `ADMIN_SHARED_TOKEN`. Gateway возвращает
+машинно-читаемые коды `admin_token_missing` / `admin_token_invalid`, а
+`/api/kafka` прокидывает их в браузер вместе с `correlationId`.
+
 Backend-host теперь сам поднимает `:8443` без ручной подготовки `tls.crt` / `tls.key`: `microservice_infra` автогенерирует self-signed сертификат в `ADMIN_BACKEND_CERTS_DIR`, если каталог пустой. Чтобы этот split-path работал без дополнительного trust-store bootstrap, `admin-online` по умолчанию получает `ADMIN_BACKEND_TLS_INSECURE=1` и принимает self-signed backend cert. После установки доверенного сертификата на backend-host переведи admin-host на `ADMIN_BACKEND_TLS_INSECURE=0`.
 
 Dashboard на главной странице теперь явно показывает, к какому backend host/IP подключён текущий admin, отдельным заметным connection-блоком над stat cards. Источник один и предсказуемый: compose кладёт в runtime `BACKEND_CONNECTION_TARGET`, где local stack всегда показывает `localhost`, а `admin-online` берёт значение из `ONLINE_BACKEND_HOST`. Тот же блок теперь показывает и реальный `KAFKA_BOOTSTRAP_SERVERS`, который использует admin, плюс текст ошибки broker connectivity, если Kafka path недоступен. Дополнительно `connectionTarget` дублируется в верхней строке dashboard, в sidebar header под логотипом и в footer sidebar, чтобы оператор видел target backend на любой странице admin-панели.

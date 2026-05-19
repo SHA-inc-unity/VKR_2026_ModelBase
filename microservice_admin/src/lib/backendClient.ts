@@ -11,6 +11,7 @@
  */
 
 import { Topics } from './topics';
+import { randomUUID } from 'crypto';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -107,18 +108,62 @@ export class BackendClientError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly code?: string,
+    public readonly detail?: string,
+    public readonly correlationId?: string,
   ) {
     super(message);
     this.name = 'BackendClientError';
   }
 }
 
+type GatewayErrorBody = {
+  status?: number;
+  title?: string;
+  code?: string;
+  detail?: string;
+  correlationId?: string;
+  error?: string;
+};
+
+function summarizeBackendError(
+  status: number,
+  path: string,
+  body: GatewayErrorBody | null,
+  raw: string,
+  fallbackCorrelationId?: string,
+): string {
+  const code = body?.code;
+  const detail = body?.detail || body?.error || raw;
+  const effectiveCorrelationId = body?.correlationId ?? fallbackCorrelationId;
+  const correlation = effectiveCorrelationId ? ` correlationId=${effectiveCorrelationId}` : '';
+
+  if (status === 401) {
+    if (code === 'admin_token_missing') {
+      return `Admin facade rejected ${path}: ADMIN_BACKEND_SHARED_TOKEN is missing on admin-host.${correlation}`;
+    }
+    if (code === 'admin_token_invalid') {
+      return `Admin facade rejected ${path}: ADMIN_BACKEND_SHARED_TOKEN does not match backend ADMIN_SHARED_TOKEN.${correlation}`;
+    }
+    return `Admin facade rejected ${path}: unauthorized.${detail ? ` ${detail}` : ''}${correlation}`;
+  }
+
+  if (status === 502) {
+    return `Admin facade ${path} returned 502 Bad Gateway: nginx could not reach gateway-service:5020.${correlation}`;
+  }
+
+  if (status === 504) {
+    return `Admin facade ${path} timed out waiting for downstream Kafka/service response.${correlation}`;
+  }
+
+  return `Admin facade ${path} returned HTTP ${status}${code ? ` (${code})` : ''}: ${detail || 'no response body'}${correlation}`;
+}
+
 /**
  * Calls the gateway admin facade for the given Kafka topic.
  * Returns the parsed `data` field (mirrors kafkaRequest() return shape).
  *
- * @throws BackendClientError on HTTP 4xx/5xx
- * @throws Error on network / JSON failures
+ * @throws BackendClientError on HTTP, auth, timeout and network failures
  */
 export async function backendCall(
   topic: string,
@@ -134,13 +179,23 @@ export async function backendCall(
   }
 
   const url = `${ADMIN_BACKEND_BASE_URL}/api/admin/${path}`;
+  const correlationId = randomUUID().replace(/-/g, '');
+
+  if (!ADMIN_BACKEND_SHARED_TOKEN) {
+    throw new BackendClientError(
+      401,
+      `ADMIN_BACKEND_SHARED_TOKEN is empty on admin-host; paste the backend ADMIN_SHARED_TOKEN into microservice_admin/.env and restart admin-online. correlationId=${correlationId}`,
+      'admin_backend_token_missing',
+      undefined,
+      correlationId,
+    );
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Correlation-Id': correlationId,
   };
-  if (ADMIN_BACKEND_SHARED_TOKEN) {
-    headers['Authorization'] = `Bearer ${ADMIN_BACKEND_SHARED_TOKEN}`;
-  }
+  headers['Authorization'] = `Bearer ${ADMIN_BACKEND_SHARED_TOKEN}`;
 
   const timeoutMs = options?.timeoutMs ?? 30_000;
   const localAbort = AbortSignal.timeout(timeoutMs);
@@ -148,19 +203,47 @@ export async function backendCall(
     ? AbortSignal.any([options.signal, localAbort])
     : localAbort;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload ?? {}),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload ?? {}),
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && /AbortError|TimeoutError/i.test(err.name)) {
+      throw new BackendClientError(
+        504,
+        `Admin facade ${path} did not respond within ${timeoutMs} ms. Check backend gateway/data/analytics logs for a slow or missing Kafka reply. correlationId=${correlationId}`,
+        'admin_backend_timeout',
+        undefined,
+        correlationId,
+      );
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    throw new BackendClientError(
+      503,
+      `Admin facade ${path} network error while calling ${ADMIN_BACKEND_BASE_URL}: ${message} correlationId=${correlationId}`,
+      'admin_backend_network_error',
+      undefined,
+      correlationId,
+    );
+  }
 
   if (!res.ok) {
-    let detail = '';
-    try { detail = await res.text(); } catch { /* ignore */ }
+    let raw = '';
+    let body: GatewayErrorBody | null = null;
+    try {
+      raw = await res.text();
+      body = raw ? JSON.parse(raw) as GatewayErrorBody : null;
+    } catch { /* ignore */ }
     throw new BackendClientError(
       res.status,
-      `Admin facade ${path} returned HTTP ${res.status}: ${detail}`,
+      summarizeBackendError(res.status, path, body, raw, res.headers.get('x-correlation-id') ?? correlationId),
+      body?.code,
+      body?.detail ?? body?.error ?? raw,
+      body?.correlationId ?? res.headers.get('x-correlation-id') ?? correlationId,
     );
   }
 
