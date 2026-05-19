@@ -119,7 +119,7 @@ volumes, а в каталоге репозитория:
 
 ## External endpoint override
 
-По умолчанию внешний Kafka endpoint для single-host/local сценария остаётся `localhost:9092`. Для split deployment его нужно переопределить через `REDPANDA_EXTERNAL_HOST` так, чтобы remote admin-head видел в broker metadata WG/private address backend-хоста, а не loopback.
+По умолчанию внешний Kafka endpoint для single-host/local сценария остаётся `localhost:9092`. Для split deployment его нужно переопределить через `REDPANDA_EXTERNAL_HOST` так, чтобы remote admin-head видел в broker metadata private/public address backend-хоста, а не loopback.
 
 ## Архитектурное правило
 
