@@ -106,6 +106,17 @@ curl -vk https://127.0.0.1:8443/health
 `-k` здесь ожидаем: до установки доверенного сертификата backend facade
 использует self-signed cert, который автогенерирует `nginx-cert-init`.
 
+Начиная с readiness-flow gateway backend facade также публикует:
+
+```bash
+curl -vk https://127.0.0.1:8443/health/ready
+```
+
+`/health` остаётся простым facade-liveness check и всегда отвечает `200 ok`.
+`/health/ready` проксируется в `gateway-service:5020/health/ready` и должен
+использоваться admin-head / мониторингом, которым важна готовность Kafka path,
+а не только живой nginx/TLS ingress.
+
 ## Repo-local runtime data
 
 Данные stateful-компонентов infra теперь хранятся не в Docker named

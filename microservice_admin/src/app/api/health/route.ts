@@ -67,6 +67,31 @@ async function probe(url: string, label: string): Promise<InfraServiceHealth> {
   }
 }
 
+async function probeWithFallback(
+  primaryUrl: string,
+  fallbackUrl: string,
+  label: string,
+): Promise<InfraServiceHealth> {
+  const primary = await probe(primaryUrl, label);
+  if (primary.status === 'offline' && primary.error === 'HTTP 404') {
+    console.info('[api/health] probe:fallback', {
+      label,
+      primaryUrl,
+      fallbackUrl,
+      reason: primary.error,
+    });
+    writeAdminRuntimeLog({
+      level: 'warn',
+      source: 'api/health',
+      event: 'probe:fallback',
+      message: primary.error,
+      fields: { label, primaryUrl, fallbackUrl },
+    });
+    return probe(fallbackUrl, label);
+  }
+  return primary;
+}
+
 export async function GET(): Promise<Response> {
   const startedAt = Date.now();
   const adminBackendBaseUrl = (process.env.ADMIN_BACKEND_BASE_URL ?? '').replace(/\/$/, '');
@@ -97,7 +122,11 @@ export async function GET(): Promise<Response> {
     if (adminBackendTlsInsecure && adminBackendBaseUrl.startsWith('https://')) {
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     }
-    const backendProbe = await probe(`${adminBackendBaseUrl}/health/ready`, 'backend-facade');
+    const backendProbe = await probeWithFallback(
+      `${adminBackendBaseUrl}/health/ready`,
+      `${adminBackendBaseUrl}/health`,
+      'backend-facade',
+    );
     const body: InfraHealthResponse = {
       connectionTarget: adminBackendBaseUrl,
       kafka: {
@@ -132,7 +161,11 @@ export async function GET(): Promise<Response> {
     probe(`http://${REDPANDA_ADMIN_URL}/v1/status/ready`, 'redpanda'),
     probe(`http://${MINIO_URL}/minio/health/live`, 'minio'),
     probe(`http://${ACCOUNT_URL}/health`, 'account'),
-    probe(`http://${GATEWAY_URL}/health/ready`, 'gateway'),
+    probeWithFallback(
+      `http://${GATEWAY_URL}/health/ready`,
+      `http://${GATEWAY_URL}/health`,
+      'gateway',
+    ),
   ]);
 
   const unwrap = (r: PromiseSettledResult<InfraServiceHealth>): InfraServiceHealth =>
