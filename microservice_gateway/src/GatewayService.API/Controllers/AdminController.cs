@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Text.Json;
 using GatewayService.API.Filters;
 using GatewayService.API.Kafka;
+using GatewayService.API.Middleware;
 using GatewayService.API.Settings;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -66,12 +68,17 @@ namespace GatewayService.API.Controllers;
 public sealed class AdminController : ControllerBase
 {
     private readonly KafkaRequestClient _kafka;
+    private readonly ILogger<AdminController> _log;
     private readonly TimeSpan _defaultTimeout;
     private readonly TimeSpan _longTimeout;
 
-    public AdminController(KafkaRequestClient kafka, IOptions<AdminSettings> opts)
+    public AdminController(
+        KafkaRequestClient kafka,
+        IOptions<AdminSettings> opts,
+        ILogger<AdminController> log)
     {
         _kafka          = kafka;
+        _log            = log;
         _defaultTimeout = TimeSpan.FromSeconds(opts.Value.DefaultTimeoutSeconds);
         _longTimeout    = TimeSpan.FromSeconds(opts.Value.LongTimeoutSeconds);
     }
@@ -81,14 +88,39 @@ public sealed class AdminController : ControllerBase
     private async Task<IActionResult> Forward(
         string topic, JsonElement? body, TimeSpan timeout, CancellationToken ct)
     {
+        var startedAt = Stopwatch.GetTimestamp();
+        var correlationId = HttpContext.GetCorrelationId();
+        var payloadKind = body.HasValue ? body.Value.ValueKind.ToString() : "empty";
+
+        _log.LogInformation(
+            "AdminFacade request start topic={Topic} path={Path} timeoutMs={TimeoutMs} payloadKind={PayloadKind} correlationId={CorrelationId}",
+            topic,
+            HttpContext.Request.Path,
+            (int)timeout.TotalMilliseconds,
+            payloadKind,
+            correlationId);
+
         try
         {
             var result = await _kafka.RequestAsync(
                 topic, body.HasValue ? (object)body.Value : new { }, timeout, ct);
+            _log.LogInformation(
+                "AdminFacade request success topic={Topic} path={Path} durationMs={DurationMs} correlationId={CorrelationId}",
+                topic,
+                HttpContext.Request.Path,
+                (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                correlationId);
             return Ok(result);
         }
         catch (TimeoutException tex)
         {
+            _log.LogWarning(tex,
+                "AdminFacade request timeout topic={Topic} path={Path} timeoutMs={TimeoutMs} durationMs={DurationMs} correlationId={CorrelationId}",
+                topic,
+                HttpContext.Request.Path,
+                (int)timeout.TotalMilliseconds,
+                (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                correlationId);
             return StatusCode(504, new { error = tex.Message });
         }
     }

@@ -38,7 +38,7 @@
 | `DTOs/` | Контракты ответов и ошибок; `ErrorResponse` включает optional `code` для машинно-читаемой диагностики |
 | `Extensions/` | Регистрация сервисов и инфраструктурных зависимостей |
 | `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade, различает `admin_token_missing` и `admin_token_invalid` |
-| `Kafka/` | Kafka settings, topics и request client; `AdminTopics` — topic-константы admin facade. `KafkaRequestClient` на старте явно создаёт per-instance reply-inbox `reply.gateway.{instanceId}` и только затем подписывается на него, чтобы request/reply не деградировал в ложные `504` при пустом auto-created topic. |
+| `Kafka/` | Kafka settings, topics и request client; `AdminTopics` — topic-константы admin facade. `KafkaRequestClient` на старте явно создаёт per-instance reply-inbox `reply.gateway.{instanceId}` и только затем подписывается на него, чтобы request/reply не деградировал в ложные `504` при пустом auto-created topic. Runtime diagnostics логируют `KafkaRequest start/produced/success/timeout/failed` с topic, replyInbox, duration и correlationId без payload. |
 | `Market/` | Полный market API — см. ниже |
 | `Middleware/` | CorrelationId, exception handling и другие cross-cutting middleware |
 | `Settings/` | strongly-typed конфиги; `AdminSettings` — конфиг admin facade (SharedToken, таймауты) |

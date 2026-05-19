@@ -11,6 +11,9 @@ request/reply on a per-instance `reply.gateway.{instanceId}` inbox).
 Admin API и только потом подписывается на него, чтобы admin facade не
 зависал в `504 Kafka request timed out`, когда topic ещё не материализован
 или leader не успел появиться.
+Для live-диагностики gateway пишет связку логов `AdminFacade request ...`
+и `KafkaRequest ...` с `topic`, HTTP path, `replyInbox`, duration,
+timeout и `correlationId`; payload и shared token не логируются.
 
 ---
 

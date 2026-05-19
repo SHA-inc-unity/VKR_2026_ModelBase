@@ -19,6 +19,7 @@ import { isSplitMode, backendCall, BackendClientError } from '@/lib/backendClien
  * that simultaneous fan-outs from the dashboard collapse into one roundtrip.
  */
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
   try {
     const body = await req.json();
     const { topic, payload, timeoutMs, correlationId } = body as {
@@ -29,10 +30,20 @@ export async function POST(req: NextRequest) {
     };
 
     if (!topic || typeof topic !== 'string') {
+      console.warn('[api/kafka] invalid-request', { bodyKeys: Object.keys(body ?? {}) });
       return NextResponse.json({ error: 'topic is required' }, { status: 400 });
     }
 
     const ttl = coalesceTtlFor(topic, body);
+
+    console.info('[api/kafka] request:start', {
+      topic,
+      splitMode: isSplitMode,
+      timeoutMs: timeoutMs ?? null,
+      callerCorrelationId: correlationId ?? null,
+      coalesceTtlMs: ttl,
+      payloadKeys: payload ? Object.keys(payload) : [],
+    });
 
     if (isSplitMode) {
       // ── Split-deployment: call the gateway admin facade via HTTP ──────────
@@ -43,6 +54,12 @@ export async function POST(req: NextRequest) {
         ? await coalesce(makeKey(topic, payload ?? null), ttl, factory)
         : await factory();
 
+      console.info('[api/kafka] request:success', {
+        topic,
+        splitMode: true,
+        durationMs: Date.now() - startedAt,
+        responseKeys: Object.keys(data),
+      });
       return NextResponse.json({ data });
     }
 
@@ -54,10 +71,23 @@ export async function POST(req: NextRequest) {
       ? await coalesce(makeKey(topic, payload ?? null), ttl, factory)
       : await factory();
 
+    console.info('[api/kafka] request:success', {
+      topic,
+      splitMode: false,
+      durationMs: Date.now() - startedAt,
+      responseKeys: Object.keys(data),
+    });
     return NextResponse.json({ data });
   } catch (err) {
     if (err instanceof BackendClientError) {
       const status = err.status >= 400 && err.status < 600 ? err.status : 500;
+      console.warn('[api/kafka] request:backend-error', {
+        status,
+        code: err.code,
+        detail: err.detail,
+        correlationId: err.correlationId,
+        durationMs: Date.now() - startedAt,
+      });
       return NextResponse.json({
         error: err.message,
         status,
@@ -67,6 +97,10 @@ export async function POST(req: NextRequest) {
       }, { status });
     }
     const message = err instanceof Error ? err.message : String(err);
+    console.error('[api/kafka] request:unexpected-error', {
+      message,
+      durationMs: Date.now() - startedAt,
+    });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -23,27 +23,55 @@ const GATEWAY_URL        = process.env.GATEWAY_URL        ?? 'exchange-gateway:5
 const KAFKA_BOOTSTRAP_SERVERS = process.env.KAFKA_BOOTSTRAP_SERVERS ?? 'unconfigured';
 const BACKEND_CONNECTION_TARGET = process.env.BACKEND_CONNECTION_TARGET?.trim() || 'localhost';
 
-async function probe(url: string): Promise<InfraServiceHealth> {
+async function probe(url: string, label: string): Promise<InfraServiceHealth> {
+  const startedAt = Date.now();
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    console.info('[api/health] probe:response', {
+      label,
+      url,
+      status: res.status,
+      ok: res.ok,
+      durationMs: Date.now() - startedAt,
+    });
     if (res.ok) return { status: 'online' };
     return { status: 'offline', error: `HTTP ${res.status}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unreachable';
+    const cause = err instanceof Error && 'cause' in err
+      ? (err as Error & { cause?: { code?: string; message?: string } }).cause
+      : undefined;
+    console.warn('[api/health] probe:error', {
+      label,
+      url,
+      message: msg,
+      causeCode: cause?.code,
+      causeMessage: cause?.message,
+      durationMs: Date.now() - startedAt,
+    });
     return { status: 'offline', error: msg };
   }
 }
 
 export async function GET(): Promise<Response> {
+  const startedAt = Date.now();
   const adminBackendBaseUrl = (process.env.ADMIN_BACKEND_BASE_URL ?? '').replace(/\/$/, '');
   const adminBackendTlsInsecure = /^(1|true|yes|on)$/i.test(process.env.ADMIN_BACKEND_TLS_INSECURE ?? '');
+
+  console.info('[api/health] request:start', {
+    splitMode: adminBackendBaseUrl.length > 0,
+    adminBackendBaseUrl: adminBackendBaseUrl || '(empty)',
+    adminBackendTlsInsecure,
+    nodeTlsRejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED ?? '(unset)',
+    kafkaBootstrapServers: KAFKA_BOOTSTRAP_SERVERS,
+  });
 
   // ── Split-deployment: only probe the backend HTTPS endpoint ───────────────
   if (adminBackendBaseUrl.length > 0) {
     if (adminBackendTlsInsecure && adminBackendBaseUrl.startsWith('https://')) {
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     }
-    const backendProbe = await probe(`${adminBackendBaseUrl}/health`);
+    const backendProbe = await probe(`${adminBackendBaseUrl}/health`, 'backend-facade');
     const body: InfraHealthResponse = {
       connectionTarget: adminBackendBaseUrl,
       kafka: {
@@ -56,6 +84,11 @@ export async function GET(): Promise<Response> {
       account:  backendProbe,
       gateway:  backendProbe,
     };
+    console.info('[api/health] request:split-result', {
+      status: backendProbe.status,
+      error: backendProbe.error,
+      durationMs: Date.now() - startedAt,
+    });
     return Response.json(body);
   }
 
@@ -63,10 +96,10 @@ export async function GET(): Promise<Response> {
   const kafka = await probeKafkaConnectivity();
 
   const [redpanda, minio, account, gateway] = await Promise.allSettled([
-    probe(`http://${REDPANDA_ADMIN_URL}/v1/status/ready`),
-    probe(`http://${MINIO_URL}/minio/health/live`),
-    probe(`http://${ACCOUNT_URL}/health`),
-    probe(`http://${GATEWAY_URL}/health`),
+    probe(`http://${REDPANDA_ADMIN_URL}/v1/status/ready`, 'redpanda'),
+    probe(`http://${MINIO_URL}/minio/health/live`, 'minio'),
+    probe(`http://${ACCOUNT_URL}/health`, 'account'),
+    probe(`http://${GATEWAY_URL}/health`, 'gateway'),
   ]);
 
   const unwrap = (r: PromiseSettledResult<InfraServiceHealth>): InfraServiceHealth =>
@@ -80,6 +113,15 @@ export async function GET(): Promise<Response> {
     account:  unwrap(account),
     gateway:  unwrap(gateway),
   };
+
+  console.info('[api/health] request:local-result', {
+    kafka: body.kafka.status,
+    redpanda: body.redpanda.status,
+    minio: body.minio.status,
+    account: body.account.status,
+    gateway: body.gateway.status,
+    durationMs: Date.now() - startedAt,
+  });
 
   return Response.json(body);
 }

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
@@ -95,9 +96,18 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
     public async Task<JsonElement> RequestAsync(
         string topic, object payload, TimeSpan timeout, CancellationToken ct = default)
     {
+        var startedAt = Stopwatch.GetTimestamp();
         var correlationId = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[correlationId] = tcs;
+
+        _log.LogInformation(
+            "KafkaRequest start topic={Topic} correlationId={CorrelationId} replyInbox={ReplyInbox} timeoutMs={TimeoutMs} pendingCount={PendingCount}",
+            topic,
+            correlationId,
+            _replyInbox,
+            (int)timeout.TotalMilliseconds,
+            _pending.Count);
 
         try
         {
@@ -111,14 +121,46 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
 
             await _producer.ProduceAsync(topic,
                 new Message<string, string> { Key = correlationId, Value = json }, ct);
+            _log.LogInformation(
+                "KafkaRequest produced topic={Topic} correlationId={CorrelationId} replyInbox={ReplyInbox} durationMs={DurationMs}",
+                topic,
+                correlationId,
+                _replyInbox,
+                (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(timeout);
 
             await using var _ = timeoutCts.Token.Register(() =>
-                tcs.TrySetException(new TimeoutException($"Kafka request timed out on {topic}")));
+            {
+                _log.LogWarning(
+                    "KafkaRequest timeout topic={Topic} correlationId={CorrelationId} replyInbox={ReplyInbox} timeoutMs={TimeoutMs} pendingCount={PendingCount}",
+                    topic,
+                    correlationId,
+                    _replyInbox,
+                    (int)timeout.TotalMilliseconds,
+                    _pending.Count);
+                tcs.TrySetException(new TimeoutException($"Kafka request timed out on {topic}"));
+            });
 
-            return await tcs.Task.ConfigureAwait(false);
+            var reply = await tcs.Task.ConfigureAwait(false);
+            _log.LogInformation(
+                "KafkaRequest success topic={Topic} correlationId={CorrelationId} replyInbox={ReplyInbox} durationMs={DurationMs}",
+                topic,
+                correlationId,
+                _replyInbox,
+                (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+            return reply;
+        }
+        catch (Exception ex) when (ex is not TimeoutException)
+        {
+            _log.LogError(ex,
+                "KafkaRequest failed topic={Topic} correlationId={CorrelationId} replyInbox={ReplyInbox} durationMs={DurationMs}",
+                topic,
+                correlationId,
+                _replyInbox,
+                (int)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+            throw;
         }
         finally
         {
@@ -167,6 +209,13 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
                         : default;
                     tcs.TrySetResult(payload);
                 }
+                else
+                {
+                    _log.LogDebug(
+                        "KafkaRequest unmatched reply correlationId={CorrelationId} replyInbox={ReplyInbox}",
+                        cid,
+                        _replyInbox);
+                }
             }
             catch (Exception ex)
             {
@@ -186,6 +235,11 @@ public sealed class KafkaRequestClient : IHostedService, IDisposable
     private async Task EnsureReplyInboxTopicAsync(CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + ReplyInboxStartupBudget;
+
+        _log.LogInformation(
+            "KafkaRequestClient ensuring reply inbox topic {Inbox} startupBudgetMs={StartupBudgetMs}",
+            _replyInbox,
+            (int)ReplyInboxStartupBudget.TotalMilliseconds);
 
         while (true)
         {
