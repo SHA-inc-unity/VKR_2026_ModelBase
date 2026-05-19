@@ -140,6 +140,8 @@ compose_project_owns_container() {
     while IFS= read -r compose_container_id; do
         [[ -z "$compose_container_id" ]] && continue
         [[ "$compose_container_id" == "$container_id" ]] && return 0
+        [[ "$compose_container_id" == "$container_id"* ]] && return 0
+        [[ "$container_id" == "$compose_container_id"* ]] && return 0
     done < <(docker compose ps -q 2>/dev/null || true)
 
     return 1
@@ -148,7 +150,7 @@ compose_project_owns_container() {
 get_docker_container_using_host_port() {
     local port="$1"
 
-    docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' | awk -F '\t' -v port="$port" '
+    docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' | awk -F '\t' -v port="$port" '
         {
             count = split($3, port_entries, /, /)
             for (i = 1; i <= count; ++i) {

@@ -67,6 +67,7 @@
 - в multi-service fan-out dangling Docker image cleanup больше не должен конфликтовать между child-процессами: launcher ставит межпроцессный lock и пропускает параллельный `docker image prune`, если cleanup уже выполняется другим launcher-процессом
 - `stop.sh` / `stop.ps1` управляют только compose-стеками ModelLine из `services.conf` и не трогают сторонние контейнеры или чужие compose-проекты на том же хосте
 - bash-версии `start.sh` / `restart.sh` перед `docker compose up` теперь делают preflight host-port check для publish-единиц launcher-а (`8443`, `8501`, `7510`, `7520`, infra ports и `ADMIN_PORT` в `onlyadmin`) и падают сразу с явным сообщением, если порт занят внешним контейнером/процессом
+- preflight host-port check не должен блокировать обычный `restart`: уже запущенные контейнеры того же compose-проекта считаются своими и допускаются, пока конфликт реально не идёт от внешнего контейнера/процесса
 
 ## Repo-local runtime data
 
@@ -190,6 +191,7 @@ launcher покажет текущее значение `ONLINE_BACKEND_HOST` к
 - `microservice_infra` ожидает свободный `ADMIN_BACKEND_PORT` (по умолчанию `8443`)
 - `stop.sh` не удаляет чужие контейнеры вроде внешних `nginx`/`mc-proxy`; их нужно останавливать отдельно или переносить на другой порт
 - если внешний сервис должен остаться, переопредели конфликтующий порт в `.env` соответствующего сервиса и затем повтори `start` / `restart`
+- уже работающие контейнеры самого ModelLine-стека не требуют ручного `stop`: `restart` должен видеть их как собственный compose-проект и переиспользовать lifecycle через `docker compose up -d --build`
 
 ## Внешний вход 8501 — без интерактивных prompt'ов
 
