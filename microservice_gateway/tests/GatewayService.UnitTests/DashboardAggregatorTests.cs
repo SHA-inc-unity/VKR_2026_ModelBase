@@ -69,4 +69,23 @@ public sealed class DashboardAggregatorTests
         result.Meta.DegradedSections.Should().NotContain("portfolio");
         result.Meta.DegradedSections.Should().Contain("market");
     }
+
+    [Fact]
+    public async Task Guest_dashboard_skips_portfolio_without_marking_it_degraded()
+    {
+        _marketMock.Setup(c => c.GetOverviewAsync(default))
+            .ReturnsAsync(ServiceResult<MarketOverviewDto>.Fail("not available"));
+        _marketMock.Setup(c => c.GetTrendingAsync(It.IsAny<int>(), default))
+            .ReturnsAsync(ServiceResult<IReadOnlyList<TrendingAssetDto>>.Fail("not available"));
+        _newsMock.Setup(c => c.GetLatestAsync(It.IsAny<int>(), default))
+            .ReturnsAsync(ServiceResult<IReadOnlyList<NewsItemDto>>.Fail("not available"));
+
+        var sut = CreateSut();
+
+        var result = await sut.AggregateAsync(null);
+
+        result.Portfolio.Should().BeNull();
+        result.Meta.DegradedSections.Should().NotContain("portfolio");
+        _portfolioMock.Verify(c => c.GetSummaryAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

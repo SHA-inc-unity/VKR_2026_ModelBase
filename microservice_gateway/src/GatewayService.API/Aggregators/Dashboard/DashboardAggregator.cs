@@ -1,3 +1,4 @@
+using GatewayService.API.Common;
 using GatewayService.API.Clients.Market;
 using GatewayService.API.Clients.News;
 using GatewayService.API.Clients.Portfolio;
@@ -24,22 +25,32 @@ public sealed class DashboardAggregator : IDashboardAggregator
         _logger = logger;
     }
 
-    public async Task<DashboardResponse> AggregateAsync(string userId, CancellationToken ct = default)
+    public async Task<DashboardResponse> AggregateAsync(string? userId, CancellationToken ct = default)
     {
         // Fire all downstream calls in parallel — no single service failure kills the whole response.
-        var portfolioTask = _portfolio.GetSummaryAsync(userId, ct);
+        // Guests do not have a personal portfolio section, so we do not call that downstream at all.
+        Task<ServiceResult<PortfolioSummaryDto>>? portfolioTask = null;
+        if (!string.IsNullOrWhiteSpace(userId))
+            portfolioTask = _portfolio.GetSummaryAsync(userId, ct);
+
         var marketTask = _market.GetOverviewAsync(ct);
         var trendingTask = _market.GetTrendingAsync(limit: 5, ct);
         var newsTask = _news.GetLatestAsync(limit: 5, ct);
 
-        await Task.WhenAll(portfolioTask, marketTask, trendingTask, newsTask);
+        var tasks = new List<Task> { marketTask, trendingTask, newsTask };
+        if (portfolioTask is not null) tasks.Add(portfolioTask);
+
+        await Task.WhenAll(tasks);
 
         var degraded = new List<string>();
 
         PortfolioSummaryDto? portfolio = null;
-        var portfolioResult = await portfolioTask;
-        if (portfolioResult.IsSuccess) portfolio = portfolioResult.Value;
-        else { degraded.Add("portfolio"); Log("portfolio", portfolioResult.Error); }
+        if (portfolioTask is not null)
+        {
+            var portfolioResult = await portfolioTask;
+            if (portfolioResult.IsSuccess) portfolio = portfolioResult.Value;
+            else { degraded.Add("portfolio"); Log("portfolio", portfolioResult.Error); }
+        }
 
         MarketOverviewDto? marketOverview = null;
         var marketResult = await marketTask;

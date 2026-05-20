@@ -7,10 +7,11 @@ namespace GatewayService.API.Controllers;
 
 /// <summary>
 /// Returns the aggregated main-screen dashboard.
+/// Guests get public market/news sections only; authenticated users also get personal sections.
 /// </summary>
 [ApiController]
 [Route("api/dashboard")]
-[Authorize]
+[AllowAnonymous]
 public sealed class DashboardController : ControllerBase
 {
     private readonly IDashboardAggregator _aggregator;
@@ -25,7 +26,9 @@ public sealed class DashboardController : ControllerBase
                   ?? User.FindFirstValue("sub")
                   ?? string.Empty;
 
-        var response = await _aggregator.AggregateAsync(userId, ct);
+        var response = await _aggregator.AggregateAsync(
+            string.IsNullOrWhiteSpace(userId) ? null : userId,
+            ct);
         return Ok(response);
     }
 }

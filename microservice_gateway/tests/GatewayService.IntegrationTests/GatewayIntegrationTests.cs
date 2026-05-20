@@ -65,10 +65,17 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayTestWebAppFac
     }
 
     [Fact]
-    public async Task Dashboard_without_auth_returns_401()
+    public async Task Dashboard_without_auth_returns_200_for_guest_without_portfolio_section()
     {
         var response = await _client.GetAsync("/api/dashboard");
-        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var json = await response.Content.ReadAsStringAsync();
+        var doc = JsonDocument.Parse(json);
+        doc.RootElement.GetProperty("portfolio").ValueKind.Should().Be(JsonValueKind.Null);
+
+        var degraded = doc.RootElement.GetProperty("meta").GetProperty("degradedSections");
+        degraded.EnumerateArray().Select(x => x.GetString()).Should().NotContain("portfolio");
     }
 
     [Fact]

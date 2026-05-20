@@ -32,9 +32,9 @@
 | Папка / файл | Назначение |
 | ------------ | ---------- |
 | `Program.cs` | bootstrap приложения, DI, middleware pipeline, browser-facing CORS policy (`UseCors`) и health routing (`/health` liveness, `/health/ready` readiness) |
-| `Aggregators/` | BFF-оркестрация составных экранов и bootstrap-ответов |
+| `Aggregators/` | BFF-оркестрация составных экранов и bootstrap-ответов; `DashboardAggregator` guest-aware и не пытается собирать `portfolio`, если запрос пришёл без user identity |
 | `Clients/` | Downstream clients, включая Kafka request/reply к account service |
-| `Controllers/` | HTTP endpoints gateway; `AdminController` помечен `DisableCors`, потому что `/api/admin/*` рассчитан на server-to-server admin facade, а не на browser JS |
+| `Controllers/` | HTTP endpoints gateway; `DashboardController` работает в optional-auth режиме (guest получает public dashboard, user — personal sections), а `AdminController` помечен `DisableCors`, потому что `/api/admin/*` рассчитан на server-to-server admin facade, а не на browser JS |
 | `DTOs/` | Контракты ответов и ошибок; `ErrorResponse` включает optional `code` для машинно-читаемой диагностики |
 | `Extensions/` | Регистрация сервисов и инфраструктурных зависимостей; `ServiceCollectionExtensions` теперь поднимает browser CORS policy из `CorsSettings` (`AllowAnyOrigin` или explicit `AllowedOrigins`) и включает preflight cache TTL |
 | `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade, различает `admin_token_missing` и `admin_token_invalid` |
@@ -78,8 +78,8 @@
 
 | Папка | Назначение |
 | ----- | ---------- |
-| `GatewayService.UnitTests/` | юнит-тесты агрегаторов, клиентов и middleware |
-| `GatewayService.IntegrationTests/` | интеграционные тесты in-process; `GatewayIntegrationTests` теперь фиксирует browser CORS на `GET /api/news` и preflight `OPTIONS /api/dashboard` |
+| `GatewayService.UnitTests/` | юнит-тесты агрегаторов, клиентов и middleware; `DashboardAggregatorTests` дополнительно фиксирует guest-path без `portfolio` downstream call |
+| `GatewayService.IntegrationTests/` | интеграционные тесты in-process; `GatewayIntegrationTests` теперь фиксирует и anonymous `GET /api/dashboard` (guest payload без degraded `portfolio`), и browser CORS на `GET /api/news` / preflight `OPTIONS /api/dashboard` |
 | `GatewayService.ContractTests/` | контрактные тесты HTTP API |
 | `GatewayService.SmokeTests/` | smoke-проверки ключевых сценариев gateway |
 

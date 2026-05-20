@@ -56,7 +56,7 @@ Flutter App
 API Gateway  :7520 (host) -> :5020 (container)
     ├── GET /api/app/bootstrap    ← aggregates: Account (optional)
     ├── GET /api/account/me       ← proxies:    Account Service (via Kafka)
-    ├── GET /api/dashboard        ← aggregates: Portfolio + Market + News (parallel)
+  ├── GET /api/dashboard        ← aggregates: Guest → Market + News; User → Portfolio + Market + News
     ├── GET /api/v1/market/config ← Market config (symbols, timeframes, candle grids)
     ├── GET /api/v1/market/chart  ← OHLCV candles (Redis cached, Kafka ingest)
     ├── GET /api/news             ← proxies:    News Service (stub)
@@ -77,7 +77,7 @@ API Gateway  :7520 (host) -> :5020 (container)
 | ------ | ---- | ---- | ----------- |
 | GET | `/api/app/bootstrap` | Optional | One-shot app init — user, feature flags, system status |
 | GET | `/api/account/me` | Required | Current user profile |
-| GET | `/api/dashboard` | Required | Aggregated main screen data |
+| GET | `/api/dashboard` | Optional | Aggregated main screen data; guest gets only public sections, user also gets personal sections |
 | GET | `/api/v1/market/config` | None | Symbols, timeframes, candle-count grids, defaults |
 | GET | `/api/v1/market/chart` | None | OHLCV candles — `?symbol=BTCUSDT&timeframe=5m&limit=200` |
 | GET | `/api/news` | None | Latest news items |
@@ -91,7 +91,7 @@ All responses include `X-Correlation-Id` header.
 Browser/web note:
 
 - gateway теперь сам отвечает CORS headers для public/protected client routes;
-- `/api/dashboard` и другие JWT-protected routes корректно проходят browser preflight `OPTIONS` до auth-check;
+- JWT-protected routes вроде `/api/account/me` и `/api/notifications` корректно проходят browser preflight `OPTIONS` до auth-check;
 - `/api/admin/*` не предназначен для browser CORS и остаётся server-to-server surface.
 
 Health flow:
@@ -113,6 +113,13 @@ Health flow:
 5. Gateway extracts the `sub` / `nameid` claim from the already-validated JWT
    and sends `{ user_id }` over Kafka (`cmd.account.get_user`) instead of
    forwarding the raw bearer downstream.
+
+Для mobile API у gateway сейчас два фактических access-mode:
+
+- `guest` = анонимный вызов без JWT. Это не отдельная persisted role в `microservice_account`, а именно отсутствие токена на gateway.
+- `user` = валидный Bearer JWT с пользовательскими claims.
+
+С практической точки зрения guest разрешён на `bootstrap`, `dashboard`, `market/*` и `news`, а personal routes (`account/me`, `notifications`) остаются под JWT.
 
 ---
 
@@ -266,7 +273,7 @@ tests/
 - [ ] `GET /api/app/bootstrap` (no token) → 200, `user` is null, `degradedServices` is empty or has stub services
 - [ ] `GET /api/app/bootstrap` (valid JWT) → 200, `user.email` populated
 - [ ] `GET /api/account/me` (no token) → 401 JSON with `status`, `title`, `timestamp`
-- [ ] `GET /api/dashboard` (no token) → 401
+- [ ] `GET /api/dashboard` (no token) → 200 guest payload, `portfolio = null`, `meta.degradedSections` не содержит `portfolio`
 - [ ] `GET /api/news` → 200, `degraded: true` (stub), `items: []`
 - [ ] All responses contain `X-Correlation-Id` header
 - [ ] Swagger UI accessible at `/swagger` in Development

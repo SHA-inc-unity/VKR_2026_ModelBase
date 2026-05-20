@@ -107,6 +107,13 @@ Gateway сериализует JSON в `camelCase`.
 | Protected | нужен `Authorization: Bearer <JWT>` |
 | Optional-auth | endpoint работает без токена, но с токеном может дополнить ответ |
 
+Для mobile API фактическая модель доступа сейчас такая:
+
+- `guest` = анонимный вызов без JWT. В `microservice_account` такой роли нет; gateway трактует guest как отсутствие токена.
+- `user` = валидный Bearer JWT с пользовательскими claims.
+
+Из этого следует практическое правило: public/optional routes отдают общие рыночные данные гостю, а personal routes остаются только для `user`.
+
 ### Admin facade conventions
 
 | Правило | Значение |
@@ -210,7 +217,7 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 | GET | `/health/ready` | None | readiness probe (Kafka bootstrap included) |
 | GET | `/api/app/bootstrap` | Optional | старт приложения |
 | GET | `/api/account/me` | Required | профиль текущего пользователя |
-| GET | `/api/dashboard` | Required | главный экран с агрегированными данными |
+| GET | `/api/dashboard` | Optional | главный экран с агрегированными данными; guest получает только public sections |
 | GET | `/api/v1/market/config` | None | конфиг market UI |
 | GET | `/api/v1/market/chart` | None | свечной график |
 | GET | `/api/news` | None | лента новостей |
@@ -561,19 +568,25 @@ Authorization: Bearer <access-token>
 
 Gateway параллельно запрашивает:
 
-- `portfolio` summary;
+- `portfolio` summary для аутентифицированного user;
 - `marketOverview`;
 - `trendingAssets`;
 - `latestNews`.
 
 Отказ одной секции не валит весь ответ. Endpoint возвращает `200`, а деградация кодируется в `meta.degradedSections`.
 
+Guest-mode важен отдельно:
+
+- если токена нет, gateway не пытается собирать `portfolio` вообще;
+- `portfolio` в ответе остаётся `null`, но секция не помечается degraded, потому что это ожидаемое guest-поведение, а не downstream failure.
+
 ### Dashboard: request
 
 ```http
 GET /api/dashboard
-Authorization: Bearer <access-token>
 ```
+
+`Authorization: Bearer <access-token>` опционален. С токеном endpoint работает как `user`-dashboard, без токена — как `guest`-dashboard.
 
 ### Dashboard: response example
 
@@ -584,7 +597,7 @@ Authorization: Bearer <access-token>
   "trendingAssets": [],
   "latestNews": [],
   "meta": {
-    "degradedSections": ["portfolio", "market", "news"],
+    "degradedSections": ["market", "news"],
     "generatedAt": "2026-05-15T18:22:00Z"
   }
 }
@@ -594,7 +607,7 @@ Authorization: Bearer <access-token>
 
 | Поле | Тип | Смысл |
 | ---- | --- | ----- |
-| `portfolio` | object/null | может быть `null`, если downstream деградировал |
+| `portfolio` | object/null | для guest всегда `null`; для user может быть `null`, если personal downstream деградировал |
 | `marketOverview` | object/null | агрегированный обзор рынка |
 | `trendingAssets` | array | список трендовых активов |
 | `latestNews` | array | краткие карточки новостей |
@@ -603,11 +616,11 @@ Authorization: Bearer <access-token>
 
 ### Dashboard: current implementation note
 
-На текущем этапе `portfolio`, `market` и `news` clients реализованы как stubs. Это значит, что frontend должен быть готов часто видеть degraded response даже при HTTP `200`.
+На текущем этапе `portfolio`, `market` и `news` clients реализованы как stubs. Это значит, что frontend должен быть готов часто видеть degraded response даже при HTTP `200`. Для guest это не должно ломать экран: даже без токена `dashboard` должен возвращать доступные public sections, а не `401`.
 
 ### Dashboard: errors
 
-- `401` при отсутствии/невалидности токена;
+- отсутствие токена не считается ошибкой: это guest-mode;
 - `500` только при внутренней необработанной ошибке gateway.
 
 ---
