@@ -24,4 +24,5 @@ public interface IKafkaRequestClientProbe
 {
     bool IsReplyInboxReady { get; }
     string ReplyInbox { get; }
+    string ReplyInboxStatus { get; }
 }

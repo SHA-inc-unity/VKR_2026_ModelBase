@@ -19,6 +19,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
     private static readonly TimeSpan ReplyInboxStartupBudget = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ReplyInboxRetryDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ReplyInboxBootstrapProduceTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ReplyInboxRequestWaitBudget = TimeSpan.FromSeconds(5);
 
     private readonly IAdminClient _admin;
     private readonly IProducer<string, string> _producer;
@@ -33,9 +34,11 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
     private int _isReplyInboxReady;
+    private string _replyInboxStatus = "gateway starting";
 
     public bool IsReplyInboxReady => Volatile.Read(ref _isReplyInboxReady) == 1;
     public string ReplyInbox => _replyInbox;
+    public string ReplyInboxStatus => Volatile.Read(ref _replyInboxStatus);
 
     public KafkaRequestClient(IOptions<KafkaSettings> opts, ILogger<KafkaRequestClient> log)
     {
@@ -108,6 +111,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
     {
         _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _loopTask = Task.Run(() => BootstrapAndConsumeAsync(_loopCts.Token), CancellationToken.None);
+        SetReplyInboxStatus("background bootstrap/consume loop starting");
         _log.LogInformation(
             "KafkaRequestClient starting background bootstrap/consume loop, reply inbox: {Inbox}",
             _replyInbox);
@@ -133,7 +137,20 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
         string topic, object payload, TimeSpan timeout, CancellationToken ct = default)
     {
         var startedAt = Stopwatch.GetTimestamp();
-        await WaitForReplyInboxReadyAsync(startedAt, timeout, ct);
+        try
+        {
+            await WaitForReplyInboxReadyAsync(startedAt, timeout, ct);
+        }
+        catch (TimeoutException tex)
+        {
+            _log.LogWarning(tex,
+                "KafkaRequest reply inbox not ready topic={Topic} replyInbox={ReplyInbox} timeoutMs={TimeoutMs} lastState={LastState}",
+                topic,
+                _replyInbox,
+                (int)timeout.TotalMilliseconds,
+                ReplyInboxStatus);
+            throw;
+        }
 
         var remainingTimeout = timeout - Stopwatch.GetElapsedTime(startedAt);
         if (remainingTimeout <= TimeSpan.Zero)
@@ -220,6 +237,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
             {
                 if (!await PrepareReplyInboxAsync(ct))
                 {
+                    SetReplyInboxStatus("reply inbox topic bootstrap failed; retrying");
                     _log.LogWarning(
                         "KafkaRequestClient could not prepare reply inbox {Inbox}; retrying in {DelayMs} ms",
                         _replyInbox,
@@ -229,6 +247,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
                 }
 
                 _consumer.Subscribe(_replyInbox);
+                SetReplyInboxStatus("subscribed to reply inbox; waiting for partition assignment");
                 _log.LogInformation(
                     "KafkaRequestClient subscribed to reply inbox {Inbox}; waiting for assignment",
                     _replyInbox);
@@ -242,6 +261,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
             }
             catch (Exception ex)
             {
+                SetReplyInboxStatus($"bootstrap loop failed: {SummarizeException(ex)}");
                 _log.LogError(ex,
                     "KafkaRequestClient bootstrap failed for reply inbox {Inbox}; retrying in {DelayMs} ms",
                     _replyInbox,
@@ -261,11 +281,15 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
             var remainingTimeout = timeout - Stopwatch.GetElapsedTime(startedAt);
             if (remainingTimeout <= TimeSpan.Zero)
             {
-                throw new TimeoutException("Kafka reply inbox is not ready");
+                throw new TimeoutException($"Kafka reply inbox '{_replyInbox}' is not ready. Last state: {ReplyInboxStatus}");
             }
 
+            var readinessWaitBudget = remainingTimeout <= ReplyInboxRequestWaitBudget
+                ? remainingTimeout
+                : ReplyInboxRequestWaitBudget;
+
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(remainingTimeout);
+            timeoutCts.CancelAfter(readinessWaitBudget);
 
             try
             {
@@ -273,7 +297,8 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                throw new TimeoutException("Kafka reply inbox is not ready");
+                throw new TimeoutException(
+                    $"Kafka reply inbox '{_replyInbox}' is not ready after waiting {(int)readinessWaitBudget.TotalMilliseconds} ms. Last state: {ReplyInboxStatus}");
             }
         }
     }
@@ -290,12 +315,14 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
             catch (OperationCanceledException) { break; }
             catch (ConsumeException cex)
             {
+                SetReplyInboxStatus($"consume error {cex.Error.Code}: {cex.Error.Reason}");
                 _log.LogDebug("Consume error: {Code} {Reason}", cex.Error.Code, cex.Error.Reason);
                 await Task.Delay(500, ct);
                 continue;
             }
             catch (Exception ex)
             {
+                SetReplyInboxStatus($"consume loop exception: {SummarizeException(ex)}");
                 _log.LogError(ex, "Consume error");
                 await Task.Delay(500, ct);
                 continue;
@@ -355,6 +382,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
     private async Task<bool> EnsureReplyInboxTopicAsync(CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + ReplyInboxStartupBudget;
+        SetReplyInboxStatus("ensuring reply inbox topic exists");
 
         _log.LogInformation(
             "KafkaRequestClient ensuring reply inbox topic {Inbox} startupBudgetMs={StartupBudgetMs}",
@@ -381,17 +409,20 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
                     });
 
                 _log.LogInformation("KafkaRequestClient created reply inbox topic {Inbox}", _replyInbox);
+                SetReplyInboxStatus("reply inbox topic created; waiting for subscription");
                 await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
                 return true;
             }
             catch (CreateTopicsException ex) when (ex.Results.All(r => r.Error.Code == ErrorCode.TopicAlreadyExists))
             {
                 _log.LogDebug("KafkaRequestClient reply inbox topic already exists: {Inbox}", _replyInbox);
+                SetReplyInboxStatus("reply inbox topic already exists; waiting for subscription");
                 await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
                 return true;
             }
             catch (Exception ex)
             {
+                SetReplyInboxStatus($"reply inbox topic create failed: {SummarizeException(ex)}");
                 _log.LogWarning(ex,
                     "KafkaRequestClient failed to create reply inbox {Inbox}; retrying",
                     _replyInbox);
@@ -402,6 +433,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
         _log.LogWarning(
             "KafkaRequestClient could not confirm reply inbox topic {Inbox} within startup budget; continuing with best-effort subscribe",
             _replyInbox);
+        SetReplyInboxStatus("reply inbox topic create exceeded startup budget; trying bootstrap produce");
         return false;
     }
 
@@ -416,6 +448,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
 
         using var produceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         produceCts.CancelAfter(ReplyInboxBootstrapProduceTimeout);
+        SetReplyInboxStatus("bootstrap-producing to reply inbox topic");
 
         try
         {
@@ -432,10 +465,12 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
                 "KafkaRequestClient bootstrap-produced reply inbox topic {Inbox} timeoutMs={TimeoutMs}",
                 _replyInbox,
                 (int)ReplyInboxBootstrapProduceTimeout.TotalMilliseconds);
+            SetReplyInboxStatus("reply inbox bootstrap-produced; waiting for subscription");
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
+            SetReplyInboxStatus($"bootstrap produce failed: {SummarizeException(ex)}");
             _log.LogWarning(ex,
                 "KafkaRequestClient could not bootstrap reply inbox topic {Inbox} via producer",
                 _replyInbox);
@@ -458,6 +493,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
     {
         TaskCompletionSource<bool> readySignal;
         var becameReady = Interlocked.Exchange(ref _isReplyInboxReady, 1) == 0;
+        var partitionsText = string.Join(", ", partitions);
 
         lock (_replyInboxStateLock)
         {
@@ -465,13 +501,14 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
         }
 
         readySignal.TrySetResult(true);
+        SetReplyInboxStatus($"assigned to partitions: {partitionsText}");
 
         if (becameReady)
         {
             _log.LogInformation(
                 "KafkaRequestClient reply inbox assigned inbox={Inbox} partitions={Partitions}",
                 _replyInbox,
-                string.Join(", ", partitions));
+                partitionsText);
         }
     }
 
@@ -493,6 +530,7 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
 
         if (wasReady)
         {
+            SetReplyInboxStatus($"reply inbox lost readiness: {reason}");
             _log.LogWarning(
                 "KafkaRequestClient reply inbox reset inbox={Inbox} reason={Reason}",
                 _replyInbox,
@@ -500,10 +538,19 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
         }
         else if (previousSignal is not null && previousSignal.Task.IsCompleted)
         {
+            SetReplyInboxStatus($"reply inbox waiting again: {reason}");
             _log.LogDebug(
                 "KafkaRequestClient reply inbox signal refreshed inbox={Inbox} reason={Reason}",
                 _replyInbox,
                 reason);
         }
     }
+
+    private void SetReplyInboxStatus(string status)
+    {
+        Interlocked.Exchange(ref _replyInboxStatus, status);
+    }
+
+    private static string SummarizeException(Exception ex) =>
+        ex.Message.Replace(Environment.NewLine, " ").Trim();
 }

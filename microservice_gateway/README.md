@@ -23,16 +23,24 @@ Readiness для Kafka вынесена в отдельный `GET /health/ready
 `reply.gateway.{instanceId}`. Docker healthcheck gateway и admin split/local
 health probe теперь смотрят именно в `/health/ready`, поэтому состояние
 "HTTP процесс жив, но bootstrap или reply inbox path мёртв" больше не
-маскируется как healthy.
+маскируется как healthy. Сам `/health/ready` теперь возвращает JSON с
+per-check status/description, поэтому обычный `curl` по backend-host сразу
+показывает, это broker bootstrap или reply inbox readiness.
 Для live-диагностики gateway пишет связку логов `AdminFacade request ...`
 и `KafkaRequest ...` с `topic`, HTTP path, `replyInbox`, duration,
-timeout и `correlationId`; payload и shared token не логируются.
+timeout и `correlationId`; payload и shared token не логируются. Для
+reply-inbox path дополнительно сохраняется последний readiness state
+(`ReplyInboxStatus`), который попадает и в `/health/ready`, и в detail
+structured `504`, если request fast-fail'ится до отправки в Kafka.
 
 Для `/api/admin/*` transport-failures на Kafka publish-path больше не падают
 в raw `500` через global exception middleware. Если gateway не может отправить
 Kafka request из-за broker/connectivity проблемы, admin facade возвращает
 structured `503` с `code=admin_kafka_unavailable`; timeout ожидания reply
-возвращается как structured `504` с `code=admin_kafka_timeout`.
+возвращается как structured `504` с `code=admin_kafka_timeout`. Если reply
+inbox ещё не ready, gateway не ждёт весь route timeout: readiness wait теперь
+обрезается коротким budget, чтобы split admin получал быстрый backend `504`
+с последним state, а не generic client-side HTTP timeout.
 
 Browser-facing routes теперь получают CORS policy прямо на gateway: public и
 protected mobile/web endpoint-ы (`/api/*`, кроме `/api/admin/*`) отвечают
@@ -88,7 +96,7 @@ API Gateway  :7520 (host) -> :5020 (container)
 | GET | `/api/news` | None | Latest news items |
 | GET | `/api/notifications` | Required | User notifications |
 | GET | `/health` | None | Health check |
-| GET | `/health/ready` | None | Readiness check incl. Kafka bootstrap and reply inbox assignment |
+| GET | `/health/ready` | None | Readiness check incl. Kafka bootstrap and reply inbox assignment; returns JSON diagnostics with per-check descriptions |
 | GET | `/swagger` | None (dev only) | Swagger UI |
 
 All responses include `X-Correlation-Id` header.

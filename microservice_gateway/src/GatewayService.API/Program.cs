@@ -1,6 +1,7 @@
 using GatewayService.API.Extensions;
 using GatewayService.API.Kafka;
 using GatewayService.API.Settings;
+using System.Text.Json;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using GatewayService.API.Middleware;
@@ -61,6 +62,26 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+
+        var payload = new
+        {
+            status = report.Status.ToString(),
+            totalDurationMs = (int)report.TotalDuration.TotalMilliseconds,
+            checks = report.Entries.ToDictionary(
+                entry => entry.Key,
+                entry => new
+                {
+                    status = entry.Value.Status.ToString(),
+                    description = entry.Value.Description,
+                    durationMs = (int)entry.Value.Duration.TotalMilliseconds,
+                }),
+        };
+
+        await context.Response.WriteAsync(JsonSerializer.Serialize(payload));
+    },
 });
 
 app.Run();

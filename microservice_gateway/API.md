@@ -183,12 +183,12 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 | `401` | `admin_token_missing` | Запрос пришёл без Bearer token и без `X-Admin-Api-Key` |
 | `401` | `admin_token_invalid` | Токен передан, но не совпадает с backend `ADMIN_SHARED_TOKEN` |
 | `503` | `admin_kafka_unavailable` | Gateway не смог отправить Kafka request: broker/connectivity/bootstrap path недоступен |
-| `504` | `admin_kafka_timeout` | Kafka request был отправлен, но reply не пришёл в timeout окна этого route |
+| `504` | `admin_kafka_timeout` | Gateway не смог завершить Kafka request/reply в timeout окна route: либо reply inbox ещё не ready, либо downstream reply не пришёл вовремя |
 
 Смысл `503` и `504` у admin facade разный:
 
 - `503 admin_kafka_unavailable` означает transport failure до успешного publish в Kafka;
-- `504 admin_kafka_timeout` означает, что publish path прошёл, но владелец команды не вернул ответ вовремя.
+- `504 admin_kafka_timeout` означает, что gateway не получил рабочий request/reply path в пределах timeout окна: это может быть либо pre-publish состояние `reply inbox not ready`, либо уже отправленный request без downstream reply.
 
 Для split admin path gateway теперь считает reply path ready только после
 реального assignment reply-inbox consumer-а. Это убирает ложный startup-state,
@@ -293,14 +293,54 @@ GET /health/ready
 
 `200 OK`
 
-```text
-Healthy
+```json
+{
+  "status": "Healthy",
+  "totalDurationMs": 12,
+  "checks": {
+    "self": {
+      "status": "Healthy",
+      "description": "Healthy",
+      "durationMs": 0
+    },
+    "kafka": {
+      "status": "Healthy",
+      "description": "Kafka bootstrap listener is reachable.",
+      "durationMs": 4
+    },
+    "kafka-request-reply": {
+      "status": "Healthy",
+      "description": "Kafka reply inbox 'reply.gateway.ab12cd34' is assigned and ready. Last state: assigned to partitions: reply.gateway.ab12cd34 [0]",
+      "durationMs": 1
+    }
+  }
+}
+```
+
+### /health/ready: failure response
+
+`503 Service Unavailable`
+
+```json
+{
+  "status": "Unhealthy",
+  "totalDurationMs": 15,
+  "checks": {
+    "kafka-request-reply": {
+      "status": "Unhealthy",
+      "description": "Kafka reply inbox 'reply.gateway.ab12cd34' is not assigned yet. Last state: reply inbox topic create exceeded startup budget; trying bootstrap produce",
+      "durationMs": 1
+    }
+  }
+}
 ```
 
 ### /health/ready: failure semantics
 
-Если ASP.NET процесс жив, но Kafka bootstrap недоступен, endpoint отвечает
-`503 Service Unavailable`.
+Если ASP.NET процесс жив, но Kafka bootstrap недоступен или reply inbox ещё
+не готов, endpoint отвечает `503 Service Unavailable`. JSON body теперь
+показывает per-check descriptions, поэтому `curl http://<host>:7520/health/ready`
+сразу раскрывает текущую причину неготовности.
 
 Это именно тот endpoint, который должны использовать:
 

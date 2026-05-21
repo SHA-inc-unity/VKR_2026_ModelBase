@@ -22,10 +22,10 @@ public sealed class KafkaRequestReplyHealthCheck : IHealthCheck
         if (_probe.IsReplyInboxReady)
         {
             return Task.FromResult(HealthCheckResult.Healthy(
-                $"Kafka reply inbox '{_probe.ReplyInbox}' is assigned and ready."));
+                $"Kafka reply inbox '{_probe.ReplyInbox}' is assigned and ready. Last state: {_probe.ReplyInboxStatus}"));
         }
 
         return Task.FromResult(HealthCheckResult.Unhealthy(
-            $"Kafka reply inbox '{_probe.ReplyInbox}' is not assigned yet."));
+            $"Kafka reply inbox '{_probe.ReplyInbox}' is not assigned yet. Last state: {_probe.ReplyInboxStatus}"));
     }
 }
