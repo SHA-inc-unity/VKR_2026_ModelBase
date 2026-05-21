@@ -15,3 +15,13 @@ public interface IKafkaRequestClient
         TimeSpan timeout,
         CancellationToken ct = default);
 }
+
+/// <summary>
+/// Read-only probe for the live Kafka request/reply state inside gateway.
+/// Used by readiness checks and diagnostics without exposing send semantics.
+/// </summary>
+public interface IKafkaRequestClientProbe
+{
+    bool IsReplyInboxReady { get; }
+    string ReplyInbox { get; }
+}

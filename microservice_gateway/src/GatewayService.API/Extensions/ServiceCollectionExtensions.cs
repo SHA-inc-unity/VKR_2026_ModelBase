@@ -69,6 +69,7 @@ public static class ServiceCollectionExtensions
         // Kafka request/reply — singleton + hosted service for the consume loop
         services.AddSingleton<KafkaRequestClient>();
         services.AddSingleton<IKafkaRequestClient>(sp => sp.GetRequiredService<KafkaRequestClient>());
+        services.AddSingleton<IKafkaRequestClientProbe>(sp => sp.GetRequiredService<KafkaRequestClient>());
         services.AddHostedService(sp => sp.GetRequiredService<KafkaRequestClient>());
 
         // Redis distributed cache (falls back to in-memory when Redis section is absent)

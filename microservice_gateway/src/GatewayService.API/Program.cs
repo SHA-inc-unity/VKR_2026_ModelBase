@@ -26,6 +26,10 @@ if (!builder.Environment.IsEnvironment("Test"))
         "kafka",
         failureStatus: HealthStatus.Unhealthy,
         tags: ["ready"]);
+    healthChecks.AddCheck<KafkaRequestReplyHealthCheck>(
+        "kafka-request-reply",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: ["ready"]);
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────

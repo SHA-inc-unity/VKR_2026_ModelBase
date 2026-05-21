@@ -17,11 +17,13 @@ producer publish в сам `reply.gateway.{instanceId}` и продолжает 
 пока topic/assignment не поднимутся. Это убирает ложное состояние
 `reply inbox ready`, при котором admin facade успевал отправить request, но
 симметрично зависал на timeout по всем Kafka-backed admin route-ам.
-Readiness для Kafka вынесена в отдельный `GET /health/ready`: он делает
-metadata lookup по `Kafka:BootstrapServers` и возвращает `503`, если broker
-недоступен. Docker healthcheck gateway и admin split/local health probe теперь
-смотрят именно в `/health/ready`, поэтому состояние "HTTP процесс жив, но
-Kafka path мёртв" больше не маскируется как healthy.
+Readiness для Kafka вынесена в отдельный `GET /health/ready`: он проверяет
+не только metadata lookup по `Kafka:BootstrapServers`, но и фактическую
+готовность request/reply path — у gateway должен быть назначен consumer на
+`reply.gateway.{instanceId}`. Docker healthcheck gateway и admin split/local
+health probe теперь смотрят именно в `/health/ready`, поэтому состояние
+"HTTP процесс жив, но bootstrap или reply inbox path мёртв" больше не
+маскируется как healthy.
 Для live-диагностики gateway пишет связку логов `AdminFacade request ...`
 и `KafkaRequest ...` с `topic`, HTTP path, `replyInbox`, duration,
 timeout и `correlationId`; payload и shared token не логируются.
@@ -86,7 +88,7 @@ API Gateway  :7520 (host) -> :5020 (container)
 | GET | `/api/news` | None | Latest news items |
 | GET | `/api/notifications` | Required | User notifications |
 | GET | `/health` | None | Health check |
-| GET | `/health/ready` | None | Readiness check incl. Kafka bootstrap |
+| GET | `/health/ready` | None | Readiness check incl. Kafka bootstrap and reply inbox assignment |
 | GET | `/swagger` | None (dev only) | Swagger UI |
 
 All responses include `X-Correlation-Id` header.
@@ -100,7 +102,7 @@ Browser/web note:
 Health flow:
 
 - `/health` = liveness of the ASP.NET process
-- `/health/ready` = readiness of gateway request/reply path, including Kafka bootstrap reachability
+- `/health/ready` = readiness of gateway request/reply path, including Kafka bootstrap reachability and reply inbox assignment
 - Docker Compose healthcheck uses `/health/ready`
 
 Полный контракт для frontend-интеграции, включая примеры запросов/ответов и правила обработки degraded/pending состояний, вынесен в [API.md](API.md).

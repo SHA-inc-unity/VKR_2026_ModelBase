@@ -14,7 +14,7 @@ namespace GatewayService.API.Kafka;
 /// topic and awaits a matching envelope on a private reply-inbox topic.
 /// Runs as a hosted service: the consume-loop lifecycle is tied to the app.
 /// </summary>
-public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, IDisposable
+public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClientProbe, IHostedService, IDisposable
 {
     private static readonly TimeSpan ReplyInboxStartupBudget = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ReplyInboxRetryDelay = TimeSpan.FromSeconds(1);
@@ -33,6 +33,9 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IHostedService, ID
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
     private int _isReplyInboxReady;
+
+    public bool IsReplyInboxReady => Volatile.Read(ref _isReplyInboxReady) == 1;
+    public string ReplyInbox => _replyInbox;
 
     public KafkaRequestClient(IOptions<KafkaSettings> opts, ILogger<KafkaRequestClient> log)
     {

@@ -270,11 +270,14 @@ Healthy
 Readiness-проверка gateway request/reply path.
 
 В отличие от `/health`, этот endpoint дополнительно проверяет, что bootstrap
-listener Kafka/Redpanda доступен по `Kafka:BootstrapServers` и gateway может
-делать metadata lookup к broker.
+listener Kafka/Redpanda доступен по `Kafka:BootstrapServers`, gateway может
+делать metadata lookup к broker и у live `KafkaRequestClient` уже назначен
+consumer на его `reply.gateway.{instanceId}` inbox.
 
 Практически это означает: `7520/health/ready = 200` нужен раньше, чем можно
-считать Kafka-backed `/api/admin/*` routes рабочими. Backend `:8443/health/ready`
+считать Kafka-backed `/api/admin/*` routes рабочими. Этот статус теперь
+означает не просто доступность broker metadata, а готовность bootstrap +
+reply inbox request/reply path. Backend `:8443/health/ready`
 должен просто проксировать этот endpoint; если facade на `8443` отдаёт `404`,
 это признак stale infra nginx deploy, а не проблемы admin-host edge.
 
