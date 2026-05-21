@@ -4,6 +4,10 @@
 
 ## 2026-05
 
+### 2026-05-22
+
+- `microservice_admin/src/middleware.ts`, `microservice_admin/{README.md,STRUCTURE.md}`, `docs/agents/services/microservice_admin.md`: admin login cache доведён до полноценной session persistence. Middleware теперь не только прячет панель за `/login`, но и восстанавливает admin access token через `POST /api/account/refresh`, если в httpOnly cookie ещё жив refresh token. Защищённые pages/API получают уже обновлённый `cookie` header, а `/login` редиректится назад в панель, если cached admin-session ещё можно восстановить.
+
 ### 2026-05-21
 
 - `microservice_account`, `microservice_gateway`, `microservice_admin`, `microservicestarter`, root/docs: начат keyless auth-refactor admin path. Account получил роль `guest`, top-level UID/accountType/roles в auth response и optional bootstrap login-only admin. Gateway `/api/admin/*` теперь защищён Account Service JWT с ролью `admin`, старый фильтр общего ключа удалён. Admin UI получил `/login`, auth/session/logout routes, middleware и передачу admin JWT в split backend facade. Launcher больше не генерирует и не синхронизирует общий admin-ключ; устаревшие token helper scripts удалены.

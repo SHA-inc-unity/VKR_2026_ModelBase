@@ -10,6 +10,10 @@
 
 ## Текущий контекст
 
+### 2026-05-22
+
+- `microservice_admin/src/middleware.ts`, `microservice_admin/{README.md,STRUCTURE.md}`, `docs/agents/services/microservice_admin.md`: доделан admin login cache. Middleware теперь умеет silently refresh-ить access token через Account Service по refresh cookie до рендера защищённых pages/API и редиректит `/login` обратно в панель, если cached admin-session ещё восстановима. `npm run build` в `microservice_admin` снова проходит.
+
 ### 2026-05-21
 
 - `microservice_account`, `microservice_gateway`, `microservice_admin`, `microservicestarter`, `deploy/*`, docs: начат крупный auth-refactor без статических admin-ключей. Account теперь знает роли `guest` / `user` / `admin`, auth responses возвращают UID/accountType/roles, startup может bootstrap/promote login-only admin. Gateway `/api/admin/*` защищён JWT с ролью `admin`, admin UI получил `/login`, httpOnly session cookies и logout, split backend calls пересылают admin JWT. Launcher больше не генерирует и не синхронизирует общий admin-ключ, token helper scripts удалены. Осталось прогнать build/test и добить возможные compile/type errors.
