@@ -12,6 +12,7 @@
 
 ### 2026-05-21
 
+- `deploy/{print_token.sh,set_token.sh}`, `README.md`, `STRUCTURE.md`, `microservice_gateway/README.md`, `microservice_gateway/STRUCTURE.md`: token helper-ы упрощены под реальный split admin workflow. `print_token.sh` теперь без аргументов печатает текущий backend `ADMIN_SHARED_TOKEN`, а `set_token.sh` принимает ровно один позиционный аргумент `./set_token.sh <big-token>` и пишет его в `microservice_admin/.env` как `ADMIN_BACKEND_SHARED_TOKEN`. Для локального smoke test оставлены только env override-переменные, не меняющие основной интерфейс скриптов.
 - `microservice_gateway/src/GatewayService.API/Kafka/{KafkaRequestClient.cs,IKafkaRequestClient.cs,KafkaRequestReplyHealthCheck.cs}`, `Program.cs`, `Extensions/ServiceCollectionExtensions.cs`, `tests/GatewayService.UnitTests/KafkaRequestReplyHealthCheckTests.cs`: исправлен backend-side split admin incident в gateway request/reply bootstrap. Reply inbox `reply.gateway.{instanceId}` больше не считается ready до фактического consumer assignment; если Kafka Admin create не подтвердил topic в startup budget, gateway теперь bootstrap-ит topic через producer publish в сам reply inbox и продолжает retry-loop до готовности. Дополнительно `GET /health/ready` теперь требует не только Kafka bootstrap reachability, но и реальную readiness reply-inbox path, чтобы broken admin request/reply больше не выглядел healthy.
 
 ### 2026-05-19

@@ -216,6 +216,8 @@ Root-level scripts in [../deploy/](../deploy/) automate gateway deployment and r
 | `../deploy/modelline-deploy.yml` | deployment config for image rollout / reconciliation |
 | `../deploy/reconcile.ps1` | Windows reconcile script |
 | `../deploy/reconcile.sh` | Linux/macOS reconcile script |
+| `../deploy/print_token.sh` | prints the current backend `ADMIN_SHARED_TOKEN` from `microservice_gateway/.env` |
+| `../deploy/set_token.sh` | writes `ADMIN_BACKEND_SHARED_TOKEN` to `microservice_admin/.env` from one positional argument: `./set_token.sh <big-token>` |
 | `../deploy/status.ps1` | runtime status helper |
 
 ---

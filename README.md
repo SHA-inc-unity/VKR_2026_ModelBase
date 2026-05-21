@@ -21,6 +21,7 @@
 
 | Каталог | Назначение |
 | ------- | ---------- |
+| [deploy](deploy/) | Root-level deploy/reconcile helper scripts, включая token helpers для split admin deployment |
 | [microservicestarter](microservicestarter/README.md) | Единый launcher и операционные скрипты для всех сервисов |
 | [shared](shared/README.md) | Общий Python-пакет с контрактами и messaging-утилитами |
 | [docs/agents](docs/agents/README.md) | Docs-first структура и маршрут чтения для агентной разработки |
@@ -34,6 +35,7 @@
 ├── AGENTS.md                    # Глобальные правила работы агентов
 ├── promt_agent.md               # Краткий рабочий дневник агента
 ├── .runtime-data/               # Локальные bind-mounted runtime-данные сервисов (создаётся Docker, в git не хранится)
+├── deploy/                      # Root-level deploy/reconcile scripts и token helpers для split admin
 ├── docs/agents/                 # Markdown-опоры для агентной разработки
 ├── .github/instructions/        # Агентские file instructions
 │

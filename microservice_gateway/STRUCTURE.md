@@ -70,6 +70,8 @@
 | `modelline-deploy.yml` | Root-level deployment config, который включает gateway как deployable unit |
 | `reconcile.ps1` | Windows reconcile script для root-level deploy конфигурации |
 | `reconcile.sh` | Linux/macOS reconcile script для root-level deploy конфигурации |
+| `print_token.sh` | Shell helper: без аргументов печатает backend token `ADMIN_SHARED_TOKEN` из `microservice_gateway/.env` |
+| `set_token.sh` | Shell helper: принимает ровно один позиционный аргумент `./set_token.sh <big-token>` и пишет его в `microservice_admin/.env` как `ADMIN_BACKEND_SHARED_TOKEN` |
 | `status.ps1` | статус контейнеров по root-level deploy конфигурации |
 
 ---
