@@ -213,9 +213,9 @@ Root-level scripts in [../deploy/](../deploy/) automate gateway deployment and r
 
 | Script | Purpose |
 | ------ | ------- |
-| `../deploy/modelline-deploy.yml` | deployment config for image rollout / reconciliation |
+| `../deploy/modelline-deploy.yml` | deployment config for image rollout / reconciliation; targets real compose services (`infra: redpanda/redpanda-console/minio/nginx/redpanda-janitor`, `gateway: gateway-service`, `data: data`, `analytic: api`, `account: account-api`) so backend-host reconcile can actually roll out gateway/nginx fixes |
 | `../deploy/reconcile.ps1` | Windows reconcile script |
-| `../deploy/reconcile.sh` | Linux/macOS reconcile script |
+| `../deploy/reconcile.sh` | Linux/macOS reconcile script; parser fixed to handle multi-service `modelline-deploy.yml` under `set -e` without aborting on the second entry |
 | `../deploy/print_token.sh` | prints the current backend `ADMIN_SHARED_TOKEN` from `microservice_gateway/.env` |
 | `../deploy/set_token.sh` | writes `ADMIN_BACKEND_SHARED_TOKEN` to `microservice_admin/.env` from one positional argument: `./set_token.sh <big-token>` |
 | `../deploy/status.ps1` | runtime status helper |
@@ -262,8 +262,8 @@ src/
     Middleware/          — CorrelationId, GlobalException
     Settings/            — Strongly typed config sections
 ../deploy/
-  modelline-deploy.yml  — Root-level deployment config
-  reconcile.ps1 / .sh   — Root-level reconcile scripts
+  modelline-deploy.yml  — Root-level deployment config with real compose service names for infra/gateway/data/analytic/account
+  reconcile.ps1 / .sh   — Root-level reconcile scripts; infra reconcile restarts backend nginx/redpanda containers explicitly
   status.ps1            — Root-level container status helper
 tests/
   GatewayService.UnitTests/

@@ -21,7 +21,7 @@
 
 | Каталог | Назначение |
 | ------- | ---------- |
-| [deploy](deploy/) | Root-level deploy/reconcile helper scripts, включая token helpers для split admin deployment |
+| [deploy](deploy/) | Root-level deploy/reconcile helper scripts. `modelline-deploy.yml` теперь целится в реальные compose service names (`redpanda`, `nginx`, `gateway-service`, `data`, `api`, `account-api`), а infra reconcile делает явный restart для применения bind-mounted backend nginx config и устранения `:8443` drift |
 | [microservicestarter](microservicestarter/README.md) | Единый launcher и операционные скрипты для всех сервисов |
 | [shared](shared/README.md) | Общий Python-пакет с контрактами и messaging-утилитами |
 | [docs/agents](docs/agents/README.md) | Docs-first структура и маршрут чтения для агентной разработки |

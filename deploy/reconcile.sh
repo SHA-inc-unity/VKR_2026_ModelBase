@@ -70,7 +70,7 @@ parse_config() {
     line="${raw%$'\r'}"  # strip CR (Windows line endings)
 
     if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+name:[[:space:]]*(.+) ]]; then
-      (( idx++ ))
+      idx=$((idx + 1))
       NAMES[$idx]="${BASH_REMATCH[1]}"
       COMPOSE_FILES[$idx]=""
       RESTART_POLICIES[$idx]="if_changed"

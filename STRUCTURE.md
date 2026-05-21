@@ -56,7 +56,7 @@
 | `AGENTS.md` | Глобальные правила агентной работы: читать Markdown до кода, обновлять Markdown после кода |
 | `promt_agent.md` | Краткий рабочий дневник агента: читать до работы, обновлять после работы |
 | `.runtime-data/` | Локальные bind-mounted runtime-данные stateful сервисов (`microservice_infra`, `microservice_account`, `microservice_data`, `microservice_analitic`) — создаётся автоматически, в git не хранится |
-| `deploy/` | Root-level deploy/reconcile scripts: `modelline-deploy.yml`, `reconcile.*`, `status.ps1` и shell helpers `print_token.sh` / `set_token.sh` для split admin token sync |
+| `deploy/` | Root-level deploy/reconcile scripts: `modelline-deploy.yml`, `reconcile.*`, `status.ps1` и shell helpers `print_token.sh` / `set_token.sh` для split admin token sync. `modelline-deploy.yml` теперь синхронизирован с реальными compose service names (`redpanda`, `nginx`, `gateway-service`, `data`, `api`, `account-api`), а infra reconcile делает explicit restart для применения bind-mounted backend nginx config |
 | `docs/agents/` | Центральная Markdown-структура для агентной разработки: workflow, карта документов, сервисные профили, change log |
 | `.github/instructions/` | File Instructions для агентного workflow внутри репозитория |
 | `.gitignore` | Git-правила: Python, .NET, Docker, IDE, OS, ML-артефакты |

@@ -67,9 +67,9 @@
 
 | Файл | Назначение |
 | ---- | ---------- |
-| `modelline-deploy.yml` | Root-level deployment config, который включает gateway как deployable unit |
+| `modelline-deploy.yml` | Root-level deployment config, который теперь указывает реальные compose service names для infra/gateway/data/analytic/account; gateway deployable unit = `gateway-service`, analytic = `api`, account = `account-api` |
 | `reconcile.ps1` | Windows reconcile script для root-level deploy конфигурации |
-| `reconcile.sh` | Linux/macOS reconcile script для root-level deploy конфигурации |
+| `reconcile.sh` | Linux/macOS reconcile script для root-level deploy конфигурации; parser исправлен, чтобы multi-service YAML не падал на втором entry под `set -e` |
 | `print_token.sh` | Shell helper: без аргументов печатает backend token `ADMIN_SHARED_TOKEN` из `microservice_gateway/.env` |
 | `set_token.sh` | Shell helper: принимает ровно один позиционный аргумент `./set_token.sh <big-token>` и пишет его в `microservice_admin/.env` как `ADMIN_BACKEND_SHARED_TOKEN` |
 | `status.ps1` | статус контейнеров по root-level deploy конфигурации |

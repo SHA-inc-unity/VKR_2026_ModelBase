@@ -16,10 +16,24 @@ version: "1"
 
 services:
 
+  # Infra contains bind-mounted nginx config, so an explicit reconcile must
+  # restart the persistent backend containers even when their image digest did
+  # not change.
+  - name: infra
+    compose_file: ../microservice_infra/docker-compose.yml
+    services:
+      - redpanda
+      - redpanda-console
+      - minio
+      - nginx
+      - redpanda-janitor
+    pull: true
+    restart_policy: always
+
   - name: gateway
     compose_file: ../microservice_gateway/docker-compose.yml
     services:
-      - gateway
+      - gateway-service
     pull: true
     restart_policy: if_changed
 
@@ -33,28 +47,19 @@ services:
   - name: analytic
     compose_file: ../microservice_analitic/docker-compose.yml
     services:
-      - analitic
+      - api
     pull: true
     restart_policy: if_changed
 
   - name: account
     compose_file: ../microservice_account/docker-compose.yml
     services:
-      - account
+      - account-api
     pull: true
     restart_policy: if_changed
 
-  - name: infra
-    compose_file: ../microservice_infra/docker-compose.yml
-    services:
-      - kafka
-      - redis
-      - postgres
-    pull: true
-    restart_policy: never   # infra restarted only on explicit intent
-
 # ------------------------------------
 # Deploy order is top-to-bottom.
-# Infra should be first if you want to
-# ensure it is running before apps start.
+# Infra is first so backend-host reconcile
+# can refresh nginx/redpanda before apps.
 # ------------------------------------
