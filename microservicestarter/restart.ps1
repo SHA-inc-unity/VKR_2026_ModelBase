@@ -93,47 +93,6 @@ Get-Content $ConfFile | ForEach-Object {
         }
     }
 
-    function New-RandomHexToken {
-        $bytes = New-Object byte[] 32
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-        return [Convert]::ToHexString($bytes).ToLowerInvariant()
-    }
-
-    function Resolve-SecretEnvValueOrGenerate {
-        param([string]$EnvFile, [string]$Key, [string]$OwnerLabel)
-        $currentValue = (Get-EnvValue -EnvFile $EnvFile -Key $Key).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($currentValue)) {
-            return $currentValue
-        }
-
-        $generated = New-RandomHexToken
-        if ([string]::IsNullOrWhiteSpace($generated)) {
-            Write-Fail "[$OwnerLabel] Не удалось сгенерировать $Key автоматически."
-        }
-
-        Write-Ok "[$OwnerLabel] $Key не был задан — сгенерировали новое значение и сохраним его в $(Split-Path $EnvFile -Leaf). Передай этот токен на admin-host как ADMIN_BACKEND_SHARED_TOKEN."
-        return $generated
-    }
-
-    function Resolve-RequiredSecretEnvValue {
-        param([string]$EnvFile, [string]$Key, [string]$OwnerLabel)
-        $currentValue = (Get-EnvValue -EnvFile $EnvFile -Key $Key).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($currentValue)) {
-            return $currentValue
-        }
-
-        Write-Info "[$OwnerLabel] $Key не задан — укажи значение ADMIN_SHARED_TOKEN с backend-host."
-        do {
-            $secure = Read-Host "[$OwnerLabel] Введите $Key (значение с backend-host)" -AsSecureString
-            $plain = (Convert-SecureStringToPlainText -Value $secure).Trim()
-            if ([string]::IsNullOrWhiteSpace($plain)) {
-                Write-Warn "[$OwnerLabel] $Key не может быть пустым."
-            }
-        } while ([string]::IsNullOrWhiteSpace($plain))
-
-        return $plain
-    }
-
     function Resolve-AdminBackendBaseUrl {
         param([string]$SvcDir, [string]$BackendHost)
         $envFile = Join-Path $SvcDir ".env"
@@ -195,19 +154,15 @@ Get-Content $ConfFile | ForEach-Object {
 
     function Configure-BackendAdminFacadeEnv {
         $infraSvcDir = Get-ServiceDirectory -Name "microservice_infra"
-        $gatewaySvcDir = Get-ServiceDirectory -Name "microservice_gateway"
         $dataSvcDir = Get-ServiceDirectory -Name "microservice_data"
 
         $infraEnv = Ensure-EnvFile -SvcDir $infraSvcDir
-        $gatewayEnv = Ensure-EnvFile -SvcDir $gatewaySvcDir
         $dataEnv = Ensure-EnvFile -SvcDir $dataSvcDir
 
         $publicBaseUrl = Resolve-BackendPublicBaseUrl -EnvFile $dataEnv
-        $sharedToken = Resolve-SecretEnvValueOrGenerate -EnvFile $gatewayEnv -Key "ADMIN_SHARED_TOKEN" -OwnerLabel "microservice_gateway"
         $backendPort = Get-HttpUrlEffectivePort -Value $publicBaseUrl
 
         Set-EnvValue -EnvFile $dataEnv -Key "PUBLIC_DOWNLOAD_BASE_URL" -Value $publicBaseUrl
-        Set-EnvValue -EnvFile $gatewayEnv -Key "ADMIN_SHARED_TOKEN" -Value $sharedToken
         Set-EnvValue -EnvFile $infraEnv -Key "ADMIN_BACKEND_PORT" -Value $backendPort
 
         Write-Ok "[backend-host] HTTP admin facade env настроены: PUBLIC_DOWNLOAD_BASE_URL=$publicBaseUrl, ADMIN_BACKEND_PORT=$backendPort."
@@ -368,7 +323,6 @@ function Configure-AdminOnlineEnv {
 
     $resolvedBackendHost = Resolve-AdminOnlineBackendHost -SvcDir $SvcDir -ExplicitBackendHost $ExplicitBackendHost
     $resolvedBackendBaseUrl = Resolve-AdminBackendBaseUrl -SvcDir $SvcDir -BackendHost $resolvedBackendHost
-    $resolvedSharedToken = Resolve-RequiredSecretEnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_SHARED_TOKEN" -OwnerLabel "microservice_admin"
 
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_BACKEND_HOST" -Value $resolvedBackendHost
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_KAFKA_BOOTSTRAP_SERVERS" -Value "${resolvedBackendHost}:9092"
@@ -377,7 +331,6 @@ function Configure-AdminOnlineEnv {
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_GATEWAY_URL" -Value "${resolvedBackendHost}:7520"
     Set-EnvValue -EnvFile $envFile -Key "ONLINE_MINIO_URL" -Value "${resolvedBackendHost}:9000"
     Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_BASE_URL" -Value $resolvedBackendBaseUrl
-    Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_SHARED_TOKEN" -Value $resolvedSharedToken
     if ([string]::IsNullOrWhiteSpace((Get-EnvValue -EnvFile $envFile -Key "ADMIN_HTTP_PORT"))) {
         Set-EnvValue -EnvFile $envFile -Key "ADMIN_HTTP_PORT" -Value "80"
     }
@@ -400,7 +353,7 @@ function Configure-AdminOnlineEnv {
         Set-EnvValue -EnvFile $envFile -Key "ADMIN_BACKEND_TLS_INSECURE" -Value "1"
     }
 
-    Write-Ok "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_* для $resolvedBackendBaseUrl"
+    Write-Ok "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_BASE_URL для $resolvedBackendBaseUrl"
 }
 
 function Invoke-ParallelRestartSelection {

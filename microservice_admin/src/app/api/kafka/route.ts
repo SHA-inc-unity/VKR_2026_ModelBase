@@ -5,6 +5,7 @@ import { isSplitMode, backendCall, BackendClientError } from '@/lib/backendClien
 import { writeAdminRuntimeLog } from '@/lib/adminRuntimeLog';
 import { appendQueueHistory } from '@/lib/queueHistoryStore';
 import { Topics } from '@/lib/topics';
+import { requireAdminSession } from '@/lib/adminSession';
 
 const QUEUE_HISTORY_TOPICS = new Set<string>([
   Topics.CMD_DATA_DATASET_JOBS_START,
@@ -110,6 +111,9 @@ export async function POST(req: NextRequest) {
   let payloadSummary: Record<string, unknown> | null = null;
   let requestId: string | null = null;
   try {
+    const session = await requireAdminSession(req, { verifyWithAccount: !isSplitMode });
+    if (!session.ok) return session.response;
+
     const body = await req.json();
     const { topic, payload, timeoutMs, correlationId } = body as {
       topic: string;
@@ -164,7 +168,7 @@ export async function POST(req: NextRequest) {
     if (isSplitMode) {
       // ── Split-deployment: call the gateway admin facade via HTTP ──────────
       const factory = () =>
-        backendCall(topic, payload ?? null, { timeoutMs: timeoutMs ?? 30_000 });
+        backendCall(topic, payload ?? null, { timeoutMs: timeoutMs ?? 30_000, accessToken: session.accessToken });
 
       const data = ttl !== null
         ? await coalesce(makeKey(topic, payload ?? null), ttl, factory)

@@ -4,6 +4,8 @@
 
 Mobile BFF gateway для внешних HTTP-запросов.
 
+`/api/admin/*` — server-to-server admin facade, защищённый Account Service JWT с ролью `admin`; legacy static-key auth не используется.
+
 ## Что читать перед кодом
 
 - [../../../microservice_gateway/README.md](../../../microservice_gateway/README.md)
@@ -20,4 +22,4 @@ Mobile BFF gateway для внешних HTTP-запросов.
 
 ## Когда обязательно обновлять Markdown
 
-- изменения маршрутизации, downstream integration, auth passthrough, config и health-flow
+- изменения маршрутизации, downstream integration, auth passthrough/admin-role authorization, config и health-flow

@@ -21,6 +21,9 @@ services:
       Redis__ConnectionString: ${REDIS_URL:-}
       InternalApi__ApiKey: ${INTERNAL_API_KEY}
       Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
+      AdminBootstrap__Email: ${ADMIN_BOOTSTRAP_EMAIL:-}
+      AdminBootstrap__Username: ${ADMIN_BOOTSTRAP_USERNAME:-}
+      AdminBootstrap__Password: ${ADMIN_BOOTSTRAP_PASSWORD:-}
     depends_on:
       postgres:
         condition: service_healthy

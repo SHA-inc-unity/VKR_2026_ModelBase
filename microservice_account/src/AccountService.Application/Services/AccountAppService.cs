@@ -254,11 +254,21 @@ public sealed class AccountAppService : IAccountService
             RefreshToken: rawRefreshToken,
             AccessTokenExpiresAt: DateTimeOffset.UtcNow.Add(_tokenService.AccessTokenExpiration),
             RefreshTokenExpiresAt: tokenRecord.ExpiresAt,
+            Uid: user.Id,
+            AccountType: ResolveAccountType(roles),
+            Roles: roles,
             User: ToProfileResponse(user, roles)
         );
 
     private static UserProfileResponse ToProfileResponse(User user, IReadOnlyList<string> roles) =>
         new(user.Id, user.Email, user.Username, user.Status.ToString(), roles, user.CreatedAt, user.UpdatedAt);
+
+    private static string ResolveAccountType(IReadOnlyList<string> roles)
+    {
+        if (roles.Contains(Role.Codes.Admin, StringComparer.OrdinalIgnoreCase)) return Role.Codes.Admin;
+        if (roles.Contains(Role.Codes.User, StringComparer.OrdinalIgnoreCase)) return Role.Codes.User;
+        return Role.Codes.Guest;
+    }
 
     private static UserSettingsResponse ToSettingsResponse(UserSettings s) =>
         new(s.Theme, s.Locale, s.NotificationsEnabled, s.UpdatedAt);

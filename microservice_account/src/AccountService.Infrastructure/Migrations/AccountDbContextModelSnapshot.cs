@@ -78,6 +78,7 @@ partial class AccountDbContextModelSnapshot : ModelSnapshot
             b.HasIndex("Code").IsUnique().HasDatabaseName("ix_roles_code");
             b.ToTable("roles");
             b.HasData(
+                new { Id = 0, Code = "guest", Name = "Guest" },
                 new { Id = 1, Code = "user", Name = "User" },
                 new { Id = 2, Code = "admin", Name = "Administrator" });
         });

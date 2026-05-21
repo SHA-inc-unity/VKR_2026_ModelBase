@@ -2,10 +2,10 @@ using System.Diagnostics;
 using System.Text.Json;
 using Confluent.Kafka;
 using GatewayService.API.DTOs;
-using GatewayService.API.Filters;
 using GatewayService.API.Kafka;
 using GatewayService.API.Middleware;
 using GatewayService.API.Settings;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -15,9 +15,9 @@ namespace GatewayService.API.Controllers;
 /// <summary>
 /// Admin backend facade — explicit HTTP endpoints for every admin Kafka command.
 ///
-/// All routes require the shared-secret token validated by AdminApiKeyFilter.
-/// The gateway is the only service that speaks Kafka; the admin Next.js process
-/// uses plain HTTPS to reach these endpoints and never touches Kafka directly.
+/// All routes require a validated Account Service JWT with the `admin` role.
+/// In split mode the admin Next.js process reaches these endpoints over HTTPS
+/// and forwards the logged-in admin user's bearer token.
 ///
 /// Endpoint → Kafka topic mapping:
 ///   POST /api/admin/health/data                   → cmd.data.health
@@ -68,7 +68,7 @@ namespace GatewayService.API.Controllers;
 [ApiController]
 [Route("api/admin")]
 [DisableCors]
-[ServiceFilter(typeof(AdminApiKeyFilter))]
+[Authorize(Roles = "admin")]
 public sealed class AdminController : ControllerBase
 {
     private const string KafkaTimeoutCode = "admin_kafka_timeout";

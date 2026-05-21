@@ -1,7 +1,9 @@
+import { NextRequest } from 'next/server';
 import { kafkaRequest } from '@/lib/kafka';
 import { Topics } from '@/lib/topics';
 import { TIMEFRAMES, makeTableName } from '@/lib/constants';
 import { isSplitMode, backendCall } from '@/lib/backendClient';
+import { requireAdminSession } from '@/lib/adminSession';
 
 export const runtime = 'nodejs';
 
@@ -31,7 +33,10 @@ export const runtime = 'nodejs';
  * текущий request origin и не пытается «починить» URL — это всегда
  * ответственность data-service + infra-nginx.
  */
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
+  const session = await requireAdminSession(req, { verifyWithAccount: !isSplitMode });
+  if (!session.ok) return session.response;
+
   try {
     const { searchParams } = new URL(req.url);
     const startMs   = searchParams.get('start_ms');
@@ -71,7 +76,7 @@ export async function GET(req: Request) {
       const exportPayload = { tables, symbol, exchange, start_ms: startNum, end_ms: endNum };
 
       const reply = (isSplitMode
-        ? await backendCall(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
+        ? await backendCall(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000, accessToken: session.accessToken })
         : await kafkaRequest(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
       ) as { presigned_url?: string; error?: string };
 
@@ -98,7 +103,7 @@ export async function GET(req: Request) {
 
     const exportPayload = { table, start_ms: startNum, end_ms: endNum };
     const reply = (isSplitMode
-      ? await backendCall(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
+      ? await backendCall(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000, accessToken: session.accessToken })
       : await kafkaRequest(Topics.CMD_DATA_DATASET_EXPORT, exportPayload, { timeoutMs: 300_000 })
     ) as { presigned_url?: string; error?: string };
 

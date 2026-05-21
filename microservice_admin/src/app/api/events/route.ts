@@ -11,10 +11,14 @@
  */
 import { NextRequest } from 'next/server';
 import { subscribe } from '@/lib/sseHub';
+import { requireAdminSession } from '@/lib/adminSession';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest): Promise<Response> {
+  const session = await requireAdminSession(request);
+  if (!session.ok) return session.response;
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({

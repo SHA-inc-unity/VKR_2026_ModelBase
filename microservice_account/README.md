@@ -6,6 +6,8 @@ Inter-service IPC is **Kafka-only** (Redpanda broker). The service exposes HTTP
 only for end-user traffic (login/register/refresh) and the `/health` liveness
 endpoint — other ModelLine services talk to it via `cmd.account.*` topics.
 
+Identity tiers are explicit role codes: `guest`, `user`, `admin`. Public registration always creates a `user`; `admin` is login-only for the admin console and is created/promoted by operator bootstrap configuration, not by public signup. Login/register/refresh responses include the public UID plus `accountType` and `roles` so clients can label the session without treating UID as authorization proof.
+
 ---
 
 ## Agent Documentation
@@ -73,6 +75,21 @@ microservice_account/
 | GET | `/api/account/settings` | Get user settings |
 | PUT | `/api/account/settings` | Update settings |
 
+Auth responses return tokens plus identity metadata:
+
+```json
+{
+  "uid": "9ab711df-2390-4364-841b-3269dc8f2c2a",
+  "accountType": "user",
+  "roles": ["user"],
+  "accessToken": "...",
+  "refreshToken": "...",
+  "user": { "id": "9ab711df-2390-4364-841b-3269dc8f2c2a" }
+}
+```
+
+`uid` is public identity metadata. Backend services must derive the current user/admin from a validated JWT, not from a client-supplied UID.
+
 ### Internal (X-Internal-Api-Key header)
 
 | Method | Path | Description |
@@ -113,7 +130,10 @@ the external `modelline_net` so it can reach Redpanda.
 ```bash
 cp .env.example .env
 # Edit .env: set POSTGRES_PASSWORD, JWT_SECRET_KEY, INTERNAL_API_KEY
+# Optional: set ADMIN_BOOTSTRAP_EMAIL, ADMIN_BOOTSTRAP_USERNAME, ADMIN_BOOTSTRAP_PASSWORD
 ```
+
+`ADMIN_BOOTSTRAP_*` creates or promotes a login-only admin account during startup migrations. Password strength is validated by the same password policy as public registration. Leave these variables empty when no bootstrap admin should be changed.
 
 ### 3. Run with Docker Compose
 
@@ -178,6 +198,7 @@ dotnet test
 - Refresh tokens: stored as SHA-256 hash only
 - JWT: HS256, short TTL (15 min), JTI for blacklisting
 - Internal API: API key header only, not JWT
+- Roles: `guest` is the anonymous/default tier, `user` is public self-registration, `admin` is reserved for pre-created admin console accounts
 - DB user should have minimal privileges (SELECT/INSERT/UPDATE/DELETE only)
 - Rotate `JWT_SECRET_KEY` via refresh token rotation (all sessions will invalidate)
 

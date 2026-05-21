@@ -4,6 +4,8 @@
 
 Сервис аккаунтов и авторизации на .NET.
 
+Роли identity model: `guest`, `user`, `admin`. Public registration создаёт только `user`; login-only `admin` создаётся/promote-ится через bootstrap config. Auth responses возвращают UID/accountType/roles, но UID не является auth proof.
+
 ## Что читать перед кодом
 
 - [../../../microservice_account/README.md](../../../microservice_account/README.md)
@@ -18,4 +20,4 @@
 
 ## Когда обязательно обновлять Markdown
 
-- изменения auth-flow, JWT, roles, endpoints и deployment-конфигурации
+- изменения auth-flow, JWT, UID/accountType response, roles, endpoints и deployment-конфигурации

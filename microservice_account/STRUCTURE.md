@@ -31,14 +31,14 @@
 
 Чистая доменная модель без инфраструктурных зависимостей.
 
-- `Entities/` — пользователь, роль, refresh-token, audit-сущности, настройки
+- `Entities/` — пользователь, роль (`guest` / `user` / `admin`), refresh-token, audit-сущности, настройки
 - `Enums/` — доменные перечисления
 
 ### `AccountService.Application/`
 
 Слой use-case и прикладных сервисов.
 
-- `Services/` — account flow, password hashing, JWT/token management
+- `Services/` — account flow, password hashing, JWT/token management; `AccountAppService` возвращает UID/accountType/roles в auth response и публично регистрирует только роль `user`
 - `Interfaces/` — контракты репозиториев, сервисов и кеша
 - `DTOs/` — request/response модели
 - `Validators/` — FluentValidation-валидаторы
@@ -59,7 +59,7 @@ HTTP и Kafka-входные точки.
 
 - `Program.cs` — bootstrap, DI, middleware pipeline
 - `Controllers/` — public и internal HTTP endpoints
-- `Extensions/` — регистрация сервисов и миграций
+- `Extensions/` — регистрация сервисов и миграций; startup migration flow может создать/promote login-only admin account через `AdminBootstrap:*`
 - `Kafka/` — Kafka request/reply интеграция сервиса
 - `Middleware/` — global exception handling и cross-cutting concerns
 - `appsettings*.json` — конфигурация окружений

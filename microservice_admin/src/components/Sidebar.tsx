@@ -12,6 +12,7 @@ import {
   ScrollText,
   ListOrdered,
   Zap,
+  LogOut,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
@@ -70,6 +71,12 @@ export function Sidebar() {
     });
   };
 
+  const logout = async () => {
+    const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+    await fetch(`${base}/api/auth/logout`, { method: 'POST' }).catch(() => undefined);
+    window.location.assign(`${base}/login`);
+  };
+
   useEffect(() => {
     const check = async () => {
       try {
@@ -85,6 +92,8 @@ export function Sidebar() {
     const id = setInterval(check, 30_000);
     return () => clearInterval(id);
   }, []);
+
+  if (pathname === '/login') return null;
 
   // ── Mode C: bottom-nav (< md) ──────────────────────────────────────
   if (mode === 'bottom-nav') {
@@ -209,6 +218,13 @@ export function Sidebar() {
             >
               {locale === 'en' ? 'RU' : 'EN'}
             </button>
+            <button
+              onClick={logout}
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              title="Sign out"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
             <div
               className={cn(
                 'w-2 h-2 rounded-full',
@@ -261,6 +277,13 @@ export function Sidebar() {
                 {kafkaOk === true ? 'Kafka connected' : kafkaOk === false ? 'Kafka error' : 'Checking...'}
               </span>
             </div>
+            <button
+              onClick={logout}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              Sign out
+            </button>
           </>
         )}
       </div>

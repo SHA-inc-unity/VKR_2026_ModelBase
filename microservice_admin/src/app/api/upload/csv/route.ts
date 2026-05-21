@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { kafkaRequest } from '@/lib/kafka';
 import { Topics } from '@/lib/topics';
 import { isSplitMode, backendCall } from '@/lib/backendClient';
+import { requireAdminSession } from '@/lib/adminSession';
 
 /**
  * POST /api/upload/csv
@@ -32,6 +33,9 @@ const BATCH_TIMEOUT_MS   = 60_000;
 type CsvRow = Record<string, string>;
 
 export async function POST(req: NextRequest) {
+  const session = await requireAdminSession(req, { verifyWithAccount: !isSplitMode });
+  if (!session.ok) return session.response;
+
   let form: FormData;
   try {
     form = await req.formData();
@@ -82,7 +86,7 @@ export async function POST(req: NextRequest) {
           const slice = rows.slice(i, i + effectiveBatchSize);
           const batchPayload = { table, rows: slice };
           const reply = (isSplitMode
-            ? await backendCall(Topics.CMD_DATA_DATASET_IMPORT_CSV, batchPayload, { timeoutMs: BATCH_TIMEOUT_MS })
+            ? await backendCall(Topics.CMD_DATA_DATASET_IMPORT_CSV, batchPayload, { timeoutMs: BATCH_TIMEOUT_MS, accessToken: session.accessToken })
             : await kafkaRequest(Topics.CMD_DATA_DATASET_IMPORT_CSV, batchPayload, { timeoutMs: BATCH_TIMEOUT_MS })
           ) as { rows_imported?: number; error?: string };
 

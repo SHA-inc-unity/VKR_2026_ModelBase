@@ -1,7 +1,6 @@
 using System.Text;
 using GatewayService.API.Aggregators.Bootstrap;
 using GatewayService.API.Aggregators.Dashboard;
-using GatewayService.API.Filters;
 using GatewayService.API.Middleware;
 using GatewayService.API.Clients.Account;
 using GatewayService.API.Clients.Market;
@@ -62,9 +61,6 @@ public static class ServiceCollectionExtensions
                 policy.WithOrigins(corsSettings.AllowedOrigins);
             });
         });
-
-        // Admin API key filter — scoped so IOptions<AdminSettings> resolves cleanly
-        services.AddScoped<AdminApiKeyFilter>();
 
         // Kafka request/reply — singleton + hosted service for the consume loop
         services.AddSingleton<KafkaRequestClient>();

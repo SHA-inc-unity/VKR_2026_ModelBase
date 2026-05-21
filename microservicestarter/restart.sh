@@ -314,64 +314,6 @@ infer_http_url_port() {
     fi
 }
 
-generate_random_hex_token() {
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -hex 32
-        return 0
-    fi
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - <<'PY'
-import secrets
-print(secrets.token_hex(32))
-PY
-        return 0
-    fi
-    od -An -N 32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
-}
-
-resolve_secret_env_value_or_generate() {
-    local env_file="$1"
-    local key="$2"
-    local owner_label="$3"
-    local current_value generated_value
-
-    current_value="$(get_env_value "$env_file" "$key")"
-    if [[ -n "$current_value" ]]; then
-        printf '%s' "$current_value"
-        return 0
-    fi
-
-    generated_value="$(generate_random_hex_token)"
-    [[ -n "$generated_value" ]] || fail "[$owner_label] Не удалось сгенерировать $key автоматически."
-    success "[$owner_label] $key не был задан — сгенерировали новое значение и сохраним его в $(basename "$env_file"). Передай этот токен на admin-host как ADMIN_BACKEND_SHARED_TOKEN." >&2
-    printf '%s' "$generated_value"
-}
-
-resolve_required_secret_env_value() {
-    local env_file="$1"
-    local key="$2"
-    local owner_label="$3"
-    local current_value prompt_value=""
-
-    current_value="$(get_env_value "$env_file" "$key")"
-    if [[ -n "$current_value" ]]; then
-        printf '%s' "$current_value"
-        return 0
-    fi
-
-    [[ -t 0 ]] || fail "[$owner_label] $key не задан. Укажи токен, сгенерированный на backend-host, в $env_file"
-
-    info "[$owner_label] $key не задан — укажи значение ADMIN_SHARED_TOKEN с backend-host." >&2
-    while [[ -z "$prompt_value" ]]; do
-        read -rsp "[$owner_label] Введите $key (значение с backend-host): " prompt_value
-        echo >&2
-        prompt_value="$(printf '%s' "$prompt_value" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-        [[ -z "$prompt_value" ]] && warn "[$owner_label] $key не может быть пустым." >&2
-    done
-
-    printf '%s' "$prompt_value"
-}
-
 resolve_admin_backend_base_url() {
     local svc_dir="$1"
     local backend_host="$2"
@@ -443,23 +385,19 @@ resolve_backend_public_base_url() {
 }
 
 configure_backend_http_facade_env() {
-    local infra_svc_dir gateway_svc_dir data_svc_dir infra_env gateway_env data_env
-    local public_base_url shared_token backend_port
+    local infra_svc_dir data_svc_dir infra_env data_env
+    local public_base_url backend_port
 
     infra_svc_dir="$(get_service_directory "microservice_infra")"
-    gateway_svc_dir="$(get_service_directory "microservice_gateway")"
     data_svc_dir="$(get_service_directory "microservice_data")"
 
     infra_env="$(ensure_env_file "$infra_svc_dir")"
-    gateway_env="$(ensure_env_file "$gateway_svc_dir")"
     data_env="$(ensure_env_file "$data_svc_dir")"
 
     public_base_url="$(resolve_backend_public_base_url "$data_env")"
-    shared_token="$(resolve_secret_env_value_or_generate "$gateway_env" "ADMIN_SHARED_TOKEN" "microservice_gateway")"
     backend_port="$(infer_http_url_port "$public_base_url")"
 
     set_env_value "$data_env" "PUBLIC_DOWNLOAD_BASE_URL" "$public_base_url"
-    set_env_value "$gateway_env" "ADMIN_SHARED_TOKEN" "$shared_token"
     set_env_value "$infra_env" "ADMIN_BACKEND_PORT" "$backend_port"
 
     success "[backend-host] HTTP admin facade env настроены: PUBLIC_DOWNLOAD_BASE_URL=$public_base_url, ADMIN_BACKEND_PORT=$backend_port."
@@ -527,10 +465,9 @@ configure_admin_online_env() {
         cp "$env_example" "$env_file"
     fi
 
-    local backend_host admin_backend_base_url admin_backend_shared_token
+    local backend_host admin_backend_base_url
     backend_host="$(resolve_admin_online_backend_host "$svc_dir" "$explicit_backend_host")"
     admin_backend_base_url="$(resolve_admin_backend_base_url "$svc_dir" "$backend_host")"
-    admin_backend_shared_token="$(resolve_required_secret_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "microservice_admin")"
 
     set_env_value "$env_file" "ONLINE_BACKEND_HOST" "$backend_host"
     set_env_value "$env_file" "ONLINE_KAFKA_BOOTSTRAP_SERVERS" "$backend_host:9092"
@@ -539,13 +476,12 @@ configure_admin_online_env() {
     set_env_value "$env_file" "ONLINE_GATEWAY_URL" "$backend_host:7520"
     set_env_value "$env_file" "ONLINE_MINIO_URL" "$backend_host:9000"
     set_env_value "$env_file" "ADMIN_BACKEND_BASE_URL" "$admin_backend_base_url"
-    set_env_value "$env_file" "ADMIN_BACKEND_SHARED_TOKEN" "$admin_backend_shared_token"
     ensure_admin_online_public_env_defaults "$env_file"
     if [[ -z "$(get_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE")" && "$admin_backend_base_url" == https://* ]]; then
         set_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE" "1"
     fi
 
-    success "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_* для $admin_backend_base_url"
+    success "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_BASE_URL для $admin_backend_base_url"
 }
 
 

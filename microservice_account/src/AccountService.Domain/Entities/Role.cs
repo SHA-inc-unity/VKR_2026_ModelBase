@@ -12,6 +12,7 @@ public class Role
 
     public static class Codes
     {
+        public const string Guest = "guest";
         public const string Admin = "admin";
         public const string User = "user";
     }

@@ -51,7 +51,7 @@
 4. Строить запросы `GET /api/v1/market/chart` только значениями из `/api/v1/market/config`.
 5. Для защищённых endpoint-ов передавать `Authorization: Bearer <accessToken>`.
 6. Не трактовать каждый `200` как «данные полные и готовы»: `dashboard`, `news`, `notifications`, `market/chart` поддерживают degraded/pending состояния внутри тела ответа.
-7. Если интеграция идёт из `microservice_admin`, использовать только `POST /api/admin/*` с `Authorization: Bearer <ADMIN_BACKEND_SHARED_TOKEN>` или `X-Admin-Api-Key`; успешный JSON gateway не нормализует, а возвращает как ответ владельца Kafka-команды.
+7. Если интеграция идёт из `microservice_admin`, использовать только `POST /api/admin/*` с `Authorization: Bearer <admin JWT>`; JWT должен быть выпущен Account Service для login-only пользователя с ролью `admin`. Успешный JSON gateway не нормализует, а возвращает как ответ владельца Kafka-команды.
 
 ---
 
@@ -109,7 +109,7 @@ Gateway сериализует JSON в `camelCase`.
 
 Для mobile API фактическая модель доступа сейчас такая:
 
-- `guest` = анонимный вызов без JWT. В `microservice_account` такой роли нет; gateway трактует guest как отсутствие токена.
+- `guest` = анонимный вызов без JWT. В `microservice_account` есть role-code `guest` для общей модели, но gateway трактует guest как отсутствие токена, а не как persisted user.
 - `user` = валидный Bearer JWT с пользовательскими claims.
 
 Из этого следует практическое правило: public/optional routes отдают общие рыночные данные гостю, а personal routes остаются только для `user`.
@@ -121,7 +121,7 @@ Gateway сериализует JSON в `camelCase`.
 | Method | все `/api/admin/*` endpoint-ы используют `POST`, даже когда операция логически read-only |
 | Request body | gateway принимает JSON body и проксирует его в Kafka payload без переформатирования; если payload не нужен, можно послать `{}` |
 | Success payload | `200 OK` возвращает JSON downstream-владельца как есть, без envelope/wrapper от gateway |
-| Auth | `Authorization: Bearer <shared-token>` или `X-Admin-Api-Key` |
+| Auth | `Authorization: Bearer <admin JWT>` |
 | Gateway-managed failures | `401`, `503`, `504` нормализуются в `ErrorResponse` |
 | Browser CORS | intentionally disabled |
 
@@ -174,14 +174,14 @@ Frontend должен различать эти сценарии.
 ### Admin facade-specific errors
 
 `/api/admin/*` — это split-deployment facade для `microservice_admin`.
-Эти endpoint-ы требуют shared secret из backend `ADMIN_SHARED_TOKEN`, который
-admin-host отправляет как `Authorization: Bearer <token>` или
-`X-Admin-Api-Key`.
+Эти endpoint-ы требуют JWT от Account Service с ролью `admin`. Admin UI получает
+его через login-only admin account и пересылает в gateway как Bearer token;
+UID в теле запроса не используется как источник прав.
 
 | HTTP | `code` | Когда возникает |
 | ---- | ------ | --------------- |
-| `401` | `admin_token_missing` | Запрос пришёл без Bearer token и без `X-Admin-Api-Key` |
-| `401` | `admin_token_invalid` | Токен передан, но не совпадает с backend `ADMIN_SHARED_TOKEN` |
+| `401` | `null` | Запрос пришёл без валидного Bearer JWT |
+| `403` | `null` | JWT валиден, но у пользователя нет роли `admin` |
 | `503` | `admin_kafka_unavailable` | Gateway не смог отправить Kafka request: broker/connectivity/bootstrap path недоступен |
 | `504` | `admin_kafka_timeout` | Gateway не смог завершить Kafka request/reply в timeout окна route: либо reply inbox ещё не ready, либо downstream reply не пришёл вовремя |
 
@@ -195,14 +195,14 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 когда backend успевал принять HTTP admin facade call, но reply inbox ещё не
 существовал или не был назначен consumer-у.
 
-Пример mismatch:
+Пример отсутствующей admin-сессии:
 
 ```json
 {
   "status": 401,
-  "title": "Admin Facade Unauthorized",
-  "code": "admin_token_invalid",
-  "detail": "Admin shared token was rejected by backend. ADMIN_BACKEND_SHARED_TOKEN must match ADMIN_SHARED_TOKEN on backend-host.",
+  "title": "Unauthorized",
+  "code": null,
+  "detail": "Authentication is required.",
   "correlationId": "9ab711df23904364841b3269dc8f2c2a",
   "timestamp": "2026-05-19T04:20:00Z"
 }
@@ -227,10 +227,10 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 | GET | `/api/v1/market/chart` | None | свечной график |
 | GET | `/api/news` | None | лента новостей |
 | GET | `/api/notifications` | Required | уведомления пользователя |
-| POST | `/api/admin/health/*` | Shared token | backend facade для health-check команд admin |
-| POST | `/api/admin/dataset/*` | Shared token | backend facade для dataset/data-service команд |
-| POST | `/api/admin/analytic/*` | Shared token | backend facade для analytic dataset/anomaly команд |
-| POST | `/api/admin/analytics/*` | Shared token | backend facade для ML train/model/predict команд |
+| POST | `/api/admin/health/*` | Admin JWT | backend facade для health-check команд admin |
+| POST | `/api/admin/dataset/*` | Admin JWT | backend facade для dataset/data-service команд |
+| POST | `/api/admin/analytic/*` | Admin JWT | backend facade для analytic dataset/anomaly команд |
+| POST | `/api/admin/analytics/*` | Admin JWT | backend facade для ML train/model/predict команд |
 
 ---
 
@@ -356,26 +356,22 @@ GET /health/ready
 
 `/api/admin/*` — это HTTP facade для `microservice_admin` и других ops-интеграций, которым нельзя или не нужно работать с Kafka напрямую.
 
-Gateway остаётся единственной HTTP→Kafka точкой входа: он проверяет shared token, проставляет correlation id, публикует Kafka request/reply и возвращает downstream JSON как обычный HTTP-ответ.
+Gateway остаётся единственной HTTP→Kafka точкой входа: он проверяет JWT и роль `admin`, проставляет correlation id, публикует Kafka request/reply и возвращает downstream JSON как обычный HTTP-ответ.
 
 ### Admin facade: auth and transport rules
 
 ```http
 POST /api/admin/<route>
-Authorization: Bearer <ADMIN_BACKEND_SHARED_TOKEN>
+Authorization: Bearer <admin JWT>
 Content-Type: application/json
 ```
 
-Допустимый альтернативный заголовок:
-
-```http
-X-Admin-Api-Key: <ADMIN_BACKEND_SHARED_TOKEN>
-```
+Authorization должен содержать admin JWT, полученный через Account Service login.
 
 Правила:
 
 - success-ответ всегда `200 OK` с JSON downstream-владельца, без дополнительного envelope от gateway;
-- большинство route-ов используют обычный backend timeout, а тяжёлые route-ы вроде export/ingest/import/anomaly/train/predict/load-ohlcv идут через удлинённый timeout, но для клиента контракт остаётся тем же: `200` / `401` / `503` / `504`;
+- большинство route-ов используют обычный backend timeout, а тяжёлые route-ы вроде export/ingest/import/anomaly/train/predict/load-ohlcv идут через удлинённый timeout, но для клиента контракт остаётся тем же: `200` / `401` / `403` / `503` / `504`;
 - если route не требует payload, безопасно отправлять `{}`;
 - correlation id так же возвращается в `X-Correlation-Id`.
 

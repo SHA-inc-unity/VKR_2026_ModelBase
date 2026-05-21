@@ -20,6 +20,7 @@ internal sealed class RoleConfiguration : IEntityTypeConfiguration<Role>
 
         // Seed data
         builder.HasData(
+            new { Id = 0, Code = Role.Codes.Guest, Name = "Guest" },
             new { Id = 1, Code = Role.Codes.User, Name = "User" },
             new { Id = 2, Code = Role.Codes.Admin, Name = "Administrator" }
         );

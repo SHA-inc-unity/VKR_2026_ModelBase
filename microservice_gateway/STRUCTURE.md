@@ -37,11 +37,10 @@
 | `Controllers/` | HTTP endpoints gateway; `DashboardController` работает в optional-auth режиме (guest получает public dashboard, user — personal sections), а `AdminController` помечен `DisableCors`, потому что `/api/admin/*` рассчитан на server-to-server admin facade, а не на browser JS |
 | `DTOs/` | Контракты ответов и ошибок; `ErrorResponse` включает optional `code` для машинно-читаемой диагностики |
 | `Extensions/` | Регистрация сервисов и инфраструктурных зависимостей; `ServiceCollectionExtensions` теперь поднимает browser CORS policy из `CorsSettings` (`AllowAnyOrigin` или explicit `AllowedOrigins`) и включает preflight cache TTL |
-| `Filters/` | Action filters; `AdminApiKeyFilter` — проверка shared-token для admin facade, различает `admin_token_missing` и `admin_token_invalid` |
 | `Kafka/` | Kafka settings, topics, `IKafkaRequestClient`, `IKafkaRequestClientProbe`, `KafkaBrokerHealthCheck`, `KafkaRequestReplyHealthCheck` и request client; `AdminTopics` — topic-константы admin facade. `KafkaRequestClient` bootstrap-ит per-instance reply-inbox `reply.gateway.{instanceId}` в background-loop и теперь помечает reply path ready только после реального consumer assignment. Если Kafka Admin create не подтверждается в startup budget, клиент делает fallback bootstrap publish в сам reply topic и продолжает retry-loop до тех пор, пока inbox не будет существовать и назначен consumer-у; это устраняет ложный symmetric `504` по Kafka-backed admin route-ам после старта gateway раньше Redpanda/controller. Дополнительно клиент ведёт `ReplyInboxStatus` — последний readiness state bootstrap/subscribe/assignment path. `KafkaBrokerHealthCheck` проверяет bootstrap listener, а `KafkaRequestReplyHealthCheck` — assignment reply inbox для `/health/ready` и compose healthcheck; `/health/ready` теперь возвращает JSON с per-check descriptions. Если inbox не ready, request fast-fail'ится по короткому readiness budget и возвращает structured `504` раньше client-side HTTP timeout. Runtime diagnostics логируют `KafkaRequest start/produced/success/timeout/failed` с topic, replyInbox, duration, correlationId и last readiness state без payload. |
 | `Market/` | Полный market API — см. ниже |
 | `Middleware/` | CorrelationId, exception handling и другие cross-cutting middleware |
-| `Settings/` | strongly-typed конфиги; `AdminSettings` — конфиг admin facade (SharedToken, таймауты), `CorsSettings` — browser-facing CORS policy (`AllowAnyOrigin`, `AllowedOrigins`, `PreflightMaxAgeSeconds`) |
+| `Settings/` | strongly-typed конфиги; `AdminSettings` — таймауты admin facade, `CorsSettings` — browser-facing CORS policy (`AllowAnyOrigin`, `AllowedOrigins`, `PreflightMaxAgeSeconds`) |
 | `Common/` | общие типы и вспомогательные abstractions |
 | `appsettings*.json` | конфигурация окружений |
 
@@ -70,8 +69,6 @@
 | `modelline-deploy.yml` | Root-level deployment config, который теперь указывает реальные compose service names для infra/gateway/data/analytic/account; gateway deployable unit = `gateway-service`, analytic = `api`, account = `account-api` |
 | `reconcile.ps1` | Windows reconcile script для root-level deploy конфигурации |
 | `reconcile.sh` | Linux/macOS reconcile script для root-level deploy конфигурации; parser исправлен, чтобы multi-service YAML не падал на втором entry под `set -e` |
-| `print_token.sh` | Shell helper: без аргументов печатает backend token `ADMIN_SHARED_TOKEN` из `microservice_gateway/.env` |
-| `set_token.sh` | Shell helper: принимает ровно один позиционный аргумент `./set_token.sh <big-token>` и пишет его в `microservice_admin/.env` как `ADMIN_BACKEND_SHARED_TOKEN` |
 | `status.ps1` | статус контейнеров по root-level deploy конфигурации |
 
 ---

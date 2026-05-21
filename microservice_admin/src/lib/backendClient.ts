@@ -5,7 +5,8 @@
  *
  * When ADMIN_BACKEND_BASE_URL is set, every kafkaCall() is routed through
  * this client to the gateway's /api/admin/* endpoints instead of Kafka
- * directly.  The shared secret is sent in Authorization: Bearer <token>.
+ * directly. The logged-in admin user's Account Service JWT is forwarded in
+ * Authorization: Bearer <token>.
  *
  * Topic → HTTP path mapping mirrors AdminController.cs routes exactly.
  */
@@ -19,9 +20,6 @@ import { writeAdminRuntimeLog } from './adminRuntimeLog';
 /** Backend base URL, e.g. https://backend-host:8443  (no trailing slash) */
 export const ADMIN_BACKEND_BASE_URL =
   (process.env.ADMIN_BACKEND_BASE_URL ?? '').replace(/\/$/, '');
-
-export const ADMIN_BACKEND_SHARED_TOKEN =
-  process.env.ADMIN_BACKEND_SHARED_TOKEN ?? '';
 
 export const ADMIN_BACKEND_TLS_INSECURE =
   /^(1|true|yes|on)$/i.test(process.env.ADMIN_BACKEND_TLS_INSECURE ?? '');
@@ -165,13 +163,7 @@ function summarizeBackendError(
   const correlation = effectiveCorrelationId ? ` correlationId=${effectiveCorrelationId}` : '';
 
   if (status === 401) {
-    if (code === 'admin_token_missing') {
-      return `Admin facade rejected ${path}: ADMIN_BACKEND_SHARED_TOKEN is missing on admin-host.${correlation}`;
-    }
-    if (code === 'admin_token_invalid') {
-      return `Admin facade rejected ${path}: ADMIN_BACKEND_SHARED_TOKEN does not match backend ADMIN_SHARED_TOKEN.${correlation}`;
-    }
-    return `Admin facade rejected ${path}: unauthorized.${detail ? ` ${detail}` : ''}${correlation}`;
+    return `Admin facade rejected ${path}: admin session is missing, expired, or not an admin account.${detail ? ` ${detail}` : ''}${correlation}`;
   }
 
   if (status === 502) {
@@ -194,7 +186,7 @@ function summarizeBackendError(
 export async function backendCall(
   topic: string,
   payload: Record<string, unknown> | null = null,
-  options?: { timeoutMs?: number; signal?: AbortSignal },
+  options?: { timeoutMs?: number; signal?: AbortSignal; accessToken?: string },
 ): Promise<Record<string, unknown>> {
   const path = TOPIC_PATH[topic];
   if (!path) {
@@ -214,7 +206,7 @@ export async function backendCall(
     baseUrl: ADMIN_BACKEND_BASE_URL || '(empty)',
     timeoutMs: options?.timeoutMs ?? 30_000,
     tlsInsecure: ADMIN_BACKEND_TLS_INSECURE,
-    tokenConfigured: ADMIN_BACKEND_SHARED_TOKEN.length > 0,
+    adminSessionConfigured: Boolean(options?.accessToken),
     correlationId,
     payloadKeys: payload ? Object.keys(payload) : [],
   });
@@ -228,14 +220,14 @@ export async function backendCall(
       baseUrl: ADMIN_BACKEND_BASE_URL || '(empty)',
       timeoutMs: options?.timeoutMs ?? 30_000,
       tlsInsecure: ADMIN_BACKEND_TLS_INSECURE,
-      tokenConfigured: ADMIN_BACKEND_SHARED_TOKEN.length > 0,
+      adminSessionConfigured: Boolean(options?.accessToken),
       correlationId,
       payloadKeys: payload ? Object.keys(payload) : [],
     },
   });
 
-  if (!ADMIN_BACKEND_SHARED_TOKEN) {
-    console.warn('[admin-backend] request:missing-token', {
+  if (!options?.accessToken) {
+    console.warn('[admin-backend] request:missing-admin-session', {
       topic,
       path,
       correlationId,
@@ -243,13 +235,13 @@ export async function backendCall(
     writeAdminRuntimeLog({
       level: 'error',
       source: 'admin-backend',
-      event: 'request:missing-token',
+      event: 'request:missing-admin-session',
       fields: { topic, path, correlationId },
     });
     throw new BackendClientError(
       401,
-      `ADMIN_BACKEND_SHARED_TOKEN is empty on admin-host; paste the backend ADMIN_SHARED_TOKEN into microservice_admin/.env and restart admin-online. correlationId=${correlationId}`,
-      'admin_backend_token_missing',
+      `Admin session is missing on admin-host; sign in with an admin account. correlationId=${correlationId}`,
+      'admin_session_required',
       undefined,
       correlationId,
     );
@@ -259,7 +251,7 @@ export async function backendCall(
     'Content-Type': 'application/json',
     'X-Correlation-Id': correlationId,
   };
-  headers['Authorization'] = `Bearer ${ADMIN_BACKEND_SHARED_TOKEN}`;
+  headers['Authorization'] = `Bearer ${options.accessToken}`;
 
   const timeoutMs = options?.timeoutMs ?? 30_000;
   const localAbort = AbortSignal.timeout(timeoutMs);

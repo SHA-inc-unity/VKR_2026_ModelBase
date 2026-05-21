@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readStoredValue, writeStoredValue } from '@/lib/sqliteStore';
+import { requireAdminSession } from '@/lib/adminSession';
 
 export async function GET(req: NextRequest) {
+  const session = await requireAdminSession(req);
+  if (!session.ok) return session.response;
+
   const key = req.nextUrl.searchParams.get('key');
   if (!key) {
     return NextResponse.json({ error: 'Missing key' }, { status: 400 });
@@ -11,6 +15,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const session = await requireAdminSession(req);
+  if (!session.ok) return session.response;
+
   let body: unknown;
   try {
     body = await req.json();

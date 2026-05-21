@@ -28,7 +28,7 @@ per-check status/description, поэтому обычный `curl` по backend-
 показывает, это broker bootstrap или reply inbox readiness.
 Для live-диагностики gateway пишет связку логов `AdminFacade request ...`
 и `KafkaRequest ...` с `topic`, HTTP path, `replyInbox`, duration,
-timeout и `correlationId`; payload и shared token не логируются. Для
+timeout и `correlationId`; payload и bearer token не логируются. Для
 reply-inbox path дополнительно сохраняется последний readiness state
 (`ReplyInboxStatus`), который попадает и в `/health/ready`, и в detail
 structured `504`, если request fast-fail'ится до отправки в Kafka.
@@ -151,10 +151,9 @@ The gateway **never returns 500 for downstream failures**. Instead:
 | Variable | Required | Default | Description |
 | -------- | -------- | ------- | ----------- |
 | `JWT_SECRET_KEY` | Yes | — | Shared HMAC secret (≥32 chars, same as Account Service) |
-| `JWT_ISSUER` | No | `exchange-app` | JWT issuer claim |
-| `JWT_AUDIENCE` | No | `exchange-app-mobile` | JWT audience claim |
+| `JWT_ISSUER` | No | `account-service` | JWT issuer claim; must match Account Service |
+| `JWT_AUDIENCE` | No | `exchange-app` | JWT audience claim; must match Account Service |
 | `KAFKA_BOOTSTRAP_SERVERS` | No | `redpanda:29092` | Kafka bootstrap (Redpanda) |
-| `ADMIN_SHARED_TOKEN` | Split deployment | — | Shared secret for `/api/admin/*`; admin-host must send the same value as `ADMIN_BACKEND_SHARED_TOKEN` via `Authorization: Bearer`. Mismatch returns `401` with `code=admin_token_invalid`. |
 | `Cors__AllowAnyOrigin` | No | `true` | Browser-facing CORS mode for gateway routes except `/api/admin/*`. `true` enables `AllowAnyOrigin`; set to `false` to use explicit origins from `Cors__AllowedOrigins__*`. |
 | `Cors__AllowedOrigins__0` ... | No | — | Explicit allowed origins when `Cors__AllowAnyOrigin=false`, e.g. `https://sha-trade.tech`, `https://www.sha-trade.tech`. |
 | `Cors__PreflightMaxAgeSeconds` | No | `600` | Browser preflight cache TTL for gateway CORS responses. |
@@ -224,8 +223,6 @@ Root-level scripts in [../deploy/](../deploy/) automate gateway deployment and r
 | `../deploy/modelline-deploy.yml` | deployment config for image rollout / reconciliation; targets real compose services (`infra: redpanda/redpanda-console/minio/nginx/redpanda-janitor`, `gateway: gateway-service`, `data: data`, `analytic: api`, `account: account-api`) so backend-host reconcile can actually roll out gateway/nginx fixes |
 | `../deploy/reconcile.ps1` | Windows reconcile script |
 | `../deploy/reconcile.sh` | Linux/macOS reconcile script; parser fixed to handle multi-service `modelline-deploy.yml` under `set -e` without aborting on the second entry |
-| `../deploy/print_token.sh` | prints the current backend `ADMIN_SHARED_TOKEN` from `microservice_gateway/.env` |
-| `../deploy/set_token.sh` | writes `ADMIN_BACKEND_SHARED_TOKEN` to `microservice_admin/.env` from one positional argument: `./set_token.sh <big-token>` |
 | `../deploy/status.ps1` | runtime status helper |
 
 ---
