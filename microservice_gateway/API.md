@@ -190,6 +190,11 @@ admin-host отправляет как `Authorization: Bearer <token>` или
 - `503 admin_kafka_unavailable` означает transport failure до успешного publish в Kafka;
 - `504 admin_kafka_timeout` означает, что publish path прошёл, но владелец команды не вернул ответ вовремя.
 
+Для split admin path gateway теперь считает reply path ready только после
+реального assignment reply-inbox consumer-а. Это убирает ложный startup-state,
+когда backend успевал принять HTTP admin facade call, но reply inbox ещё не
+существовал или не был назначен consumer-у.
+
 Пример mismatch:
 
 ```json
@@ -267,6 +272,11 @@ Readiness-проверка gateway request/reply path.
 В отличие от `/health`, этот endpoint дополнительно проверяет, что bootstrap
 listener Kafka/Redpanda доступен по `Kafka:BootstrapServers` и gateway может
 делать metadata lookup к broker.
+
+Практически это означает: `7520/health/ready = 200` нужен раньше, чем можно
+считать Kafka-backed `/api/admin/*` routes рабочими. Backend `:8443/health/ready`
+должен просто проксировать этот endpoint; если facade на `8443` отдаёт `404`,
+это признак stale infra nginx deploy, а не проблемы admin-host edge.
 
 ### /health/ready: request
 

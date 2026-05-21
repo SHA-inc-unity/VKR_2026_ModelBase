@@ -4,6 +4,10 @@
 
 ## 2026-05
 
+### 2026-05-21
+
+- `microservice_gateway/src/GatewayService.API/Kafka/KafkaRequestClient.cs`, `microservice_gateway/README.md`, `microservice_gateway/API.md`, `microservice_gateway/STRUCTURE.md`: устранён backend-side split-admin race в gateway request/reply path. Reply inbox `reply.gateway.{instanceId}` больше не считается ready сразу после `Subscribe`: gateway ждёт реальный consumer assignment, а если Kafka Admin create не подтвердил topic в startup budget, дополнительно bootstrap-ит его через producer publish в сам reply topic и повторяет recovery loop. Это убирает состояние, когда `/api/admin/health/data`, `/api/admin/health/analytics` и `dataset/list-tables` симметрично уходили в `504 admin_kafka_timeout` после старта gateway раньше fully-ready Redpanda/controller.
+
 ### 2026-05-19
 
 - `microservice_gateway/src/GatewayService.API/Controllers/DashboardController.cs`, `src/GatewayService.API/Aggregators/Dashboard/{IDashboardAggregator.cs,DashboardAggregator.cs}`, `tests/GatewayService.UnitTests/DashboardAggregatorTests.cs`, `tests/GatewayService.IntegrationTests/GatewayIntegrationTests.cs`, `microservice_gateway/README.md`, `microservice_gateway/API.md`, `microservice_gateway/STRUCTURE.md`: mobile guest-access model выровнен под фактическое требование Flutter API. `GET /api/dashboard` больше не требует регистрацию/JWT и работает как optional-auth endpoint: guest получает public market/news dashboard, а `portfolio` секция вообще не собирается и не маркируется degraded. Personal routes `GET /api/account/me` и `GET /api/notifications` остались protected. Заодно документация теперь явно фиксирует, что `guest` в mobile API — это anonymous gateway caller, а не persisted role в `microservice_account`.

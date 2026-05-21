@@ -10,6 +10,10 @@
 
 ## Текущий контекст
 
+### 2026-05-21
+
+- `microservice_gateway/src/GatewayService.API/Kafka/KafkaRequestClient.cs`, `microservice_gateway/README.md`, `microservice_gateway/API.md`, `microservice_gateway/STRUCTURE.md`: исправлен backend-side split admin incident в gateway request/reply bootstrap. Reply inbox `reply.gateway.{instanceId}` больше не считается ready до фактического consumer assignment; если Kafka Admin create не подтвердил topic в startup budget, gateway теперь bootstrap-ит topic через producer publish в сам reply inbox и продолжает retry-loop до готовности. Это адресует live-сценарий, где прямой `7520/api/admin/*` симметрично зависал на `504`, хотя HTTP процесс был жив.
+
 ### 2026-05-19
 
 - `microservice_gateway/src/GatewayService.API/Controllers/DashboardController.cs`, `Aggregators/Dashboard/{IDashboardAggregator.cs,DashboardAggregator.cs}`, `tests/GatewayService.UnitTests/DashboardAggregatorTests.cs`, `tests/GatewayService.IntegrationTests/GatewayIntegrationTests.cs`: guest-доступ для Flutter API выровнен с требованием продукта. `GET /api/dashboard` переведён в optional-auth: без JWT backend больше не режет главный экран `401`, а отдаёт guest payload с public sections. При этом `portfolio` вообще не запрашивается и не попадает в `degradedSections`, а personal endpoints `account/me` и `notifications` остались под JWT. Зафиксировано, что `guest` в этом API — это anonymous gateway caller, а не отдельная роль в account БД.

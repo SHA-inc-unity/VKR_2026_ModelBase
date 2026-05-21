@@ -8,12 +8,15 @@ Downstream IPC is **Kafka-only** (Redpanda broker). The former HTTP client to
 `microservice_account` was replaced with `KafkaRequestClient` (async
 request/reply on a per-instance `reply.gateway.{instanceId}` inbox).
 Gateway bootstrap-ит этот reply-inbox topic через Kafka Admin API в
-background-loop и подписывается на него сразу после готовности. Если Kafka
-временно недоступна или controller/leader ещё не поднялся, процесс gateway
-не падает и `/health` остаётся доступен. Если Kafka Admin create не успел
-подтвердить topic в пределах startup budget, gateway всё равно продолжает с
-best-effort subscribe на reply inbox вместо бесконечной блокировки всех
-Kafka-facing запросов состоянием `reply inbox not ready`.
+background-loop и считает Kafka request/reply path ready только после
+реального consumer assignment на этот inbox. Если Kafka временно недоступна
+или controller/leader ещё не поднялся, процесс gateway не падает и `/health`
+остаётся доступен. Если Kafka Admin create не успел подтвердить topic в
+пределах startup budget, gateway дополнительно bootstrap-ит reply inbox через
+producer publish в сам `reply.gateway.{instanceId}` и продолжает retry-loop,
+пока topic/assignment не поднимутся. Это убирает ложное состояние
+`reply inbox ready`, при котором admin facade успевал отправить request, но
+симметрично зависал на timeout по всем Kafka-backed admin route-ам.
 Readiness для Kafka вынесена в отдельный `GET /health/ready`: он делает
 metadata lookup по `Kafka:BootstrapServers` и возвращает `503`, если broker
 недоступен. Docker healthcheck gateway и admin split/local health probe теперь
