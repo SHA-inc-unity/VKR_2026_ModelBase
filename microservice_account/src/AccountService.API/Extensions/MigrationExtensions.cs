@@ -7,6 +7,10 @@ namespace AccountService.API.Extensions;
 
 public static class MigrationExtensions
 {
+    private const string DefaultAdminEmail = "admin@modelline.local";
+    private const string DefaultAdminUsername = "admin";
+    private const string DefaultAdminPassword = "admin";
+
     public static async Task MigrateAndSeedAsync(this WebApplication app)
     {
         using var scope = app.Services.CreateScope();
@@ -34,20 +38,36 @@ public static class MigrationExtensions
         IPasswordService passwordService,
         ILogger logger)
     {
-        var email = configuration["AdminBootstrap:Email"]?.Trim();
-        var username = configuration["AdminBootstrap:Username"]?.Trim();
-        var password = configuration["AdminBootstrap:Password"];
+        var configuredEmail = configuration["AdminBootstrap:Email"]?.Trim();
+        var configuredUsername = configuration["AdminBootstrap:Username"]?.Trim();
+        var configuredPassword = configuration["AdminBootstrap:Password"];
+        var useDefaultBootstrap = string.IsNullOrWhiteSpace(configuredEmail)
+            && string.IsNullOrWhiteSpace(configuredUsername)
+            && string.IsNullOrWhiteSpace(configuredPassword);
 
-        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+        if (!useDefaultBootstrap &&
+            (string.IsNullOrWhiteSpace(configuredEmail) || string.IsNullOrWhiteSpace(configuredUsername) || string.IsNullOrWhiteSpace(configuredPassword)))
         {
-            logger.LogInformation("Admin bootstrap account is not configured; skipping admin user seed");
+            logger.LogInformation("Admin bootstrap account is partially configured; skipping admin user seed");
             return;
         }
 
+        var email = useDefaultBootstrap ? DefaultAdminEmail : configuredEmail!;
+        var username = useDefaultBootstrap ? DefaultAdminUsername : configuredUsername!;
+        var password = useDefaultBootstrap ? DefaultAdminPassword : configuredPassword!;
+
         var strengthError = passwordService.ValidateStrength(password);
-        if (strengthError is not null)
+        if (strengthError is not null && !useDefaultBootstrap)
         {
             throw new InvalidOperationException($"Admin bootstrap password is too weak: {strengthError}");
+        }
+
+        if (strengthError is not null && useDefaultBootstrap)
+        {
+            logger.LogWarning(
+                "Using default bootstrap admin credentials {Username}/{Password}. Override AdminBootstrap:* in production.",
+                username,
+                password);
         }
 
         var adminRole = await db.Roles.AsNoTracking().FirstOrDefaultAsync(r => r.Code == Role.Codes.Admin)

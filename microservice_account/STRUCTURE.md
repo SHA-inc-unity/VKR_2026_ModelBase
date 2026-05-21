@@ -38,7 +38,7 @@
 
 Слой use-case и прикладных сервисов.
 
-- `Services/` — account flow, password hashing, JWT/token management; `AccountAppService` возвращает UID/accountType/roles в auth response и публично регистрирует только роль `user`
+- `Services/` — account flow, password hashing, JWT/token management; `AccountAppService` возвращает UID/accountType/roles в auth response, публично регистрирует только роль `user` и принимает login по email или username
 - `Interfaces/` — контракты репозиториев, сервисов и кеша
 - `DTOs/` — request/response модели
 - `Validators/` — FluentValidation-валидаторы
@@ -59,7 +59,7 @@ HTTP и Kafka-входные точки.
 
 - `Program.cs` — bootstrap, DI, middleware pipeline
 - `Controllers/` — public и internal HTTP endpoints
-- `Extensions/` — регистрация сервисов и миграций; startup migration flow может создать/promote login-only admin account через `AdminBootstrap:*`
+- `Extensions/` — регистрация сервисов и миграций; startup migration flow может создать/promote login-only admin account через `AdminBootstrap:*`, а при полностью пустом bootstrap-конфиге поднимает дефолтного admin-пользователя `admin/admin`
 - `Kafka/` — Kafka request/reply интеграция сервиса
 - `Middleware/` — global exception handling и cross-cutting concerns
 - `appsettings*.json` — конфигурация окружений

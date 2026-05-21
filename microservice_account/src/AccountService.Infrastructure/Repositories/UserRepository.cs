@@ -23,6 +23,16 @@ public sealed class UserRepository : IUserRepository
             .AsNoTracking()
             .FirstOrDefaultAsync(u => u.Email == email.ToLowerInvariant(), ct);
 
+    public Task<User?> GetByEmailOrUsernameAsync(string login, CancellationToken ct = default)
+    {
+        var normalizedLogin = login.Trim();
+        var normalizedEmail = normalizedLogin.ToLowerInvariant();
+
+        return _db.Users
+            .AsNoTracking()
+            .FirstOrDefaultAsync(u => u.Email == normalizedEmail || u.Username == normalizedLogin, ct);
+    }
+
     public Task<User?> GetByIdWithRolesAsync(Guid id, CancellationToken ct = default) =>
         _db.Users
             .AsNoTracking()

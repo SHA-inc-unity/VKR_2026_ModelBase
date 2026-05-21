@@ -77,11 +77,11 @@ export function tokenLooksLikeAdmin(accessToken: string): boolean {
   return extractRoles(payload).includes(ADMIN_ROLE);
 }
 
-export async function loginAdmin(email: string, password: string): Promise<AuthResponse> {
+export async function loginAdmin(login: string, password: string): Promise<AuthResponse> {
   const res = await fetch(`${ACCOUNT_URL}/api/account/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email: login, password }),
     signal: AbortSignal.timeout(10_000),
   });
 

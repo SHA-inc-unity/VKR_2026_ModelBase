@@ -6,7 +6,7 @@ Inter-service IPC is **Kafka-only** (Redpanda broker). The service exposes HTTP
 only for end-user traffic (login/register/refresh) and the `/health` liveness
 endpoint — other ModelLine services talk to it via `cmd.account.*` topics.
 
-Identity tiers are explicit role codes: `guest`, `user`, `admin`. Public registration always creates a `user`; `admin` is login-only for the admin console and is created/promoted by operator bootstrap configuration, not by public signup. Login/register/refresh responses include the public UID plus `accountType` and `roles` so clients can label the session without treating UID as authorization proof.
+Identity tiers are explicit role codes: `guest`, `user`, `admin`. Public registration always creates a `user`; `admin` is login-only for the admin console and is created/promoted by bootstrap configuration, not by public signup. If `ADMIN_BOOTSTRAP_*` is not set at all, startup seeds a default admin account with username/password `admin/admin` and email `admin@modelline.local`; override these variables in production. Login/register/refresh responses include the public UID plus `accountType` and `roles` so clients can label the session without treating UID as authorization proof.
 
 ---
 
@@ -62,7 +62,7 @@ microservice_account/
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | POST | `/api/account/register` | Register new user |
-| POST | `/api/account/login` | Login, receive tokens |
+| POST | `/api/account/login` | Login by email or username, receive tokens |
 | POST | `/api/account/refresh` | Refresh access token |
 | POST | `/api/account/logout` | Revoke refresh token |
 
@@ -133,7 +133,7 @@ cp .env.example .env
 # Optional: set ADMIN_BOOTSTRAP_EMAIL, ADMIN_BOOTSTRAP_USERNAME, ADMIN_BOOTSTRAP_PASSWORD
 ```
 
-`ADMIN_BOOTSTRAP_*` creates or promotes a login-only admin account during startup migrations. Password strength is validated by the same password policy as public registration. Leave these variables empty when no bootstrap admin should be changed.
+`ADMIN_BOOTSTRAP_*` creates or promotes a login-only admin account during startup migrations. If all three variables are empty, Account Service seeds the first admin as `admin/admin` with email `admin@modelline.local`. Custom bootstrap passwords still use the normal password policy; the default `admin/admin` fallback exists only for first-run bootstrap and should be overridden outside local/dev environments.
 
 ### 3. Run with Docker Compose
 

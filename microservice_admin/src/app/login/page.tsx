@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 
 export default function LoginPage() {
-  const [email, setEmail] = useState('');
+  const [login, setLogin] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -21,7 +21,7 @@ export default function LoginPage() {
       const res = await fetch(`${base}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ login, password }),
       });
       const body = await res.json().catch(() => ({} as { error?: string }));
       if (!res.ok) throw new Error(body.error || 'Login failed');
@@ -42,18 +42,18 @@ export default function LoginPage() {
           </div>
           <div>
             <CardTitle className="text-xl">Admin Sign In</CardTitle>
-            <CardDescription>Use a seeded admin account.</CardDescription>
+            <CardDescription>Default bootstrap credentials: admin / admin.</CardDescription>
           </div>
         </CardHeader>
         <CardContent>
           <form className="space-y-4" onSubmit={submit}>
             <label className="block space-y-2 text-sm font-medium">
-              <span>Email</span>
+              <span>Login</span>
               <Input
-                autoComplete="email"
-                type="email"
-                value={email}
-                onChange={event => setEmail(event.target.value)}
+                autoComplete="username"
+                type="text"
+                value={login}
+                onChange={event => setLogin(event.target.value)}
                 required
               />
             </label>

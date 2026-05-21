@@ -80,7 +80,7 @@ public sealed class AccountAppService : IAccountService
         string? userAgent = null,
         CancellationToken ct = default)
     {
-        var user = await _userRepo.GetByEmailAsync(request.Email, ct);
+        var user = await _userRepo.GetByEmailOrUsernameAsync(request.Email, ct);
 
         if (user is null || !_passwordService.Verify(request.Password, user.PasswordHash))
         {

@@ -6,6 +6,7 @@
 
 ### 2026-05-22
 
+- `microservice_account/src/AccountService.API/Extensions/MigrationExtensions.cs`, `src/AccountService.Application/{DTOs/Requests/LoginRequest.cs,Validators/LoginRequestValidator.cs,Services/AccountAppService.cs,Interfaces/Repositories/IUserRepository.cs}`, `src/AccountService.Infrastructure/Repositories/UserRepository.cs`, `microservice_account/{.env.example,README.md,STRUCTURE.md}`, `microservice_admin/{README.md,STRUCTURE.md}`: первый bootstrap users table теперь поднимает дефолтного admin-пользователя `admin/admin`, если `AdminBootstrap:*` полностью пуст. Account login больше не email-only: endpoint принимает email или username, поэтому admin-панель может входить по логину `admin` без отдельного email. Кастомный bootstrap через env по-прежнему поддерживается и должен переопределять дефолтные credentials в production.
 - `microservice_admin/src/middleware.ts`, `microservice_admin/{README.md,STRUCTURE.md}`, `docs/agents/services/microservice_admin.md`: admin login cache доведён до полноценной session persistence. Middleware теперь не только прячет панель за `/login`, но и восстанавливает admin access token через `POST /api/account/refresh`, если в httpOnly cookie ещё жив refresh token. Защищённые pages/API получают уже обновлённый `cookie` header, а `/login` редиректится назад в панель, если cached admin-session ещё можно восстановить.
 
 ### 2026-05-21

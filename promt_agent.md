@@ -12,6 +12,7 @@
 
 ### 2026-05-22
 
+- `microservice_account/src/AccountService.API/Extensions/MigrationExtensions.cs`, `src/AccountService.Application/*`, `microservice_account/{.env.example,README.md,STRUCTURE.md}`, `microservice_admin/{README.md,STRUCTURE.md}`: добавлен first-run bootstrap admin `admin/admin` для пустой users table без явного `AdminBootstrap:*`. Login в account-service стал email-or-username, поэтому admin-панель теперь может входить по логину `admin`; custom bootstrap env по-прежнему имеет приоритет. `dotnet build AccountService.sln` и `npm run build` в admin проходят.
 - `microservice_admin/src/middleware.ts`, `microservice_admin/{README.md,STRUCTURE.md}`, `docs/agents/services/microservice_admin.md`: доделан admin login cache. Middleware теперь умеет silently refresh-ить access token через Account Service по refresh cookie до рендера защищённых pages/API и редиректит `/login` обратно в панель, если cached admin-session ещё восстановима. `npm run build` в `microservice_admin` снова проходит.
 
 ### 2026-05-21

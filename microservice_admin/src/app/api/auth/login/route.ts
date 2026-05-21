@@ -11,13 +11,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const { email, password } = body as { email?: unknown; password?: unknown };
-  if (typeof email !== 'string' || typeof password !== 'string') {
-    return NextResponse.json({ error: 'Email and password are required' }, { status: 400 });
+  const { login, email, password } = body as { login?: unknown; email?: unknown; password?: unknown };
+  const effectiveLogin = typeof login === 'string' ? login : email;
+  if (typeof effectiveLogin !== 'string' || typeof password !== 'string') {
+    return NextResponse.json({ error: 'Login and password are required' }, { status: 400 });
   }
 
   try {
-    const auth = await loginAdmin(email, password);
+    const auth = await loginAdmin(effectiveLogin, password);
     const response = NextResponse.json({
       ok: true,
       uid: auth.uid ?? auth.user?.id,

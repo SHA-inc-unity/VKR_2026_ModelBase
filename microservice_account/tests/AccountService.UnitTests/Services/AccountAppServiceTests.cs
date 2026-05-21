@@ -89,10 +89,26 @@ public sealed class AccountAppServiceTests
     }
 
     [Fact]
+    public async Task LoginAsync_UsernameLogin_ReturnsAuthResponse()
+    {
+        var user = User.Create("admin@modelline.local", "admin", "hashed");
+        _userRepo.Setup(r => r.GetByEmailOrUsernameAsync("admin", default)).ReturnsAsync(user);
+        _passwordService.Setup(p => p.Verify("admin", "hashed")).Returns(true);
+        _roleRepo.Setup(r => r.GetUserRoleCodesAsync(user.Id, default)).ReturnsAsync(["admin"]);
+
+        var result = await _sut.LoginAsync(new LoginRequest("admin", "admin"));
+
+        result.AccessToken.Should().Be("access-token");
+        result.RefreshToken.Should().Be("raw-token");
+        result.User.Username.Should().Be("admin");
+        result.Roles.Should().Contain("admin");
+    }
+
+    [Fact]
     public async Task LoginAsync_WrongPassword_ThrowsInvalidCredentialsException()
     {
         var user = User.Create("test@test.com", "testuser", "hashed");
-        _userRepo.Setup(r => r.GetByEmailAsync("test@test.com", default)).ReturnsAsync(user);
+        _userRepo.Setup(r => r.GetByEmailOrUsernameAsync("test@test.com", default)).ReturnsAsync(user);
         _passwordService.Setup(p => p.Verify("wrongpass", "hashed")).Returns(false);
 
         var request = new LoginRequest("test@test.com", "wrongpass");
@@ -104,7 +120,7 @@ public sealed class AccountAppServiceTests
     [Fact]
     public async Task LoginAsync_UserNotFound_ThrowsInvalidCredentialsException()
     {
-        _userRepo.Setup(r => r.GetByEmailAsync(It.IsAny<string>(), default)).ReturnsAsync((User?)null);
+        _userRepo.Setup(r => r.GetByEmailOrUsernameAsync(It.IsAny<string>(), default)).ReturnsAsync((User?)null);
 
         var request = new LoginRequest("nouser@test.com", "pass");
         var act = async () => await _sut.LoginAsync(request);
