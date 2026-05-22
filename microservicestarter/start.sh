@@ -443,6 +443,49 @@ ensure_admin_online_public_env_defaults() {
     [[ -n "$(get_env_value "$env_file" "ADMIN_TLS_KEY_PATH")" ]] || set_env_value "$env_file" "ADMIN_TLS_KEY_PATH" "/etc/letsencrypt/live/sha-trade.tech/privkey.pem"
 }
 
+sync_admin_online_direct_runtime_env() {
+    local env_file="$1"
+    local backend_host="$2"
+
+    set_env_value "$env_file" "KAFKA_BOOTSTRAP_SERVERS" "$backend_host:9092"
+    set_env_value "$env_file" "REDPANDA_ADMIN_URL" "$backend_host:9644"
+    set_env_value "$env_file" "ACCOUNT_URL" "$backend_host:7510"
+    set_env_value "$env_file" "GATEWAY_URL" "$backend_host:7520"
+    set_env_value "$env_file" "MINIO_URL" "$backend_host:9000"
+    set_env_value "$env_file" "BACKEND_CONNECTION_TARGET" "$backend_host"
+}
+
+print_admin_online_env_summary() {
+    local env_file="$1"
+    local summary_keys=(
+        ONLINE_BACKEND_HOST
+        ONLINE_KAFKA_BOOTSTRAP_SERVERS
+        ONLINE_REDPANDA_ADMIN_URL
+        ONLINE_ACCOUNT_URL
+        ONLINE_GATEWAY_URL
+        ONLINE_MINIO_URL
+        ACCOUNT_URL
+        GATEWAY_URL
+        REDPANDA_ADMIN_URL
+        MINIO_URL
+        KAFKA_BOOTSTRAP_SERVERS
+        BACKEND_CONNECTION_TARGET
+        ADMIN_BACKEND_BASE_URL
+        ADMIN_BACKEND_TLS_INSECURE
+        ADMIN_HTTP_PORT
+        ADMIN_HTTPS_PORT
+        ADMIN_PRIMARY_DOMAIN
+        ADMIN_SECONDARY_DOMAIN
+    )
+
+    info "[microservice_admin] Итоговая admin-конфигурация:"
+    local key value
+    for key in "${summary_keys[@]}"; do
+        value="$(get_env_value "$env_file" "$key")"
+        info "[microservice_admin]   $key=$value"
+    done
+}
+
 configure_admin_online_env() {
     local svc_dir="$1"
     local explicit_backend_host="${2:-}"
@@ -465,12 +508,14 @@ configure_admin_online_env() {
     set_env_value "$env_file" "ONLINE_GATEWAY_URL" "$backend_host:7520"
     set_env_value "$env_file" "ONLINE_MINIO_URL" "$backend_host:9000"
     set_env_value "$env_file" "ADMIN_BACKEND_BASE_URL" "$admin_backend_base_url"
+    sync_admin_online_direct_runtime_env "$env_file" "$backend_host"
     ensure_admin_online_public_env_defaults "$env_file"
     if [[ -z "$(get_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE")" && "$admin_backend_base_url" == https://* ]]; then
         set_env_value "$env_file" "ADMIN_BACKEND_TLS_INSECURE" "1"
     fi
 
     success "[microservice_admin] Split env настроены: ONLINE_* + ADMIN_BACKEND_BASE_URL для $admin_backend_base_url"
+    print_admin_online_env_summary "$env_file"
 }
 
 # ── Очистка dangling-образов ──────────────────────────────────────────────────
