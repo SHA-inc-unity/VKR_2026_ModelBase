@@ -8,7 +8,7 @@ namespace DataService.API.Markets;
 public sealed class BinanceApiClient : IMarketDataClient
 {
     private const string BaseUrl = "https://fapi.binance.com";
-    private static readonly TimeSpan OpenInterestRetention = TimeSpan.FromDays(31);
+    private static readonly TimeSpan OpenInterestRetention = TimeSpan.FromDays(30);
     private const int KlineThrottleUnits = 10;
     private const int AuxiliaryThrottleUnits = 3;
 

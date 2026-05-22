@@ -63,6 +63,7 @@
 - `kraken` в data-service = OHLC-only pipeline.
 - Funding и open interest остаются `NULL`.
 - Requested window сначала клипуется к reachable lookback.
+- Если клипованное окно помещается в reachable history, client сначала пробует один `/0/public/OHLC` на весь диапазон и только при неполном покрытии откатывается к более мелким throttled pages.
 - Если окно полностью вне reachable history, ingest завершается как no-op, а не как runtime failure.
 - Pair resolution идёт через filtered `AssetPairs?pair=...` candidate-by-candidate, чтобы не зависать на гигантском каталоге и не ловить mixed-candidate `EQuery:Unknown asset pair`.
 - Scheduler может держать до 4 Kraken ingest jobs одновременно, но сам HTTP client теперь сериализует/разрежает реальные REST calls process-local limiter-ом и ретраит Kraken throttle-ответы вместо мгновенного job failure.
@@ -117,7 +118,7 @@
 - Request weight для klines зависит от `limit`.
 - Funding history делит лимит `500 / 5 min / IP` с `GET /fapi/v1/fundingInfo`.
 - Funding history возвращается в ascending order; если диапазон слишком большой, сервер отрежет ответ по `startTime + limit`.
-- `openInterestHist` хранит только последний 1 месяц истории, max `limit=500`, IP rate limit `1000 requests / 5 min`.
+- `openInterestHist` хранит только последние 30 дней истории, max `limit=500`, IP rate limit `1000 requests / 5 min`.
 
 ### Что можно
 
@@ -133,7 +134,8 @@
 ### Как ModelLine трактует Binance
 
 - Binance работает как full futures pipeline.
-- Для больших окон важно помнить, что kline weight растёт вместе с `limit`, а OI-history физически обрезана последним месяцем.
+- Для больших окон важно помнить, что kline weight растёт вместе с `limit`, а OI-history физически обрезана последними 30 днями.
+- В ModelLine безопасная трактовка `openInterestHist` — строгие 30 дней с подъёмом `startTime` до ближайшей допустимой границы периода; иначе Binance отвечает `400 parameter 'startTime' is invalid`.
 
 ## Правило для ModelLine
 

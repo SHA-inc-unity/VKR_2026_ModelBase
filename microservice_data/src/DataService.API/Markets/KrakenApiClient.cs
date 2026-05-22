@@ -78,6 +78,34 @@ public sealed class KrakenApiClient : IMarketDataClient
         var pair = await ResolvePairAsync(symbol, ct);
         var (baseIntervalMinutes, aggregateFactor) = ResolveOhlcStrategy(stepMs);
         var baseStepMs = baseIntervalMinutes * 60_000L;
+        var expectedBaseCandles = CountExpectedCandles(startMs, endMs, baseStepMs);
+
+        if (expectedBaseCandles <= MaxBaseCandles)
+        {
+            var singlePage = await FetchOhlcWindowAsync(pair, baseIntervalMinutes, startMs, endMs, ct);
+            if (HasCompleteCoverage(singlePage, startMs, endMs, expectedBaseCandles))
+            {
+                if (onPageDone is not null)
+                {
+                    try { onPageDone(1, 1); } catch { }
+                }
+
+                IReadOnlyList<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)> singleRows =
+                    aggregateFactor == 1 ? singlePage : AggregateRows(singlePage, stepMs, aggregateFactor);
+
+                return singleRows
+                    .Where(row => row.TimestampMs >= startMs && row.TimestampMs <= endMs)
+                    .ToList();
+            }
+
+            _log.LogDebug(
+                "Kraken single-shot OHLC fetch incomplete for {Symbol}/{Interval}: got {Actual}/{Expected} candles; falling back to paged windows",
+                symbol,
+                interval,
+                singlePage.Count,
+                expectedBaseCandles);
+        }
+
         var pageSpanMs = MaxKlinePageCandles * baseStepMs;
         var windows = new List<(long Start, long End)>();
         for (var windowEnd = endMs; windowEnd >= startMs;)
@@ -99,43 +127,7 @@ public sealed class KrakenApiClient : IMarketDataClient
             await gate.WaitAsync(ct);
             try
             {
-                var sinceSeconds = Math.Max(0L, w.Start / 1000L);
-                var url = $"{BaseUrl}/0/public/OHLC?pair={Uri.EscapeDataString(pair)}&interval={baseIntervalMinutes}&since={sinceSeconds}";
-
-                using var doc = await GetJsonAsync(url, ct);
-                var root = doc.RootElement;
-                if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
-                    return new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>();
-
-                JsonElement? data = null;
-                foreach (var prop in result.EnumerateObject())
-                {
-                    if (string.Equals(prop.Name, "last", StringComparison.OrdinalIgnoreCase)) continue;
-                    data = prop.Value;
-                    break;
-                }
-                if (data is null || data.Value.ValueKind != JsonValueKind.Array)
-                    return new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>();
-
-                var page = new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>(data.Value.GetArrayLength());
-                foreach (var item in data.Value.EnumerateArray())
-                {
-                    if (item.ValueKind != JsonValueKind.Array || item.GetArrayLength() < 8) continue;
-                    var tsSec = TryLong(item[0]);
-                    var open = TryDec(item[1]);
-                    var high = TryDec(item[2]);
-                    var low = TryDec(item[3]);
-                    var close = TryDec(item[4]);
-                    var vwap = TryDec(item[5]);
-                    var volume = TryDec(item[6]);
-                    if (tsSec is null || open is null || high is null || low is null || close is null || volume is null) continue;
-                    var tsMs = tsSec.Value * 1000L;
-                    if (tsMs < w.Start || tsMs > w.End) continue;
-                    var turnover = (vwap ?? close.Value) * volume.Value;
-                    page.Add((tsMs, open.Value, high.Value, low.Value, close.Value, volume.Value, turnover));
-                }
-
-                return page;
+                return await FetchOhlcWindowAsync(pair, baseIntervalMinutes, w.Start, w.End, ct);
             }
             finally
             {
@@ -193,6 +185,55 @@ public sealed class KrakenApiClient : IMarketDataClient
     {
         IReadOnlyList<(long TimestampMs, decimal Oi)> empty = Array.Empty<(long, decimal)>();
         return Task.FromResult(empty);
+    }
+
+    private async Task<List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>>
+        FetchOhlcWindowAsync(
+            string pair,
+            int baseIntervalMinutes,
+            long startMs,
+            long endMs,
+            CancellationToken ct)
+    {
+        var sinceSeconds = Math.Max(0L, startMs / 1000L);
+        var url = $"{BaseUrl}/0/public/OHLC?pair={Uri.EscapeDataString(pair)}&interval={baseIntervalMinutes}&since={sinceSeconds}";
+
+        using var doc = await GetJsonAsync(url, ct);
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
+            return new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>();
+
+        JsonElement? data = null;
+        foreach (var prop in result.EnumerateObject())
+        {
+            if (string.Equals(prop.Name, "last", StringComparison.OrdinalIgnoreCase)) continue;
+            data = prop.Value;
+            break;
+        }
+        if (data is null || data.Value.ValueKind != JsonValueKind.Array)
+            return new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>();
+
+        var page = new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>(data.Value.GetArrayLength());
+        foreach (var item in data.Value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Array || item.GetArrayLength() < 8) continue;
+            var tsSec = TryLong(item[0]);
+            var open = TryDec(item[1]);
+            var high = TryDec(item[2]);
+            var low = TryDec(item[3]);
+            var close = TryDec(item[4]);
+            var vwap = TryDec(item[5]);
+            var volume = TryDec(item[6]);
+            if (tsSec is null || open is null || high is null || low is null || close is null || volume is null) continue;
+            var tsMs = tsSec.Value * 1000L;
+            if (tsMs < startMs || tsMs > endMs) continue;
+            var turnover = (vwap ?? close.Value) * volume.Value;
+            page.Add((tsMs, open.Value, high.Value, low.Value, close.Value, volume.Value, turnover));
+        }
+
+        return page
+            .OrderBy(row => row.TimestampMs)
+            .ToList();
     }
 
     private async Task<string> ResolvePairAsync(string symbol, CancellationToken ct)
@@ -415,6 +456,24 @@ public sealed class KrakenApiClient : IMarketDataClient
     {
         var (baseIntervalMinutes, _) = ResolveOhlcStrategy(stepMs);
         return MaxBaseCandles * baseIntervalMinutes * 60_000L;
+    }
+
+    private static int CountExpectedCandles(long startMs, long endMs, long baseStepMs)
+    {
+        if (endMs < startMs || baseStepMs <= 0) return 0;
+        return (int)(((endMs - startMs) / baseStepMs) + 1);
+    }
+
+    private static bool HasCompleteCoverage(
+        IReadOnlyList<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)> rows,
+        long startMs,
+        long endMs,
+        int expectedCandles)
+    {
+        if (rows.Count == 0 || expectedCandles <= 0) return false;
+        return rows.Count >= expectedCandles
+            && rows[0].TimestampMs == startMs
+            && rows[^1].TimestampMs == endMs;
     }
 
     private static (int BaseIntervalMinutes, int AggregateFactor) ResolveOhlcStrategy(long stepMs) => stepMs switch
