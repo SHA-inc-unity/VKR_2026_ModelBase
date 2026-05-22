@@ -14,6 +14,7 @@ namespace DataService.API.Jobs;
 public sealed class MarketWatcherService : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan DiscoveryDeadline = TimeSpan.FromSeconds(30);
 
     private readonly MarketWatchRepository _repo;
     private readonly MarketDataClientFactory _marketDataClientFactory;
@@ -113,6 +114,7 @@ public sealed class MarketWatcherService : BackgroundService
         CancellationToken stoppingToken)
     {
         var exchanges = NormalizeExchanges(settings.Exchanges);
+        var configuredSymbols = NormalizeSymbols(settings.Symbols);
         var timeframes = NormalizeTimeframes(settings.Timeframes);
 
         if (exchanges.Count == 0)
@@ -120,23 +122,29 @@ public sealed class MarketWatcherService : BackgroundService
             throw new InvalidOperationException("Market watcher has no enabled exchanges");
         }
 
+        if (configuredSymbols.Count == 0)
+        {
+            throw new InvalidOperationException("Market watcher has no configured dataset symbols");
+        }
+
         if (timeframes.Count == 0)
         {
             throw new InvalidOperationException("Market watcher has no enabled timeframes");
         }
 
-        _state.MarkStarting($"Discovering symbols for {string.Join(", ", exchanges)}");
+        _state.MarkStarting($"Discovering configured dataset symbols for {string.Join(", ", exchanges)}");
         _state.AppendLog("info", "discover.start", "Discovering market watcher universe", new Dictionary<string, object?>
         {
             ["exchanges"] = exchanges.ToArray(),
+            ["symbols"] = configuredSymbols.ToArray(),
             ["timeframes"] = timeframes.Keys.ToArray(),
         });
 
-        var universe = await DiscoverUniverseAsync(exchanges, stoppingToken);
+        var universe = await DiscoverUniverseAsync(exchanges, configuredSymbols, stoppingToken);
         var totalSymbols = universe.Values.Sum(items => items.Count);
         if (totalSymbols == 0)
         {
-            throw new InvalidOperationException("Market watcher did not discover any tradable symbols");
+            throw new InvalidOperationException("Market watcher did not discover any configured dataset symbols");
         }
 
         var realtimeSymbols = universe
@@ -147,6 +155,19 @@ public sealed class MarketWatcherService : BackgroundService
             }))
             .ToDictionary(item => item.Key, item => item.RealtimeSymbol, StringComparer.OrdinalIgnoreCase);
 
+        var trackedSymbols = universe
+            .SelectMany(exchangeEntry => exchangeEntry.Value.Select(symbol => (Exchange: exchangeEntry.Key, Symbol: symbol.Symbol)))
+            .ToArray();
+        var prunedRows = await _repo.PruneLiveRowsAsync(trackedSymbols, stoppingToken);
+        if (prunedRows > 0)
+        {
+            _state.AppendLog("info", "watch.prune", "Pruned stale market watcher rows", new Dictionary<string, object?>
+            {
+                ["rows"] = prunedRows,
+                ["trackedSymbols"] = trackedSymbols.Length,
+            });
+        }
+
         var state = new ConcurrentDictionary<string, SymbolLiveState>(StringComparer.OrdinalIgnoreCase);
         long tickCount = 0;
         long lastTickAtMs = 0;
@@ -156,7 +177,8 @@ public sealed class MarketWatcherService : BackgroundService
             var key = $"{exchange}:{symbol}";
             var realtimeSymbol = realtimeSymbols.TryGetValue(key, out var rt) ? rt : symbol;
             var symbolState = state.GetOrAdd(key, _ => new SymbolLiveState(exchange, symbol, realtimeSymbol));
-            symbolState.Apply(price, timestampUtc, timeframes);
+            var row = symbolState.Apply(price, timestampUtc, timeframes);
+            _state.UpsertLiveRow(row);
             Interlocked.Increment(ref tickCount);
             Interlocked.Exchange(ref lastTickAtMs, timestampUtc.ToUnixTimeMilliseconds());
         }
@@ -177,6 +199,7 @@ public sealed class MarketWatcherService : BackgroundService
         _state.AppendLog("success", "watch.start", "Market watcher subscriptions active", new Dictionary<string, object?>
         {
             ["totalSymbols"] = totalSymbols,
+            ["prunedRows"] = prunedRows,
             ["exchanges"] = universe.Keys.ToArray(),
         });
 
@@ -227,6 +250,7 @@ public sealed class MarketWatcherService : BackgroundService
 
     private async Task<Dictionary<string, IReadOnlyList<MarketWatchSymbol>>> DiscoverUniverseAsync(
         IReadOnlyCollection<string> exchanges,
+        HashSet<string> configuredSymbols,
         CancellationToken ct)
     {
         var result = new Dictionary<string, IReadOnlyList<MarketWatchSymbol>>(StringComparer.OrdinalIgnoreCase);
@@ -237,34 +261,43 @@ public sealed class MarketWatcherService : BackgroundService
             var client = _marketDataClientFactory.GetRequiredClient(exchange);
             try
             {
-                var symbols = await client.FetchMarketWatchSymbolsAsync(ct);
-                if (symbols.Count == 0)
+                var discoveredSymbols = await FetchMarketWatchSymbolsAsync(client, exchange, ct);
+                var filteredSymbols = FilterConfiguredSymbols(discoveredSymbols, configuredSymbols);
+                if (filteredSymbols.Count == 0)
                 {
-                    _state.AppendLog("warning", "discover.empty", $"No symbols discovered for {exchange}");
+                    _state.AppendLog("warning", "discover.empty", $"No configured dataset symbols discovered for {exchange}", new Dictionary<string, object?>
+                    {
+                        ["exchange"] = exchange,
+                        ["discoveredSymbols"] = discoveredSymbols.Count,
+                        ["configuredSymbols"] = configuredSymbols.Count,
+                    });
                     continue;
                 }
 
-                result[exchange] = symbols;
-                _state.AppendLog("info", "discover.exchange", $"Discovered {symbols.Count} symbols for {exchange}", new Dictionary<string, object?>
+                result[exchange] = filteredSymbols;
+                _state.AppendLog("info", "discover.exchange", $"Discovered {filteredSymbols.Count} configured symbols for {exchange}", new Dictionary<string, object?>
                 {
                     ["exchange"] = exchange,
-                    ["symbols"] = symbols.Count,
+                    ["discoveredSymbols"] = discoveredSymbols.Count,
+                    ["symbols"] = filteredSymbols.Count,
                 });
             }
             catch (Exception ex)
             {
                 var fallback = await TryLoadFallbackSymbolsAsync(exchange, ct);
-                if (fallback.Count > 0)
+                var filteredFallback = FilterConfiguredSymbols(fallback, configuredSymbols);
+                if (filteredFallback.Count > 0)
                 {
-                    result[exchange] = fallback;
+                    result[exchange] = filteredFallback;
                     _state.MarkDegraded($"{exchange} discovery failed; using persisted watcher state", ex.Message);
                     _state.AppendLog("warning", "discover.fallback", $"Using persisted symbol list for {exchange}", new Dictionary<string, object?>
                     {
                         ["exchange"] = exchange,
-                        ["symbols"] = fallback.Count,
+                        ["persistedSymbols"] = fallback.Count,
+                        ["symbols"] = filteredFallback.Count,
                         ["error"] = ex.Message,
                     });
-                    _log.LogWarning(ex, "Market watcher discovery failed for {Exchange}; using {Count} persisted symbols", exchange, fallback.Count);
+                    _log.LogWarning(ex, "Market watcher discovery failed for {Exchange}; using {Count} configured persisted symbols", exchange, filteredFallback.Count);
                     continue;
                 }
 
@@ -284,6 +317,26 @@ public sealed class MarketWatcherService : BackgroundService
         }
 
         return result;
+    }
+
+    private static async Task<IReadOnlyList<MarketWatchSymbol>> FetchMarketWatchSymbolsAsync(
+        IMarketDataClient client,
+        string exchange,
+        CancellationToken ct)
+    {
+        using var discoveryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        discoveryCts.CancelAfter(DiscoveryDeadline);
+
+        try
+        {
+            return await client.FetchMarketWatchSymbolsAsync(discoveryCts.Token);
+        }
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && discoveryCts.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Market watcher discovery for {exchange} exceeded {DiscoveryDeadline.TotalSeconds:0}s",
+                ex);
+        }
     }
 
     private async Task<IReadOnlyList<MarketWatchSymbol>> TryLoadFallbackSymbolsAsync(string exchange, CancellationToken ct)
@@ -330,7 +383,7 @@ public sealed class MarketWatcherService : BackgroundService
 
         if (universe.TryGetValue("binance", out var binanceSymbols) && binanceSymbols.Count > 0)
         {
-            await TryStartAsync("binance", () => StartBinanceAsync(onPrice, ct));
+            await TryStartAsync("binance", () => StartBinanceAsync(binanceSymbols, onPrice, ct));
         }
 
         if (universe.TryGetValue("bybit", out var bybitSymbols) && bybitSymbols.Count > 0)
@@ -357,35 +410,52 @@ public sealed class MarketWatcherService : BackgroundService
     }
 
     private static async Task<IAsyncDisposable> StartBinanceAsync(
+        IReadOnlyList<MarketWatchSymbol> symbols,
         Action<string, string, decimal, DateTimeOffset> onPrice,
         CancellationToken ct)
     {
         var socketClient = new BinanceSocketClient();
-        var subscriptions = new List<Func<ValueTask>>();
+        var disposers = new List<Func<ValueTask>>();
+        var allowedSymbols = symbols
+            .Select(item => item.RealtimeSymbol ?? item.Symbol)
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var subscription = await socketClient.UsdFuturesApi.ExchangeData.SubscribeToAllTickerUpdatesAsync(update =>
+        foreach (var chunk in allowedSymbols.Chunk(200))
         {
-            var now = DateTimeOffset.UtcNow;
-            foreach (var ticker in update.Data)
+            var subscription = await socketClient.UsdFuturesApi.ExchangeData.SubscribeToBookTickerUpdatesAsync(chunk, update =>
             {
-                if (string.IsNullOrWhiteSpace(ticker.Symbol) || ticker.LastPrice <= 0) continue;
-                onPrice("binance", ticker.Symbol, ticker.LastPrice, now);
-            }
-        }, ct);
+                if (string.IsNullOrWhiteSpace(update.Data.Symbol)
+                    || !allowedSymbols.Contains(update.Data.Symbol))
+                {
+                    return;
+                }
 
-        if (!subscription.Success)
-        {
-            socketClient.Dispose();
-            throw new InvalidOperationException($"Binance ticker subscription failed: {subscription.Error}");
+                var price = SelectMidPrice(update.Data.BestBidPrice, update.Data.BestAskPrice);
+                if (!price.HasValue)
+                {
+                    return;
+                }
+
+                onPrice("binance", update.Data.Symbol, price.Value, DateTimeOffset.UtcNow);
+            }, ct);
+
+            if (!subscription.Success)
+            {
+                socketClient.Dispose();
+                throw new InvalidOperationException($"Binance book ticker subscription failed: {subscription.Error}");
+            }
+
+            disposers.Add(() => new ValueTask(socketClient.UnsubscribeAsync(subscription.Data)));
         }
 
-        subscriptions.Add(async () =>
+        disposers.Add(() =>
         {
-            await socketClient.UnsubscribeAsync(subscription.Data);
             socketClient.Dispose();
+            return ValueTask.CompletedTask;
         });
 
-        return new CompositeAsyncDisposable(subscriptions.Select(action => new AsyncDisposeAction(action)).ToArray());
+        return new CompositeAsyncDisposable(disposers.Select(action => new AsyncDisposeAction(action)).ToArray());
     }
 
     private static async Task<IAsyncDisposable> StartBybitAsync(
@@ -403,17 +473,28 @@ public sealed class MarketWatcherService : BackgroundService
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Chunk(Math.Max(1, settings.BybitSymbolsPerSubscription)))
         {
-            var subscription = await socketClient.V5LinearApi.SubscribeToTickerUpdatesAsync(chunk, update =>
+            var subscription = await socketClient.V5LinearApi.SubscribeToOrderbookUpdatesAsync(chunk, 1, update =>
             {
-                var price = update.Data.LastPrice;
-                if (!price.HasValue || string.IsNullOrWhiteSpace(update.Data.Symbol) || price.Value <= 0) return;
+                if (string.IsNullOrWhiteSpace(update.Data.Symbol))
+                {
+                    return;
+                }
+
+                var bestAsk = update.Data.Asks.FirstOrDefault(entry => entry.Quantity != 0);
+                var bestBid = update.Data.Bids.FirstOrDefault(entry => entry.Quantity != 0);
+                var price = SelectMidPrice(bestBid?.Price, bestAsk?.Price);
+                if (!price.HasValue)
+                {
+                    return;
+                }
+
                 onPrice("bybit", update.Data.Symbol, price.Value, DateTimeOffset.UtcNow);
             }, ct);
 
             if (!subscription.Success)
             {
                 socketClient.Dispose();
-                throw new InvalidOperationException($"Bybit ticker subscription failed: {subscription.Error}");
+                throw new InvalidOperationException($"Bybit orderbook subscription failed: {subscription.Error}");
             }
 
             disposers.Add(() => new ValueTask(socketClient.UnsubscribeAsync(subscription.Data)));
@@ -426,6 +507,31 @@ public sealed class MarketWatcherService : BackgroundService
         });
 
         return new CompositeAsyncDisposable(disposers.Select(action => new AsyncDisposeAction(action)).ToArray());
+    }
+
+    private static decimal? SelectMidPrice(decimal? bestBidPrice, decimal? bestAskPrice)
+    {
+        var bid = bestBidPrice.GetValueOrDefault();
+        var ask = bestAskPrice.GetValueOrDefault();
+        var hasBid = bid > 0;
+        var hasAsk = ask > 0;
+
+        if (hasBid && hasAsk)
+        {
+            return (bid + ask) / 2m;
+        }
+
+        if (hasBid)
+        {
+            return bid;
+        }
+
+        if (hasAsk)
+        {
+            return ask;
+        }
+
+        return null;
     }
 
     private static async Task<IAsyncDisposable> StartKrakenAsync(
@@ -444,7 +550,10 @@ public sealed class MarketWatcherService : BackgroundService
         {
             var subscription = await socketClient.SpotApi.SubscribeToTickerUpdatesAsync(chunk, update =>
             {
-                if (string.IsNullOrWhiteSpace(update.Data.Symbol) || update.Data.LastPrice <= 0) return;
+                if (string.IsNullOrWhiteSpace(update.Data.Symbol) || update.Data.LastPrice <= 0)
+                {
+                    return;
+                }
 
                 var normalized = symbolMap.TryGetValue(update.Data.Symbol, out var symbol)
                     ? symbol
@@ -510,6 +619,21 @@ public sealed class MarketWatcherService : BackgroundService
         return result;
     }
 
+    private static HashSet<string> NormalizeSymbols(IEnumerable<string>? configured)
+    {
+        var requested = configured?
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Select(item => item.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var effective = requested is { Length: > 0 }
+            ? requested
+            : DatasetConstants.SupportedSymbols;
+
+        return new HashSet<string>(effective, StringComparer.OrdinalIgnoreCase);
+    }
+
     private static HashSet<string> NormalizeExchanges(IEnumerable<string>? configured)
     {
         var requested = configured?
@@ -523,6 +647,24 @@ public sealed class MarketWatcherService : BackgroundService
             : new HashSet<string>(MarketDataClientFactory.SupportedExchanges, StringComparer.OrdinalIgnoreCase);
     }
 
+    private static IReadOnlyList<MarketWatchSymbol> FilterConfiguredSymbols(
+        IReadOnlyList<MarketWatchSymbol> discovered,
+        HashSet<string> configuredSymbols)
+    {
+        if (discovered.Count == 0 || configuredSymbols.Count == 0)
+        {
+            return Array.Empty<MarketWatchSymbol>();
+        }
+
+        return discovered
+            .Where(item => !string.IsNullOrWhiteSpace(item.Symbol)
+                && configuredSymbols.Contains(item.Symbol))
+            .GroupBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
     private sealed record PendingSnapshot(
         MarketWatchSymbolSnapshot Snapshot,
         SymbolLiveState State,
@@ -531,7 +673,8 @@ public sealed class MarketWatcherService : BackgroundService
     private sealed class SymbolLiveState
     {
         private readonly object _gate = new();
-        private readonly Dictionary<string, MarketWatchCandleSnapshot> _candles = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, MarketWatchCandleSnapshot> _activeCandles = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, MarketWatchCandleSnapshot> _closedCandles = new(StringComparer.OrdinalIgnoreCase);
         private readonly string _exchange;
         private readonly string _symbol;
         private readonly string? _realtimeSymbol;
@@ -547,10 +690,12 @@ public sealed class MarketWatcherService : BackgroundService
             _realtimeSymbol = realtimeSymbol;
         }
 
-        public void Apply(decimal price, DateTimeOffset timestampUtc, IReadOnlyDictionary<string, long> timeframes)
+        public MarketWatcherLiveRowSnapshot Apply(decimal price, DateTimeOffset timestampUtc, IReadOnlyDictionary<string, long> timeframes)
         {
             lock (_gate)
             {
+                var isFirstTick = _lastPriceTimestampUtc == default;
+                var closedCandlesUpdated = false;
                 _lastPrice = price;
                 _lastPriceTimestampUtc = timestampUtc;
                 var timestampMs = timestampUtc.ToUnixTimeMilliseconds();
@@ -558,10 +703,9 @@ public sealed class MarketWatcherService : BackgroundService
                 foreach (var timeframe in timeframes)
                 {
                     var bucketStartMs = timestampMs - timestampMs % timeframe.Value;
-                    if (!_candles.TryGetValue(timeframe.Key, out var candle)
-                        || candle.BucketStartMs != bucketStartMs)
+                    if (!_activeCandles.TryGetValue(timeframe.Key, out var candle))
                     {
-                        _candles[timeframe.Key] = new MarketWatchCandleSnapshot(
+                        _activeCandles[timeframe.Key] = new MarketWatchCandleSnapshot(
                             BucketStartMs: bucketStartMs,
                             Open: price,
                             High: price,
@@ -571,7 +715,21 @@ public sealed class MarketWatcherService : BackgroundService
                         continue;
                     }
 
-                    _candles[timeframe.Key] = candle with
+                    if (candle.BucketStartMs != bucketStartMs)
+                    {
+                        _closedCandles[timeframe.Key] = candle;
+                        _activeCandles[timeframe.Key] = new MarketWatchCandleSnapshot(
+                            BucketStartMs: bucketStartMs,
+                            Open: price,
+                            High: price,
+                            Low: price,
+                            Close: price,
+                            LastUpdateMs: timestampMs);
+                        closedCandlesUpdated = true;
+                        continue;
+                    }
+
+                    _activeCandles[timeframe.Key] = candle with
                     {
                         High = Math.Max(candle.High, price),
                         Low = Math.Min(candle.Low, price),
@@ -580,8 +738,17 @@ public sealed class MarketWatcherService : BackgroundService
                     };
                 }
 
-                _dirty = true;
+                _dirty = isFirstTick || closedCandlesUpdated;
                 _version++;
+
+                return new MarketWatcherLiveRowSnapshot(
+                    Exchange: _exchange,
+                    Symbol: _symbol,
+                    RealtimeSymbol: _realtimeSymbol,
+                    LastPrice: _lastPrice,
+                    LastPriceTimestampMs: timestampMs,
+                    UpdatedAtMs: timestampMs,
+                    Frames: _activeCandles.Keys.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray());
             }
         }
 
@@ -594,7 +761,7 @@ public sealed class MarketWatcherService : BackgroundService
                     return null;
                 }
 
-                var candlesCopy = new Dictionary<string, MarketWatchCandleSnapshot>(_candles, StringComparer.OrdinalIgnoreCase);
+                var candlesCopy = new Dictionary<string, MarketWatchCandleSnapshot>(_closedCandles, StringComparer.OrdinalIgnoreCase);
                 return new PendingSnapshot(
                     new MarketWatchSymbolSnapshot(
                         Exchange: _exchange,

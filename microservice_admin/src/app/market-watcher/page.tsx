@@ -5,8 +5,10 @@ import { Activity, AlertTriangle, Clock3, PauseCircle, PlayCircle, RefreshCw, Wa
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Collapsible } from '@/components/ui/collapsible';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { cacheRead, cacheWrite } from '@/lib/cacheClient';
 import { useLocale } from '@/lib/i18nContext';
 import { kafkaCall } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
@@ -26,6 +28,8 @@ interface WatcherStatus {
   lastTickAtMs?: number | null;
   trackedSymbols: number;
   liveRows: number;
+  avgLagMs?: number | null;
+  maxLagMs?: number | null;
   ticksInLastWindow: number;
   lastFlushRows: number;
   exchanges: string[];
@@ -69,8 +73,39 @@ interface WatcherLogsResponse {
   logs: WatcherLogEntry[];
 }
 
-const POLL_MS = 5_000;
-const PAGE_SIZE = 100;
+interface WatcherLagStats {
+  averageLagMs: number | null;
+  maxLagMs: number | null;
+}
+
+interface WatcherVariantGroup extends WatcherLagStats {
+  key: string;
+  symbol: string;
+  quote: string | null;
+  rows: WatcherRow[];
+}
+
+interface WatcherAssetGroup extends WatcherLagStats {
+  key: string;
+  asset: string;
+  exchanges: string[];
+  totalRows: number;
+  variants: WatcherVariantGroup[];
+}
+
+interface MarketWatcherPageCache {
+  watcher: WatcherStatus | null;
+  rows: WatcherRow[];
+  totalRows: number;
+  logs: WatcherLogEntry[];
+}
+
+const POLL_MS = 1_000;
+const ROW_FETCH_LIMIT = 500;
+const GROUP_PAGE_SIZE = 24;
+const MARKET_WATCHER_CACHE_TTL = 15;
+const MARKET_WATCHER_CACHE_PREFIX = 'modelline:market-watcher:v2';
+const KNOWN_QUOTES = ['USDT', 'USDC', 'USD', 'BTC', 'ETH', 'EUR', 'TRY'] as const;
 
 const STATUS_BADGE: Record<WatcherState, 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'info'> = {
   starting: 'info',
@@ -114,9 +149,15 @@ function formatLag(ms?: number | null): string {
 }
 
 function lagClass(ms: number): string {
-  if (ms >= 300_000) return 'text-destructive';
-  if (ms >= 60_000) return 'text-warning';
+  if (ms >= 60_000) return 'text-destructive';
+  if (ms >= 10_000) return 'text-warning';
   return 'text-foreground';
+}
+
+function lagBadgeVariant(ms: number): 'success' | 'warning' | 'destructive' {
+  if (ms >= 60_000) return 'destructive';
+  if (ms >= 10_000) return 'warning';
+  return 'success';
 }
 
 function formatFields(fields?: Record<string, unknown>): string {
@@ -128,6 +169,80 @@ function timeframeSummary(candles?: Record<string, unknown>): string {
   if (!candles) return '–';
   const keys = Object.keys(candles);
   return keys.length > 0 ? keys.join(', ') : '–';
+}
+
+function buildMarketWatcherCacheKey(exchange: string, search: string): string {
+  return `${MARKET_WATCHER_CACHE_PREFIX}:${exchange || 'all'}:${search || 'all'}`;
+}
+
+function splitSymbolVariant(symbol: string): { asset: string; quote: string | null } {
+  const upper = symbol.toUpperCase();
+  for (const quote of KNOWN_QUOTES) {
+    if (upper.endsWith(quote) && upper.length > quote.length) {
+      return {
+        asset: upper.slice(0, upper.length - quote.length),
+        quote,
+      };
+    }
+  }
+
+  return { asset: upper, quote: null };
+}
+
+function computeLagStats(rows: WatcherRow[]): WatcherLagStats {
+  if (rows.length === 0) {
+    return { averageLagMs: null, maxLagMs: null };
+  }
+
+  const totalLag = rows.reduce((sum, row) => sum + (row.lag_ms || 0), 0);
+  const maxLagMs = rows.reduce((max, row) => Math.max(max, row.lag_ms || 0), 0);
+  return {
+    averageLagMs: Math.round(totalLag / rows.length),
+    maxLagMs,
+  };
+}
+
+function buildRowGroups(rows: WatcherRow[]): WatcherAssetGroup[] {
+  const orderedRows = [...rows].sort((left, right) => {
+    const assetCompare = splitSymbolVariant(left.symbol).asset.localeCompare(splitSymbolVariant(right.symbol).asset);
+    if (assetCompare !== 0) return assetCompare;
+    const symbolCompare = left.symbol.localeCompare(right.symbol);
+    if (symbolCompare !== 0) return symbolCompare;
+    return left.exchange.localeCompare(right.exchange);
+  });
+
+  const assets = new Map<string, Map<string, WatcherRow[]>>();
+  for (const row of orderedRows) {
+    const { asset } = splitSymbolVariant(row.symbol);
+    const variants = assets.get(asset) ?? new Map<string, WatcherRow[]>();
+    const variantRows = variants.get(row.symbol) ?? [];
+    variantRows.push(row);
+    variants.set(row.symbol, variantRows);
+    assets.set(asset, variants);
+  }
+
+  return Array.from(assets.entries()).map(([asset, variants]) => {
+    const variantGroups = Array.from(variants.entries()).map(([symbol, variantRows]) => {
+      const quote = splitSymbolVariant(symbol).quote;
+      return {
+        key: `${asset}:${symbol}`,
+        symbol,
+        quote,
+        rows: [...variantRows].sort((left, right) => left.exchange.localeCompare(right.exchange)),
+        ...computeLagStats(variantRows),
+      } satisfies WatcherVariantGroup;
+    });
+
+    const allRows = variantGroups.flatMap((variant) => variant.rows);
+    return {
+      key: asset,
+      asset,
+      exchanges: Array.from(new Set(allRows.map((row) => row.exchange))).sort((left, right) => left.localeCompare(right)),
+      totalRows: allRows.length,
+      variants: variantGroups,
+      ...computeLagStats(allRows),
+    } satisfies WatcherAssetGroup;
+  });
 }
 
 export default function MarketWatcherPage() {
@@ -144,6 +259,7 @@ export default function MarketWatcherPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const cacheKey = useMemo(() => buildMarketWatcherCacheKey(exchange, deferredSearch), [deferredSearch, exchange]);
 
   const loadPage = useCallback(async (showSpinner: boolean) => {
     if (showSpinner) setLoading(true); else setRefreshing(true);
@@ -154,8 +270,8 @@ export default function MarketWatcherPage() {
         kafkaCall<WatcherRowsResponse>(Topics.CMD_DATA_MARKET_WATCHER_ROWS, {
           exchange: exchange || undefined,
           search: deferredSearch || undefined,
-          limit: PAGE_SIZE,
-          offset: page * PAGE_SIZE,
+          limit: ROW_FETCH_LIMIT,
+          offset: 0,
         }),
         kafkaCall<WatcherLogsResponse>(Topics.CMD_DATA_MARKET_WATCHER_LOGS, { limit: 120 }),
       ]);
@@ -170,7 +286,7 @@ export default function MarketWatcherPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [deferredSearch, exchange, page]);
+  }, [deferredSearch, exchange]);
 
   const refresh = useCallback(async () => {
     await loadPage(false);
@@ -195,6 +311,32 @@ export default function MarketWatcherPage() {
   }, [loadPage]);
 
   useEffect(() => {
+    let cancelled = false;
+    void cacheRead<MarketWatcherPageCache>(cacheKey).then((cached) => {
+      if (cancelled || !cached) return;
+      setWatcher(cached.watcher);
+      setRows(cached.rows ?? []);
+      setTotalRows(cached.totalRows ?? 0);
+      setLogs(cached.logs ?? []);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cacheKey]);
+
+  useEffect(() => {
+    if (!watcher) return;
+    void cacheWrite(cacheKey, {
+      watcher,
+      rows,
+      totalRows,
+      logs,
+    } satisfies MarketWatcherPageCache, MARKET_WATCHER_CACHE_TTL);
+  }, [cacheKey, logs, rows, totalRows, watcher]);
+
+  useEffect(() => {
     const id = window.setInterval(() => { void loadPage(false); }, POLL_MS);
     return () => window.clearInterval(id);
   }, [loadPage]);
@@ -203,13 +345,20 @@ export default function MarketWatcherPage() {
     setPage(0);
   }, [exchange, deferredSearch]);
 
-  const pageCount = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
-  const avgLag = useMemo(() => {
-    if (rows.length === 0) return null;
-    return Math.round(rows.reduce((sum, row) => sum + (row.lag_ms || 0), 0) / rows.length);
-  }, [rows]);
-  const maxLag = useMemo(() => rows.reduce((max, row) => Math.max(max, row.lag_ms || 0), 0), [rows]);
+  const groupedRows = useMemo(() => buildRowGroups(rows), [rows]);
+  const pageCount = Math.max(1, Math.ceil(groupedRows.length / GROUP_PAGE_SIZE));
+  const pagedGroups = useMemo(
+    () => groupedRows.slice(page * GROUP_PAGE_SIZE, (page + 1) * GROUP_PAGE_SIZE),
+    [groupedRows, page],
+  );
+  const avgLag = watcher?.avgLagMs ?? null;
+  const maxLag = watcher?.maxLagMs ?? null;
   const exchanges = useMemo(() => watcher?.exchanges ?? [], [watcher]);
+
+  useEffect(() => {
+    if (page < pageCount) return;
+    setPage(Math.max(0, pageCount - 1));
+  }, [page, pageCount]);
 
   return (
     <div className="space-y-4 lg:space-y-5">
@@ -303,7 +452,7 @@ export default function MarketWatcherPage() {
             {loading ? <Skeleton className="h-8 w-24" /> : (
               <>
                 <div className="text-3xl font-bold">{formatLag(avgLag)}</div>
-                <div className="text-sm text-muted-foreground">{t('marketWatcher.maxLag')}: <span className={cn('font-medium', lagClass(maxLag))}>{formatLag(maxLag)}</span></div>
+                <div className="text-sm text-muted-foreground">{t('marketWatcher.maxLag')}: <span className={cn('font-medium', maxLag != null && lagClass(maxLag))}>{formatLag(maxLag)}</span></div>
               </>
             )}
           </CardContent>
@@ -350,58 +499,92 @@ export default function MarketWatcherPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-3 px-5 pb-5">
-          <div className="overflow-x-auto rounded-md border border-border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-[110px]">{t('common.status')}</TableHead>
-                  <TableHead>{t('common.symbol')}</TableHead>
-                  <TableHead className="w-[140px]">{t('marketWatcher.realtimeSymbol')}</TableHead>
-                  <TableHead className="w-[140px]">Price</TableHead>
-                  <TableHead className="w-[140px]">{t('marketWatcher.lag')}</TableHead>
-                  <TableHead className="w-[180px]">{t('marketWatcher.lastTick')}</TableHead>
-                  <TableHead>{t('marketWatcher.frames')}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {loading ? (
-                  Array.from({ length: 8 }).map((_, idx) => (
-                    <TableRow key={idx}>
-                      <TableCell><Skeleton className="h-5 w-16" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-28" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-32" /></TableCell>
-                    </TableRow>
-                  ))
-                ) : rows.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="h-28 text-center text-muted-foreground">
-                      {t('marketWatcher.noRows')}
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  rows.map((row) => (
-                    <TableRow key={`${row.exchange}:${row.symbol}`} className="align-top">
-                      <TableCell>
-                        <Badge variant={row.lag_ms > 300_000 ? 'destructive' : row.lag_ms > 60_000 ? 'warning' : 'success'}>{row.exchange}</Badge>
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{row.symbol}</TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">{row.realtime_symbol || '–'}</TableCell>
-                      <TableCell className="font-mono text-sm font-medium">{formatPrice(row.last_price)}</TableCell>
-                      <TableCell className={cn('font-mono text-xs', lagClass(row.lag_ms))}>{formatLag(row.lag_ms)}</TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">{formatDateTime(row.last_price_ts)}</TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">{timeframeSummary(row.candles_json)}</TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
+          {loading ? (
+            <div className="space-y-3 rounded-md border border-border p-3">
+              {Array.from({ length: 6 }).map((_, idx) => (
+                <Skeleton key={idx} className="h-12 w-full" />
+              ))}
+            </div>
+          ) : pagedGroups.length === 0 ? (
+            <div className="rounded-md border border-border px-4 py-10 text-center text-muted-foreground">
+              {t('marketWatcher.noRows')}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {pagedGroups.map((group, groupIndex) => (
+                <Collapsible
+                  key={group.key}
+                  defaultOpen={groupIndex === 0}
+                  title={(
+                    <div className="flex w-full flex-wrap items-center gap-2 pr-3">
+                      <Badge variant={group.maxLagMs != null ? lagBadgeVariant(group.maxLagMs) : 'secondary'}>{group.asset}</Badge>
+                      <span className="text-xs text-muted-foreground">{group.variants.length} pairs</span>
+                      <span className="text-xs text-muted-foreground">{group.totalRows} rows</span>
+                      <span className="text-xs text-muted-foreground">{group.exchanges.join(', ') || '–'}</span>
+                      <span className={cn('text-xs font-mono', group.maxLagMs != null && lagClass(group.maxLagMs))}>
+                        {t('marketWatcher.lag')}: {formatLag(group.averageLagMs)} / {formatLag(group.maxLagMs)}
+                      </span>
+                    </div>
+                  )}
+                >
+                  <div className="space-y-3 p-3">
+                    {group.variants.map((variant, variantIndex) => (
+                      <Collapsible
+                        key={variant.key}
+                        defaultOpen={groupIndex === 0 && variantIndex === 0}
+                        className="border-dashed"
+                        title={(
+                          <div className="flex w-full flex-wrap items-center gap-2 pr-3">
+                            <span className="font-mono text-xs font-semibold">{variant.symbol}</span>
+                            <Badge variant={variant.maxLagMs != null ? lagBadgeVariant(variant.maxLagMs) : 'secondary'}>
+                              {variant.quote ?? 'spot'}
+                            </Badge>
+                            <span className="text-xs text-muted-foreground">{variant.rows.length} exchanges</span>
+                            <span className={cn('text-xs font-mono', variant.maxLagMs != null && lagClass(variant.maxLagMs))}>
+                              {t('marketWatcher.lag')}: {formatLag(variant.averageLagMs)} / {formatLag(variant.maxLagMs)}
+                            </span>
+                          </div>
+                        )}
+                      >
+                        <div className="overflow-x-auto p-3 pt-0">
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead className="w-[110px]">{t('common.status')}</TableHead>
+                                <TableHead>{t('common.symbol')}</TableHead>
+                                <TableHead className="w-[140px]">{t('marketWatcher.realtimeSymbol')}</TableHead>
+                                <TableHead className="w-[140px]">Price</TableHead>
+                                <TableHead className="w-[140px]">{t('marketWatcher.lag')}</TableHead>
+                                <TableHead className="w-[180px]">{t('marketWatcher.lastTick')}</TableHead>
+                                <TableHead>{t('marketWatcher.frames')}</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {variant.rows.map((row) => (
+                                <TableRow key={`${row.exchange}:${row.symbol}`} className="align-top">
+                                  <TableCell>
+                                    <Badge variant={lagBadgeVariant(row.lag_ms)}>{row.exchange}</Badge>
+                                  </TableCell>
+                                  <TableCell className="font-mono text-xs">{row.symbol}</TableCell>
+                                  <TableCell className="font-mono text-xs text-muted-foreground">{row.realtime_symbol || '–'}</TableCell>
+                                  <TableCell className="font-mono text-sm font-medium">{formatPrice(row.last_price)}</TableCell>
+                                  <TableCell className={cn('font-mono text-xs', lagClass(row.lag_ms))}>{formatLag(row.lag_ms)}</TableCell>
+                                  <TableCell className="font-mono text-xs text-muted-foreground">{formatDateTime(row.last_price_ts)}</TableCell>
+                                  <TableCell className="font-mono text-xs text-muted-foreground">{timeframeSummary(row.candles_json)}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </Collapsible>
+                    ))}
+                  </div>
+                </Collapsible>
+              ))}
+            </div>
+          )}
           <div className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-            <div>{t('marketWatcher.page')}: {page + 1} / {pageCount} · {totalRows}</div>
+            <div>{t('marketWatcher.page')}: {page + 1} / {pageCount} · {groupedRows.length} assets · {rows.length} / {totalRows} rows</div>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={() => setPage(prev => Math.max(0, prev - 1))} disabled={page === 0 || loading}>Prev</Button>
               <Button variant="outline" size="sm" onClick={() => setPage(prev => (prev + 1 < pageCount ? prev + 1 : prev))} disabled={page + 1 >= pageCount || loading}>Next</Button>

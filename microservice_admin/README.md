@@ -135,7 +135,7 @@ control topics, а `Duration` для terminal dataset jobs считается к
 
 - runtime status (`desired/effective`, heartbeat, flush, last error)
 - on/off control без перезапуска сервиса
-- realtime prices по всем tracked symbols
+- realtime prices по всем tracked symbols из whitelist-а `Dataset Configuration`
 - lag от реального времени по каждой строке и summary lag cards
 - watcher-only logs, отделённые и от `/logs`, и от Queue History
 

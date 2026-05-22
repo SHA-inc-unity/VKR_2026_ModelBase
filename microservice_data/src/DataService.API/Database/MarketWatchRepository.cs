@@ -23,8 +23,8 @@ public sealed record MarketWatchLiveRow(
     string Symbol,
     string? RealtimeSymbol,
     decimal LastPrice,
-    DateTimeOffset LastPriceTimestampUtc,
-    DateTimeOffset UpdatedAtUtc,
+    DateTime LastPriceTimestampUtc,
+    DateTime UpdatedAtUtc,
     string CandlesJson,
     long LagMs);
 
@@ -104,6 +104,45 @@ public sealed class MarketWatchRepository
         await conn.ExecuteAsync(new CommandDefinition(sql, snapshots, cancellationToken: ct));
     }
 
+    public async Task<int> PruneLiveRowsAsync(
+        IReadOnlyCollection<(string Exchange, string Symbol)> trackedSymbols,
+        CancellationToken ct = default)
+    {
+        if (!_schemaReady)
+        {
+            await EnsureSchemaAsync(ct);
+        }
+
+        await using var conn = await _pg.OpenAsync(ct);
+        if (trackedSymbols.Count == 0)
+        {
+            const string deleteAllSql = "DELETE FROM market_watch_live;";
+            return await conn.ExecuteAsync(new CommandDefinition(deleteAllSql, cancellationToken: ct));
+        }
+
+        var parameters = new DynamicParameters();
+        var values = trackedSymbols
+            .Select((item, index) =>
+            {
+                parameters.Add($"Exchange{index}", item.Exchange);
+                parameters.Add($"Symbol{index}", item.Symbol);
+                return $"(@Exchange{index}, @Symbol{index})";
+            })
+            .ToArray();
+
+        var sql = $"""
+            DELETE FROM market_watch_live AS live
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM (VALUES {string.Join(", ", values)}) AS tracked(exchange, symbol)
+                WHERE tracked.exchange = live.exchange
+                  AND tracked.symbol = live.symbol
+            );
+            """;
+
+        return await conn.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+    }
+
     public async Task<IReadOnlyList<Markets.MarketWatchSymbol>> ListKnownSymbolsAsync(
         string exchange,
         CancellationToken ct = default)
@@ -152,14 +191,14 @@ public sealed class MarketWatchRepository
 
         const string sql = """
             SELECT
-                exchange,
-                symbol,
-                realtime_symbol,
-                last_price,
-                last_price_ts,
-                updated_at,
-                candles_json::text AS candles_json,
-                GREATEST(0, (EXTRACT(EPOCH FROM (now() - last_price_ts)) * 1000)::bigint) AS lag_ms
+                exchange AS Exchange,
+                symbol AS Symbol,
+                realtime_symbol AS RealtimeSymbol,
+                last_price AS LastPrice,
+                last_price_ts AS LastPriceTimestampUtc,
+                updated_at AS UpdatedAtUtc,
+                candles_json::text AS CandlesJson,
+                GREATEST(0, (EXTRACT(EPOCH FROM (now() - last_price_ts)) * 1000)::bigint) AS LagMs
             FROM market_watch_live
             WHERE (@Exchange IS NULL OR exchange = @Exchange)
               AND (

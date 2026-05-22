@@ -42,14 +42,15 @@ budget API, особенно для Kraken.
 
 Для realtime prices worker использует поддерживаемые .NET websocket clients:
 
-- `Binance.Net` — USD-M all-ticker stream
-- `Bybit.Net` — V5 linear ticker subscriptions
+- `Binance.Net` — targeted USD-M book-ticker stream по whitelist symbols
+- `Bybit.Net` — V5 linear depth-1 orderbook subscriptions
 - `KrakenExchange.Net` — Spot V2 ticker subscriptions
 
-Current candles строятся локально из live price stream и сохраняются в
-отдельную таблицу `market_watch_live`; исторические dataset tables при этом
-не мутируются. Это live overlay, а не замена ingest/repair/upsert как
-authoritative historical source.
+Watcher считает live-price по best bid/ask midpoint там, где биржа даёт более
+частые book/orderbook updates, чем last-trade ticker. В `market_watch_live`
+сохраняется last closed candle per timeframe плюс текущая live price row;
+исторические dataset tables при этом не мутируются. Это live overlay, а не
+замена ingest/repair/upsert как authoritative historical source.
 
 ## Kraken
 
@@ -88,7 +89,7 @@ authoritative historical source.
 - Если окно полностью вне reachable history, ingest завершается как no-op, а не как runtime failure.
 - Pair resolution идёт через filtered `AssetPairs?pair=...` candidate-by-candidate, чтобы не зависать на гигантском каталоге и не ловить mixed-candidate `EQuery:Unknown asset pair`.
 - Scheduler может держать до 4 Kraken ingest jobs одновременно, но сам HTTP client теперь сериализует/разрежает реальные REST calls process-local limiter-ом и ретраит Kraken throttle-ответы вместо мгновенного job failure.
-- Для realtime worker Kraken сейчас ограничен `*USDT` spot universe: это тот же naming scope, который service уже стабильно резолвит через `altname/wsname` и может безопасно хранить рядом с Bybit/Binance symbols.
+- Для realtime worker Kraken сейчас ограничен `*USDT` spot universe. При этом наружу worker держит канонический dataset symbol (`BTCUSDT`-style), а Kraken-specific `altname/wsname` использует только как realtime alias для websocket subscription, чтобы whitelist из Admin Dataset Configuration совпадал с тем, что видит watcher.
 
 ## Bybit
 
@@ -123,7 +124,7 @@ authoritative historical source.
 
 - Bybit остаётся baseline exchange: полный pipeline `klines + funding + OI`.
 - Heavy `1m`/`3m` jobs по-прежнему сериализуются scheduler-ом на уровне биржи, но внутри одного Bybit job ModelLine теперь держит более широкий kline fan-out `6`; общий IP budget всё равно ограничивается shared token bucket, поэтому ускорение long backfills не требует ослаблять safety-лимит.
-- Для realtime worker Bybit идёт через websocket tickers (`Bybit.Net`) вместо 1s REST polling по каждому symbol/timeframe.
+- Для realtime worker Bybit идёт через websocket depth-1 orderbook (`Bybit.Net`) вместо 1s REST polling по каждому symbol/timeframe; live price считается как midpoint best bid/ask, потому что этот stream заметно свежее для thin symbols, чем last-trade ticker.
 
 ## Binance
 
@@ -161,7 +162,7 @@ authoritative historical source.
 - В ModelLine безопасная трактовка `openInterestHist` — строгие 30 дней с подъёмом `startTime` до ближайшей допустимой границы периода; иначе Binance отвечает `400 parameter 'startTime' is invalid`.
 - Heavy `1m`/`3m` jobs у ModelLine по-прежнему сериализуются на уровне scheduler, поэтому внутри одного Binance job можно держать более широкий page fan-out, пока process-local limiter остаётся ниже общего REST weight budget.
 - Текущий Binance limiter в repo настроен заметно быстрее прежнего conservative режима: примерно `1.7k` weight/min shared budget вместо старых `~600/min`, что даёт кратный выигрыш на million-candle backfills без отказа от `Retry-After`/penalty semantics.
-- Для realtime worker Binance использует all-ticker websocket stream (`Binance.Net`), поэтому live prices не расходуют тот же REST budget, что и historical fetch.
+- Для realtime worker Binance использует targeted websocket book-ticker stream (`Binance.Net`) только по whitelist symbols, поэтому live prices не расходуют тот же REST budget, что и historical fetch, и при этом lag по thin markets лучше, чем на broad all-ticker last-price feed.
 
 ## Правило для ModelLine
 

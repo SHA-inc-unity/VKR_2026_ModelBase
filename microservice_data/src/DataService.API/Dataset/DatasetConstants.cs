@@ -37,6 +37,18 @@ public static class DatasetConstants
     public static readonly IReadOnlySet<string> HeavyTimeframes =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "1m", "3m" };
 
+    /// <summary>Product-approved dataset symbol universe mirrored by the
+    /// admin Dataset Configuration screen. Market watcher live subscriptions
+    /// must stay inside this whitelist instead of expanding to every tradable
+    /// instrument returned by exchange metadata.</summary>
+    public static readonly string[] SupportedSymbols =
+    [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+        "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+        "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT",
+        "TONUSDT", "SUIUSDT", "APTUSDT",
+    ];
+
     /// <summary>timeframe key → (bybit_interval, step_ms)</summary>
     public static readonly IReadOnlyDictionary<string, (string Interval, long StepMs)> Timeframes =
         new Dictionary<string, (string, long)>

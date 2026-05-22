@@ -55,9 +55,10 @@ public sealed class KrakenApiClient : IMarketDataClient
                 continue;
             }
 
-            _pairCache[altname] = altname;
-            _websocketNameCache[altname] = wsname;
-            symbols.Add(new MarketWatchSymbol(altname, wsname));
+            var datasetSymbol = NormalizeDatasetSymbol(altname);
+            _pairCache[datasetSymbol] = altname;
+            _websocketNameCache[datasetSymbol] = wsname;
+            symbols.Add(new MarketWatchSymbol(datasetSymbol, wsname));
         }
 
         return symbols;
@@ -486,6 +487,14 @@ public sealed class KrakenApiClient : IMarketDataClient
         candidates.Add($"{mappedBase}USDT");
         candidates.Add($"{mappedBase}/USDT");
         return candidates.ToArray();
+    }
+
+    private static string NormalizeDatasetSymbol(string symbol)
+    {
+        var normalized = symbol.Trim().ToUpperInvariant();
+        return normalized.StartsWith("XBT", StringComparison.OrdinalIgnoreCase)
+            ? $"BTC{normalized[3..]}"
+            : normalized;
     }
 
     private static long GetReachableLookbackMs(long stepMs)

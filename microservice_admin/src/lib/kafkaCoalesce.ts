@@ -42,6 +42,10 @@ const COALESCE_TTL_MS: Record<string, number> = {
   'cmd.analitic.dataset.status':       1_500,
   // Models list — read-only registry, refreshed by EVT_ANALYTICS_MODEL_READY
   'cmd.analytics.model.list':          5_000,
+  // Market watcher dashboard — hot operator page, keep it fresh but coalesce fan-out.
+  'cmd.data.market_watcher.status':      750,
+  'cmd.data.market_watcher.rows':        750,
+  'cmd.data.market_watcher.logs':      1_000,
 };
 
 export function coalesceTtlFor(topic: string, payload: unknown): number | null {

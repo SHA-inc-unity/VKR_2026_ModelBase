@@ -27,6 +27,7 @@ public sealed class MarketWatchSettings
     public int BybitSymbolsPerSubscription { get; set; } = 50;
     public int KrakenSymbolsPerSubscription { get; set; } = 200;
     public string[] Exchanges { get; set; } = ["bybit", "binance", "kraken"];
+    public string[] Symbols { get; set; } = DatasetConstants.SupportedSymbols.ToArray();
     public string[] Timeframes { get; set; } = DatasetConstants.Timeframes.Keys.ToArray();
 }
 

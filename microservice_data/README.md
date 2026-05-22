@@ -445,9 +445,13 @@ The watcher is still isolated from historical dataset mutation. Instead of
 touching `{exchange}_{symbol}_{timeframe}` raw tables, it persists one row per
 `(exchange, symbol)` into
 `market_watch_live(exchange, symbol, realtime_symbol, last_price, last_price_ts, candles_json, updated_at)`.
-`candles_json` keeps the current in-progress candles for all configured
-timeframes, so one flush updates the whole live view for a symbol without
-exploding writes to `exchange × symbol × timeframe` rows every second.
+`candles_json` keeps the last closed candle for each configured timeframe, so
+the watcher persists candle rollovers and the initial live snapshot without
+turning every incoming realtime price tick into a database write.
+
+On service startup the data-service also purges legacy `market_watch` rows from
+`dataset_jobs`, because the watcher no longer belongs to the queue model and
+should not appear in queue APIs or operator history as stale failed work.
 
 Operator control is Kafka-driven and intentionally separate from queue topics:
 
@@ -458,17 +462,24 @@ Operator control is Kafka-driven and intentionally separate from queue topics:
 
 Realtime price sources remain websocket-first:
 
-- Binance USD-M all-ticker stream via `Binance.Net`
-- Bybit V5 linear ticker streams via `Bybit.Net`
+- Binance USD-M targeted book-ticker streams via `Binance.Net`; the watcher
+   derives the live price from best bid/ask midpoint for the configured symbol
+   whitelist only
+- Bybit V5 linear depth-1 orderbook streams via `Bybit.Net`; the watcher also
+   uses best bid/ask midpoint instead of sparse last-trade ticker updates
 - Kraken Spot V2 ticker streams via `KrakenExchange.Net`
 
-Symbol discovery still comes from the in-repo REST clients, which keeps the
-live universe aligned with the historical ingest naming rules. If discovery
-for one exchange fails at startup, the watcher degrades instead of failing the
-whole runtime and can fall back to the persisted symbol list from
-`market_watch_live`. Current live Kraken coverage remains intentionally
-limited to the `*USDT` spot universe that the service already resolves
-reliably.
+Symbol discovery still comes from the in-repo REST clients, but the raw
+exchange universe is now filtered by `DataService:MarketWatch:Symbols`.
+The default whitelist mirrors the symbols shown in Admin `Dataset Configuration`,
+so live subscriptions stay inside the supported dataset symbol set instead of
+expanding to every tradable instrument returned by exchange metadata, and stale
+`market_watch_live` rows outside the current universe are pruned on startup.
+If discovery for one exchange fails or stalls at startup, the watcher now degrades
+instead of failing or blocking the whole runtime and can fall back to the
+persisted symbol list from `market_watch_live`. Current live Kraken coverage
+remains intentionally limited to the `*USDT` spot universe that the service
+already resolves reliably.
 
 Current candles are derived locally from the live price stream and are meant
 as a low-latency overlay. Authoritative historical candles still belong to
@@ -478,6 +489,7 @@ Main config lives under `DataService:MarketWatch`:
 
 - `Enabled`
 - `Exchanges[]`
+- `Symbols[]`
 - `Timeframes[]`
 - `FlushIntervalMs`
 - `ProgressIntervalSeconds`

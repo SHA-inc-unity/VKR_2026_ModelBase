@@ -378,7 +378,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
 
     private object HandleMarketWatcherStatus() => new
     {
-        watcher = _marketWatcher.GetSnapshot(),
+        watcher = BuildMarketWatcherSnapshot(_marketWatcher.GetSnapshot()),
     };
 
     private object HandleMarketWatcherSetEnabled(JsonElement payload)
@@ -394,18 +394,41 @@ public sealed partial class KafkaConsumerService : BackgroundService
         {
             ok = true,
             desired_enabled = enabled.Value,
-            watcher = _marketWatcher.GetSnapshot(),
+            watcher = BuildMarketWatcherSnapshot(_marketWatcher.GetSnapshot()),
         };
     }
 
-    private async Task<object> HandleMarketWatcherRowsAsync(JsonElement payload, CancellationToken ct)
+    private static object BuildMarketWatcherSnapshot(MarketWatcherStatusSnapshot snapshot) => new
+    {
+        desiredEnabled = snapshot.DesiredEnabled,
+        effectiveEnabled = snapshot.EffectiveEnabled,
+        status = snapshot.Status,
+        message = snapshot.Message,
+        startedAtMs = snapshot.StartedAtMs,
+        lastHeartbeatAtMs = snapshot.LastHeartbeatAtMs,
+        lastFlushAtMs = snapshot.LastFlushAtMs,
+        lastTickAtMs = snapshot.LastTickAtMs,
+        trackedSymbols = snapshot.TrackedSymbols,
+        liveRows = snapshot.LiveRows,
+        avgLagMs = snapshot.AverageLagMs,
+        maxLagMs = snapshot.MaxLagMs,
+        ticksInLastWindow = snapshot.TicksInLastWindow,
+        lastFlushRows = snapshot.LastFlushRows,
+        exchanges = snapshot.Exchanges,
+        timeframes = snapshot.Timeframes,
+        lastError = snapshot.LastError,
+        lastErrorAtMs = snapshot.LastErrorAtMs,
+    };
+
+    private Task<object> HandleMarketWatcherRowsAsync(JsonElement payload, CancellationToken ct)
     {
         var exchange = TryGetString(payload, "exchange");
         var search = TryGetString(payload, "search");
         var limit = (int?)TryGetInt64(payload, "limit") ?? 100;
         var offset = (int?)TryGetInt64(payload, "offset") ?? 0;
-        var page = await _marketWatchRepo.ReadLivePageAsync(exchange, search, limit, offset, ct);
-        return new
+        var page = _marketWatcher.ReadLiveRows(exchange, search, limit, offset);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return Task.FromResult<object>(new
         {
             items = page.Items.Select(item => new
             {
@@ -413,15 +436,15 @@ public sealed partial class KafkaConsumerService : BackgroundService
                 symbol = item.Symbol,
                 realtime_symbol = item.RealtimeSymbol,
                 last_price = item.LastPrice,
-                last_price_ts = item.LastPriceTimestampUtc.ToUniversalTime().ToString("O"),
-                updated_at = item.UpdatedAtUtc.ToUniversalTime().ToString("O"),
-                lag_ms = item.LagMs,
-                candles_json = ParseJsonOrEmpty(item.CandlesJson),
+                last_price_ts = DateTimeOffset.FromUnixTimeMilliseconds(item.LastPriceTimestampMs).ToUniversalTime().ToString("O"),
+                updated_at = DateTimeOffset.FromUnixTimeMilliseconds(item.UpdatedAtMs).ToUniversalTime().ToString("O"),
+                lag_ms = Math.Max(0, now - item.LastPriceTimestampMs),
+                candles_json = item.Frames.ToDictionary(frame => frame, _ => (object?)null),
             }),
             total = page.Total,
             limit = page.Limit,
             offset = page.Offset,
-        };
+        });
     }
 
     private object HandleMarketWatcherLogs(JsonElement payload)

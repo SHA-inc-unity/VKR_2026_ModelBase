@@ -1,5 +1,20 @@
 namespace DataService.API.Jobs;
 
+public sealed record MarketWatcherLiveRowSnapshot(
+    string Exchange,
+    string Symbol,
+    string? RealtimeSymbol,
+    decimal LastPrice,
+    long LastPriceTimestampMs,
+    long UpdatedAtMs,
+    string[] Frames);
+
+public sealed record MarketWatcherLiveRowsPage(
+    IReadOnlyList<MarketWatcherLiveRowSnapshot> Items,
+    int Total,
+    int Limit,
+    int Offset);
+
 public sealed record MarketWatcherStatusSnapshot(
     bool DesiredEnabled,
     bool EffectiveEnabled,
@@ -11,6 +26,8 @@ public sealed record MarketWatcherStatusSnapshot(
     long? LastTickAtMs,
     int TrackedSymbols,
     int LiveRows,
+    long? AverageLagMs,
+    long? MaxLagMs,
     long TicksInLastWindow,
     int LastFlushRows,
     string[] Exchanges,
@@ -44,6 +61,7 @@ public sealed class MarketWatcherRuntimeState
     private long? _lastTickAtMs;
     private int _trackedSymbols;
     private int _liveRows;
+    private readonly Dictionary<string, MarketWatcherLiveRowSnapshot> _rows = new(StringComparer.OrdinalIgnoreCase);
     private long _ticksInLastWindow;
     private int _lastFlushRows;
     private string[] _exchanges = [];
@@ -119,6 +137,7 @@ public sealed class MarketWatcherRuntimeState
             _lastTickAtMs = null;
             _trackedSymbols = 0;
             _liveRows = 0;
+            _rows.Clear();
             _ticksInLastWindow = 0;
             _lastFlushRows = 0;
             _lastError = null;
@@ -144,9 +163,57 @@ public sealed class MarketWatcherRuntimeState
             _lastFlushAtMs = now;
             _lastTickAtMs = lastTickAtMs ?? _lastTickAtMs;
             _trackedSymbols = trackedSymbols;
-            _liveRows = liveRows;
+            _liveRows = _rows.Count > 0 ? _rows.Count : liveRows;
             _ticksInLastWindow = ticksInLastWindow;
             _lastFlushRows = lastFlushRows;
+        }
+    }
+
+    public void UpsertLiveRow(MarketWatcherLiveRowSnapshot row)
+    {
+        var key = BuildRowKey(row.Exchange, row.Symbol);
+        lock (_gate)
+        {
+            _rows[key] = row;
+            _liveRows = _rows.Count;
+            _lastTickAtMs = row.LastPriceTimestampMs;
+        }
+    }
+
+    public MarketWatcherLiveRowsPage ReadLiveRows(
+        string? exchange,
+        string? search,
+        int limit,
+        int offset)
+    {
+        var safeLimit = Math.Clamp(limit, 1, 500);
+        var safeOffset = Math.Max(offset, 0);
+        var normalizedExchange = string.IsNullOrWhiteSpace(exchange)
+            ? null
+            : exchange.Trim().ToLowerInvariant();
+        var normalizedSearch = string.IsNullOrWhiteSpace(search)
+            ? null
+            : search.Trim();
+
+        lock (_gate)
+        {
+            var filtered = _rows.Values
+                .Where(row => normalizedExchange is null
+                    || string.Equals(row.Exchange, normalizedExchange, StringComparison.OrdinalIgnoreCase))
+                .Where(row => normalizedSearch is null
+                    || row.Symbol.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)
+                    || row.Exchange.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)
+                    || (!string.IsNullOrWhiteSpace(row.RealtimeSymbol)
+                        && row.RealtimeSymbol.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)))
+                .OrderBy(row => row.Symbol, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(row => row.Exchange, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return new MarketWatcherLiveRowsPage(
+                Items: filtered.Skip(safeOffset).Take(safeLimit).ToArray(),
+                Total: filtered.Length,
+                Limit: safeLimit,
+                Offset: safeOffset);
         }
     }
 
@@ -199,6 +266,7 @@ public sealed class MarketWatcherRuntimeState
     {
         lock (_gate)
         {
+            var (averageLagMs, maxLagMs) = ComputeLagSnapshotUnsafe();
             return new MarketWatcherStatusSnapshot(
                 DesiredEnabled: _desiredEnabled,
                 EffectiveEnabled: _effectiveEnabled,
@@ -210,6 +278,8 @@ public sealed class MarketWatcherRuntimeState
                 LastTickAtMs: _lastTickAtMs,
                 TrackedSymbols: _trackedSymbols,
                 LiveRows: _liveRows,
+                AverageLagMs: averageLagMs,
+                MaxLagMs: maxLagMs,
                 TicksInLastWindow: _ticksInLastWindow,
                 LastFlushRows: _lastFlushRows,
                 Exchanges: _exchanges.ToArray(),
@@ -251,5 +321,30 @@ public sealed class MarketWatcherRuntimeState
                 _logs.RemoveLast();
             }
         }
+    }
+
+    private static string BuildRowKey(string exchange, string symbol) => $"{exchange}:{symbol}";
+
+    private (long? AverageLagMs, long? MaxLagMs) ComputeLagSnapshotUnsafe()
+    {
+        if (_rows.Count == 0)
+        {
+            return (null, null);
+        }
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long totalLag = 0;
+        long maxLag = 0;
+        foreach (var row in _rows.Values)
+        {
+            var lag = Math.Max(0, now - row.LastPriceTimestampMs);
+            totalLag += lag;
+            if (lag > maxLag)
+            {
+                maxLag = lag;
+            }
+        }
+
+        return (Math.Round((double)totalLag / _rows.Count) is var avg ? (long)avg : null, maxLag);
     }
 }
