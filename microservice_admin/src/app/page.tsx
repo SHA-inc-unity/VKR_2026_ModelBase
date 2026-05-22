@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
 import type { BarDatum } from '@/components/charts/CoverageBar';
@@ -37,6 +38,17 @@ interface DashboardCache {
   tables: string[];
   coverage: Record<string, TableCoverage>;
   modelCount: number | null;
+}
+
+type DashboardExchange = 'bybit' | 'binance' | 'kraken';
+type DashboardExchangeFilter = 'all' | DashboardExchange;
+
+const DASHBOARD_EXCHANGES: DashboardExchange[] = ['bybit', 'binance', 'kraken'];
+
+function getTableExchange(table: string): DashboardExchange {
+  if (table.startsWith('binance_')) return 'binance';
+  if (table.startsWith('kraken_')) return 'kraken';
+  return 'bybit';
 }
 
 // в”Ђв”Ђ Sub-components в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
@@ -146,12 +158,14 @@ function StatCard({
 
 // в”Ђв”Ђ Page в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 export default function DashboardPage() {
+  const { t } = useLocale();
   const [dataHealth,      setDataHealth]      = useState<ServiceHealth | null>(null);
   const [tables,          setTables]          = useState<string[]>([]);
   const [coverage,        setCoverage]        = useState<Record<string, TableCoverage>>({});
   const [modelCount,      setModelCount]      = useState<number | null>(null);
   const [connectionTarget, setConnectionTarget] = useState<string>('localhost');
   const [kafkaBroker, setKafkaBroker] = useState<KafkaBrokerHealth | null>(null);
+  const [exchangeFilter,  setExchangeFilter]  = useState<DashboardExchangeFilter>('all');
 
   const [analiticHealth, setAnaliticHealth] = useState<ServiceHealth | null>(null);
   const [redpandaInfra,  setRedpandaInfra]  = useState<InfraServiceHealth | null>(null);
@@ -175,23 +189,56 @@ export default function DashboardPage() {
 
   const pendingSaveRef = useRef(false);
 
-  const totalRows = useMemo(
-    () => tables.reduce((s, t) => s + (coverage[t]?.rows ?? 0), 0),
+  const coverageLoaded = tables.filter(t => coverage[t] !== undefined).length;
+  const nonZeroTables = useMemo(
+    () => tables.filter(table => (coverage[table]?.rows ?? 0) > 0),
     [tables, coverage],
   );
+  const availableExchanges = useMemo(
+    () => DASHBOARD_EXCHANGES.filter(exchange =>
+      nonZeroTables.some(table => getTableExchange(table) === exchange)),
+    [nonZeroTables],
+  );
+  const filteredTables = useMemo(
+    () => nonZeroTables.filter(table =>
+      exchangeFilter === 'all' || getTableExchange(table) === exchangeFilter),
+    [nonZeroTables, exchangeFilter],
+  );
+  const totalRows = useMemo(
+    () => filteredTables.reduce((sum, table) => sum + (coverage[table]?.rows ?? 0), 0),
+    [filteredTables, coverage],
+  );
   const lastIngestion = useMemo(
-    () => tables.reduce((m, t) => {
+    () => filteredTables.reduce((m, t) => {
       const ts = coverage[t]?.max_ts_ms;
       return ts ? Math.max(m, ts) : m;
     }, 0),
-    [tables, coverage],
+    [filteredTables, coverage],
   );
-  const coverageLoaded = tables.filter(t => coverage[t] !== undefined).length;
-  const statsLoading   = tablesLoading || (tables.length > 0 && coverageLoaded === 0);
+  const filteredCoverageLoaded = filteredTables.filter(t => coverage[t] !== undefined).length;
+  const statsLoading   = tablesLoading || (filteredTables.length > 0 && filteredCoverageLoaded === 0);
   const coverageChartData: BarDatum[] = useMemo(
-    () => tables.map(t => ({ name: t, pct: getCoveragePct(t, coverage[t]) ?? 0 })),
-    [tables, coverage],
+    () => filteredTables
+      .map(t => ({ name: t, pct: getCoveragePct(t, coverage[t]) ?? 0 }))
+      .sort((left, right) => right.pct - left.pct || left.name.localeCompare(right.name)),
+    [filteredTables, coverage],
   );
+  const coverageChartHeight = useMemo(
+    () => Math.min(560, Math.max(320, coverageChartData.length * 42)),
+    [coverageChartData.length],
+  );
+  const selectedExchangeLabel = exchangeFilter === 'all'
+    ? t('dashboard.allExchanges')
+    : exchangeFilter[0].toUpperCase() + exchangeFilter.slice(1);
+  const noNonZeroTables = !tablesLoading && nonZeroTables.length === 0;
+  const noTablesForFilter = !tablesLoading && nonZeroTables.length > 0 && filteredTables.length === 0;
+
+  useEffect(() => {
+    if (exchangeFilter === 'all') return;
+    if (!availableExchanges.includes(exchangeFilter)) {
+      setExchangeFilter('all');
+    }
+  }, [exchangeFilter, availableExchanges]);
 
   const refresh = useCallback(() => {
     setDataLoading(true);
@@ -330,7 +377,6 @@ export default function DashboardPage() {
   });
 
   const anyLoading = dataLoading || analiticLoading || tablesLoading || modelsLoading || infraLoading;
-  const { t } = useLocale();
 
   const infraToHealth = (h: InfraServiceHealth | null): ServiceHealth | null => {
     if (!h) return null;
@@ -350,7 +396,27 @@ export default function DashboardPage() {
             {connectionTarget}
           </Badge>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">{t('dashboard.exchange')}</span>
+            <Select
+              value={exchangeFilter}
+              onValueChange={value => setExchangeFilter(value as DashboardExchangeFilter)}
+              disabled={tablesLoading || (availableExchanges.length === 0 && exchangeFilter === 'all')}
+            >
+              <SelectTrigger className="h-9 w-[170px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t('dashboard.allExchanges')}</SelectItem>
+                {availableExchanges.map(exchange => (
+                  <SelectItem key={exchange} value={exchange}>
+                    {exchange[0].toUpperCase() + exchange.slice(1)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           {lastRefresh && (
             <span className="text-xs text-muted-foreground hidden sm:block">
               {lastRefresh.toLocaleTimeString()}
@@ -408,8 +474,8 @@ export default function DashboardPage() {
       <section className="grid grid-cols-1 xs:grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-3">
         <StatCard
           label={t('dashboard.totalTables')}
-          value={String(tables.length)}
-          loading={tablesLoading}
+          value={String(filteredTables.length)}
+          loading={statsLoading}
           icon={Table2}
           accentColor="primary"
         />
@@ -487,17 +553,24 @@ export default function DashboardPage() {
         {/* Coverage bar chart */}
         <Card>
           <CardHeader className="pb-0 px-6 pt-5">
-            <CardTitle className="text-sm font-semibold">{t('dashboard.coverage')}</CardTitle>
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle className="text-sm font-semibold">{t('dashboard.coverage')}</CardTitle>
+              <Badge variant="outline" className="text-[11px]">{selectedExchangeLabel}</Badge>
+            </div>
           </CardHeader>
           <CardContent className="pt-4 px-4 pb-4">
-            {tablesLoading || (tables.length > 0 && coverageLoaded === 0) ? (
-              <Skeleton className="h-[220px] w-full" />
-            ) : tables.length === 0 ? (
-              <div className="flex items-center justify-center h-[220px] text-sm text-muted-foreground">
-                No tables yet
+            {tablesLoading || (filteredTables.length > 0 && filteredCoverageLoaded === 0) ? (
+              <Skeleton className="h-[320px] w-full" />
+            ) : noNonZeroTables ? (
+              <div className="flex items-center justify-center h-[320px] text-sm text-muted-foreground">
+                {t('dashboard.noNonZeroTables')}
+              </div>
+            ) : noTablesForFilter ? (
+              <div className="flex items-center justify-center h-[320px] text-sm text-muted-foreground">
+                {t('dashboard.noTablesForExchange')}
               </div>
             ) : (
-              <CoverageBar data={coverageChartData} height={220} />
+              <CoverageBar data={coverageChartData} height={coverageChartHeight} />
             )}
           </CardContent>
         </Card>
@@ -508,12 +581,17 @@ export default function DashboardPage() {
         <Card>
           <CardHeader className="pb-0 px-6">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-semibold">{t('dashboard.tables')}</CardTitle>
-              {!tablesLoading && coverageLoaded < tables.length && tables.length > 0 && (
-                <span className="text-xs text-muted-foreground">
-                  Loading coverage {coverageLoaded}/{tables.length}
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                <CardTitle className="text-sm font-semibold">{t('dashboard.tables')}</CardTitle>
+                <Badge variant="outline" className="text-[11px]">{selectedExchangeLabel}</Badge>
+              </div>
+              <div className="flex items-center gap-3">
+                {!tablesLoading && filteredCoverageLoaded < filteredTables.length && filteredTables.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    Loading coverage {filteredCoverageLoaded}/{filteredTables.length}
+                  </span>
+                )}
+              </div>
             </div>
           </CardHeader>
           <Separator className="mt-4" />
@@ -524,13 +602,19 @@ export default function DashboardPage() {
                   <Skeleton key={i} className="h-9 w-full" />
                 ))}
               </div>
-            ) : tables.length === 0 ? (
+            ) : noNonZeroTables ? (
               <div className="flex flex-col items-center justify-center py-12 gap-2 text-center">
                 <Table2 className="w-8 h-8 text-muted-foreground/30" />
-                <p className="text-sm font-medium">No dataset tables yet</p>
+                <p className="text-sm font-medium">{t('dashboard.noNonZeroTables')}</p>
                 <p className="text-xs text-muted-foreground">
-                  Ingest data from the Dataset page to create tables
+                  {t('dashboard.noNonZeroTablesHint')}
                 </p>
+              </div>
+            ) : noTablesForFilter ? (
+              <div className="flex flex-col items-center justify-center py-12 gap-2 text-center">
+                <Table2 className="w-8 h-8 text-muted-foreground/30" />
+                <p className="text-sm font-medium">{t('dashboard.noTablesForExchange')}</p>
+                <p className="text-xs text-muted-foreground">{selectedExchangeLabel}</p>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -545,7 +629,7 @@ export default function DashboardPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {tables.map(t => {
+                  {filteredTables.map(t => {
                     const cv  = coverage[t];
                     const pct = cv ? getCoveragePct(t, cv) : null;
                     return (

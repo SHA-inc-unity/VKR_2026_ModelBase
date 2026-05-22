@@ -47,6 +47,11 @@ const translations = {
     'dashboard.connectedTo':  'Connected to',
     'dashboard.kafkaBootstrap':'Kafka bootstrap',
     'dashboard.kafkaError':    'Kafka error',
+    'dashboard.exchange':      'Exchange',
+    'dashboard.allExchanges':  'All exchanges',
+    'dashboard.noNonZeroTables':'No non-empty tables yet',
+    'dashboard.noNonZeroTablesHint':'Tables with 0 rows are hidden on the dashboard',
+    'dashboard.noTablesForExchange':'No non-empty tables for this exchange',
 
     // ── Dataset ──────────────────────────────────────────────────────────
     'dataset.title':          'Dataset',
@@ -179,6 +184,11 @@ const translations = {
     'dashboard.connectedTo':  'Подключение к',
     'dashboard.kafkaBootstrap':'Kafka bootstrap',
     'dashboard.kafkaError':    'Ошибка Kafka',
+    'dashboard.exchange':      'Биржа',
+    'dashboard.allExchanges':  'Все биржи',
+    'dashboard.noNonZeroTables':'Пока нет непустых таблиц',
+    'dashboard.noNonZeroTablesHint':'Таблицы с 0 строк скрыты на dashboard',
+    'dashboard.noTablesForExchange':'Для этой биржи нет непустых таблиц',
 
     // ── Dataset ──────────────────────────────────────────────────────────
     'dataset.title':          'Датасет',
