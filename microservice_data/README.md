@@ -293,9 +293,10 @@ requests never blocks `coverage` / `health` queries.
 
 ### Background job scheduler (DatasetJobRunner)
 
-Long-running ingest and future ML tasks run as `dataset_jobs` rows picked
-up by `DatasetJobRunner` (a hosted `BackgroundService`). The scheduler
-enforces two additional concurrency levels on top of the Kafka-layer caps:
+Long-running ingest, the perpetual `market_watch` loop and future ML tasks
+run as `dataset_jobs` rows picked up by `DatasetJobRunner` (a hosted
+`BackgroundService`). The scheduler enforces two additional concurrency
+levels on top of the Kafka-layer caps:
 
 **Non-blocking startup path**: service startup no longer waits for the
 Kafka consumer to enter its blocking `Consume()` loop or for
@@ -308,6 +309,7 @@ in background; until it succeeds callers get `{ error, code:
 | Constraint | Value | Purpose |
 | ---------- | ----- | ------- |
 | Max concurrent ingest jobs | 4 per exchange | One exchange cannot starve the others; `bybit`, `binance`, `kraken` each get their own ingest pool |
+| Max concurrent market-watch jobs | 1 global | Queue-visible singleton live worker; bootstrap dedups it by fixed `params_hash` |
 | Heavy-TF ingest slot | 1 per exchange | At most one `1m`/`3m` ingest runs at a time for the same exchange |
 
 **Per-timeframe API parallelism** inside a single ingest job:
@@ -421,6 +423,48 @@ timeout). It always returns one of:
 The admin UI checks for `error`/missing `job_id` and marks that
 timeframe as `error` with the backend-provided message — `ALL` mode now
 honestly reflects which jobs were actually created.
+
+### Live market watch (`market_watch`)
+
+When `DataService:MarketWatch:Enabled=true`, `MarketWatchBootstrapService`
+periodically guarantees one active `dataset_jobs` row of type
+`market_watch` with a fixed `params_hash = "market_watch:singleton:v1"`.
+The job is intentionally perpetual: it stays in `running`, emits regular
+heartbeat/progress updates and is re-queued automatically after service
+restart.
+
+The worker is isolated from historical dataset mutation. Instead of writing
+into `{exchange}_{symbol}_{timeframe}` raw tables, it persists one row per
+`(exchange, symbol)` into `market_watch_live(exchange, symbol, last_price,
+last_price_ts, candles_json, updated_at)`. `candles_json` keeps the current
+in-progress candles for all configured timeframes, so one flush updates the
+whole live view for a symbol without exploding writes to
+`exchange × symbol × timeframe` rows every second.
+
+Realtime price sources are websocket-first:
+
+- Binance USD-M all-ticker stream via `Binance.Net`
+- Bybit V5 linear ticker streams via `Bybit.Net`
+- Kraken Spot V2 ticker streams via `KrakenExchange.Net`
+
+Symbol discovery still comes from the in-repo REST clients, which keeps the
+live universe aligned with the historical ingest naming rules. Current live
+Kraken coverage is intentionally limited to the `*USDT` spot universe that
+the service already resolves reliably.
+
+Current candles are derived locally from the live price stream and are meant
+as a low-latency overlay. Authoritative historical candles still belong to
+the ingest / repair / upsert paths.
+
+Main config lives under `DataService:MarketWatch`:
+
+- `Enabled`
+- `Exchanges[]`
+- `Timeframes[]`
+- `FlushIntervalMs`
+- `ProgressIntervalSeconds`
+- `BybitSymbolsPerSubscription`
+- `KrakenSymbolsPerSubscription`
 
 Anomaly responses are **summary-first**: the inline `sample` is capped at
 200 rows. Whenever the total exceeds the cap, the full report is parked in

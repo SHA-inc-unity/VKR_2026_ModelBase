@@ -13,15 +13,21 @@ namespace DataService.API.Jobs;
 /// </summary>
 public sealed class DatasetJobRunner : BackgroundService
 {
+    private static readonly string[] IngestExchanges = ["bybit", "binance", "kraken"];
+    private const int IngestSlotsPerExchange = 4;
+
     // Per-type concurrency caps. Tuned to keep the Postgres pool (size 100)
     // and Bybit rate-limit budget reasonable. Single-instance deployment
     // — these are process-local semaphores.
     //
-    // Ingest cap is isolated per exchange: one exchange cannot starve the others.
-    // Each exchange gets 4 slots; non-ingest job types keep the global per-type caps.
+    // Ingest keeps a global cap too, but it must be the sum of the
+    // exchange-isolated slots below. Otherwise the old global ingest
+    // semaphore silently limits the whole runner to 4 jobs total even when
+    // binance/kraken/bybit each still have free exchange capacity.
     private static readonly Dictionary<string, int> Caps = new(StringComparer.OrdinalIgnoreCase)
     {
-        [DatasetJobType.Ingest]          = 4,
+        [DatasetJobType.Ingest]          = IngestSlotsPerExchange * IngestExchanges.Length,
+        [DatasetJobType.MarketWatch]     = 1,
         [DatasetJobType.DetectAnomalies] = 8,
         [DatasetJobType.ComputeFeatures] = 2,
         [DatasetJobType.CleanApply]      = 2,
@@ -58,7 +64,7 @@ public sealed class DatasetJobRunner : BackgroundService
         _log = log;
         _handlers = handlers.ToDictionary(h => h.Type, StringComparer.OrdinalIgnoreCase);
         _slots = Caps.ToDictionary(kv => kv.Key, kv => new SemaphoreSlim(kv.Value, kv.Value), StringComparer.OrdinalIgnoreCase);
-        _ingestSlotsByExchange = BuildExchangeSlots(4);
+        _ingestSlotsByExchange = BuildExchangeSlots(IngestSlotsPerExchange);
         _heavyIngestSlotsByExchange = BuildExchangeSlots(1);
     }
 
@@ -236,12 +242,10 @@ public sealed class DatasetJobRunner : BackgroundService
         DatasetConstants.HeavyTimeframes.Contains(tf);
 
     private static Dictionary<string, SemaphoreSlim> BuildExchangeSlots(int cap) =>
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["bybit"] = new SemaphoreSlim(cap, cap),
-            ["binance"] = new SemaphoreSlim(cap, cap),
-            ["kraken"] = new SemaphoreSlim(cap, cap),
-        };
+        IngestExchanges.ToDictionary(
+            exchange => exchange,
+            _ => new SemaphoreSlim(cap, cap),
+            StringComparer.OrdinalIgnoreCase);
 
     private static SemaphoreSlim GetExchangeSlot(Dictionary<string, SemaphoreSlim> slots, string exchange) =>
         slots.TryGetValue(exchange, out var slot) ? slot : slots["bybit"];

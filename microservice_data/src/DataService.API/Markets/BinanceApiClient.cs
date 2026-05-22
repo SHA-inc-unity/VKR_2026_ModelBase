@@ -27,6 +27,33 @@ public sealed class BinanceApiClient : IMarketDataClient
         _log = log;
     }
 
+    public async Task<IReadOnlyList<MarketWatchSymbol>> FetchMarketWatchSymbolsAsync(
+        CancellationToken ct = default)
+    {
+        using var doc = await GetJsonAsync($"{BaseUrl}/fapi/v1/exchangeInfo", AuxiliaryThrottleUnits, ct);
+        if (!doc.RootElement.TryGetProperty("symbols", out var symbolsNode)
+            || symbolsNode.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<MarketWatchSymbol>();
+        }
+
+        var symbols = new List<MarketWatchSymbol>(symbolsNode.GetArrayLength());
+        foreach (var item in symbolsNode.EnumerateArray())
+        {
+            var symbol = item.TryGetProperty("symbol", out var symbolNode) ? symbolNode.GetString() : null;
+            var status = item.TryGetProperty("status", out var statusNode) ? statusNode.GetString() : null;
+            if (string.IsNullOrWhiteSpace(symbol)
+                || !string.Equals(status, "TRADING", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            symbols.Add(new MarketWatchSymbol(symbol));
+        }
+
+        return symbols;
+    }
+
     public async Task<(long LaunchMs, long FundingMs)> FetchInstrumentDetailsAsync(
         string category,
         string symbol,

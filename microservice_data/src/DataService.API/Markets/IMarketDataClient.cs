@@ -1,8 +1,13 @@
 namespace DataService.API.Markets;
 
+public sealed record MarketWatchSymbol(string Symbol, string? RealtimeSymbol = null);
+
 public interface IMarketDataClient
 {
     string Exchange { get; }
+
+    Task<IReadOnlyList<MarketWatchSymbol>> FetchMarketWatchSymbolsAsync(
+        CancellationToken ct = default);
 
     Task<(long LaunchMs, long FundingMs)> FetchInstrumentDetailsAsync(
         string category,

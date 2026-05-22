@@ -28,6 +28,55 @@ public sealed class BybitApiClient : IMarketDataClient
 
     public string Exchange => "bybit";
 
+    public async Task<IReadOnlyList<MarketWatchSymbol>> FetchMarketWatchSymbolsAsync(
+        CancellationToken ct = default)
+    {
+        var cursor = string.Empty;
+        var symbols = new List<MarketWatchSymbol>(1024);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        while (true)
+        {
+            var url = $"{DatasetConstants.BybitBaseUrl}/v5/market/instruments-info?category=linear&limit=1000";
+            if (!string.IsNullOrWhiteSpace(cursor))
+            {
+                url += $"&cursor={Uri.EscapeDataString(cursor)}";
+            }
+
+            using var doc = await GetJsonAsync(url, ct);
+            var result = doc.RootElement.GetProperty("result");
+            if (result.TryGetProperty("list", out var list) && list.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in list.EnumerateArray())
+                {
+                    var symbol = item.TryGetProperty("symbol", out var symbolNode) ? symbolNode.GetString() : null;
+                    var status = item.TryGetProperty("status", out var statusNode) ? statusNode.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(symbol)
+                        || (!string.IsNullOrWhiteSpace(status)
+                            && !string.Equals(status, "Trading", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    if (seen.Add(symbol))
+                    {
+                        symbols.Add(new MarketWatchSymbol(symbol));
+                    }
+                }
+            }
+
+            cursor = result.TryGetProperty("nextPageCursor", out var cursorNode)
+                ? cursorNode.GetString() ?? string.Empty
+                : string.Empty;
+            if (string.IsNullOrWhiteSpace(cursor))
+            {
+                break;
+            }
+        }
+
+        return symbols;
+    }
+
     /// <summary>
     /// GET the given URL with retry, returning the parsed JSON document.
     /// Caller must dispose the returned JsonDocument.

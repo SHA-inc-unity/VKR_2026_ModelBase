@@ -24,6 +24,7 @@ public static class DatasetJobStatus
 public static class DatasetJobType
 {
     public const string Ingest           = "ingest";
+    public const string MarketWatch      = "market_watch";
     public const string DetectAnomalies  = "detect_anomalies";
     public const string ComputeFeatures  = "compute_features";
     public const string CleanApply       = "clean_apply";
@@ -33,7 +34,7 @@ public static class DatasetJobType
 
     public static readonly HashSet<string> All = new(StringComparer.OrdinalIgnoreCase)
     {
-        Ingest, DetectAnomalies, ComputeFeatures, CleanApply,
+        Ingest, MarketWatch, DetectAnomalies, ComputeFeatures, CleanApply,
         Export, ImportCsv, UpsertOhlcv,
     };
 
@@ -44,6 +45,7 @@ public static class DatasetJobType
     /// </summary>
     public static string ConflictClassOf(string type) => type switch
     {
+        MarketWatch     => DatasetJobConflictClass.MarketWatch,
         Ingest          => DatasetJobConflictClass.MutatingTable,
         UpsertOhlcv     => DatasetJobConflictClass.MutatingTable,
         ImportCsv       => DatasetJobConflictClass.MutatingTable,
@@ -61,6 +63,8 @@ public static class DatasetJobConflictClass
     public const string MutatingTable = "mutating_table";
     /// <summary>Heavy read pipeline (e.g. anomaly scan, full export).</summary>
     public const string ReadHeavy     = "read_heavy";
+    /// <summary>Dedicated singleton live market watcher state.</summary>
+    public const string MarketWatch   = "market_watch";
     /// <summary>Marker for future external-IO heavy ops (e.g. Bybit fetch only).</summary>
     public const string ExternalIo    = "external_io";
 }

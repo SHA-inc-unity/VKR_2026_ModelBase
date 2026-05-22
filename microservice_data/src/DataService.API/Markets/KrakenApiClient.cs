@@ -21,6 +21,7 @@ public sealed class KrakenApiClient : IMarketDataClient
     private readonly ILogger<KrakenApiClient> _log;
     private readonly KrakenRateLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, string> _pairCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _websocketNameCache = new(StringComparer.OrdinalIgnoreCase);
 
     public string Exchange => ExchangeName;
 
@@ -29,6 +30,37 @@ public sealed class KrakenApiClient : IMarketDataClient
         _http = http;
         _rateLimiter = rateLimiter;
         _log = log;
+    }
+
+    public async Task<IReadOnlyList<MarketWatchSymbol>> FetchMarketWatchSymbolsAsync(
+        CancellationToken ct = default)
+    {
+        using var doc = await GetJsonAsync($"{BaseUrl}/0/public/AssetPairs", ct);
+        if (!doc.RootElement.TryGetProperty("result", out var result)
+            || result.ValueKind != JsonValueKind.Object)
+        {
+            return Array.Empty<MarketWatchSymbol>();
+        }
+
+        var symbols = new List<MarketWatchSymbol>();
+        foreach (var pair in result.EnumerateObject())
+        {
+            var altname = pair.Value.TryGetProperty("altname", out var altNode) ? altNode.GetString() : null;
+            var wsname = pair.Value.TryGetProperty("wsname", out var wsNode) ? wsNode.GetString() : null;
+            if (string.IsNullOrWhiteSpace(altname)
+                || string.IsNullOrWhiteSpace(wsname)
+                || !altname.EndsWith("USDT", StringComparison.OrdinalIgnoreCase)
+                || !wsname.EndsWith("/USDT", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            _pairCache[altname] = altname;
+            _websocketNameCache[altname] = wsname;
+            symbols.Add(new MarketWatchSymbol(altname, wsname));
+        }
+
+        return symbols;
     }
 
     public static (long EffectiveStartMs, long EffectiveEndMs, bool Clipped) ClampRequestedWindow(
@@ -264,6 +296,10 @@ public sealed class KrakenApiClient : IMarketDataClient
 
                 var resolved = altname ?? prop.Name;
                 _pairCache.TryAdd(normalized, resolved);
+                if (!string.IsNullOrWhiteSpace(wsname))
+                {
+                    _websocketNameCache.TryAdd(normalized, wsname!);
+                }
                 return resolved;
             }
         }
