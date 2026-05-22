@@ -52,10 +52,14 @@ const CACHE_TABLES_KEY         = 'modelline:dataset-tables:v1';
 const CACHE_TABLES_TTL         = 3600; // 60 minutes
 const CACHE_COVERAGE_TTL       = 1800; // 30 minutes
 const ALL_INGEST_ERROR_RETENTION_MS = 10_000;
-const EXCHANGES = [
+const ACTIVE_EXCHANGES = [
   { value: 'bybit', label: 'Bybit' },
   { value: 'binance', label: 'Binance' },
   { value: 'kraken', label: 'Kraken' },
+] as const;
+const EXCHANGES = [
+  { value: 'all', label: 'ALL' },
+  ...ACTIVE_EXCHANGES,
 ] as const;
 type DatasetExchange = typeof EXCHANGES[number]['value'];
 
@@ -174,7 +178,7 @@ function parseTableName(table: string): { exchange: DatasetExchange; symbol: str
   let exchange: DatasetExchange = 'bybit';
   let symbolParts = parts.slice(0, -1);
   const maybeExchange = symbolParts[0]?.toLowerCase();
-  if (maybeExchange && EXCHANGES.some((item) => item.value === maybeExchange)) {
+  if (maybeExchange && ACTIVE_EXCHANGES.some((item) => item.value === maybeExchange)) {
     exchange = maybeExchange as DatasetExchange;
     symbolParts = symbolParts.slice(1);
   }
@@ -186,24 +190,39 @@ function parseTableName(table: string): { exchange: DatasetExchange; symbol: str
   };
 }
 
-function buildIngestScopeKey(symbol: string, timeframe: string): string {
-  return `${symbol}::${timeframe}`;
+function buildIngestScopeKey(exchange: DatasetExchange, symbol: string, timeframe: string): string {
+  return `${exchange}::${symbol}::${timeframe}`;
 }
 
-function parseIngestScopeKey(scopeKey: string): { symbol: string | null; timeframe: string } {
-  const separatorIdx = scopeKey.indexOf('::');
-  if (separatorIdx === -1) {
-    return { symbol: null, timeframe: scopeKey };
+function parseIngestScopeKey(scopeKey: string): { exchange: DatasetExchange | null; symbol: string | null; timeframe: string } {
+  const parts = scopeKey.split('::');
+  if (parts.length >= 3) {
+    return {
+      exchange: parts[0] as DatasetExchange,
+      symbol: parts[1] || null,
+      timeframe: parts.slice(2).join('::'),
+    };
+  }
+  if (parts.length === 2) {
+    return {
+      exchange: null,
+      symbol: parts[0] || null,
+      timeframe: parts[1],
+    };
   }
   return {
-    symbol: scopeKey.slice(0, separatorIdx),
-    timeframe: scopeKey.slice(separatorIdx + 2),
+    exchange: null,
+    symbol: null,
+    timeframe: scopeKey,
   };
 }
 
 function formatIngestScopeLabel(scopeKey: string): string {
   const parsed = parseIngestScopeKey(scopeKey);
-  return parsed.symbol ? `${parsed.symbol} ${parsed.timeframe}` : parsed.timeframe;
+  const exchangeLabel = parsed.exchange
+    ? EXCHANGES.find((item) => item.value === parsed.exchange)?.label ?? parsed.exchange.toUpperCase()
+    : null;
+  return [exchangeLabel, parsed.symbol, parsed.timeframe].filter(Boolean).join(' ');
 }
 
 function normalizeIngestJobStage(stage?: string | null): 'prepare' | 'fetch' | 'upsert' | 'compute_features' | null {
@@ -589,7 +608,9 @@ export default function DatasetPage() {
   }, []);
 
   const isAllSymbolsMode = symbol === 'ALL';
-  const isMultiIngestMode = timeframe === 'ALL' || isAllSymbolsMode;
+  const isAllExchangesMode = exchange === 'all';
+  const isAggregateSelectionMode = isAllSymbolsMode || isAllExchangesMode;
+  const isMultiIngestMode = timeframe === 'ALL' || isAggregateSelectionMode;
 
   useEffect(() => {
     if (symbol === 'ALL' && timeframe !== 'ALL') {
@@ -616,7 +637,7 @@ export default function DatasetPage() {
   // On symbol/timeframe change: restore coverage from cache
   useEffect(() => {
     async function tryRestoreCache() {
-      if (symbol === 'ALL') {
+      if (isAggregateSelectionMode) {
         setCoverage(null);
         setAllCoverages(null);
         return;
@@ -629,7 +650,7 @@ export default function DatasetPage() {
       setAllCoverages(cachedAll ?? null);
     }
     void tryRestoreCache();
-  }, [symbol, timeframe, exchange]);
+  }, [symbol, timeframe, exchange, isAggregateSelectionMode]);
 
   const [tables,        setTables]        = useState<DataTableInfo[] | null>(null);
   const [coverage,      setCoverage]      = useState<CoverageResult | null>(null);
@@ -742,7 +763,7 @@ export default function DatasetPage() {
       params: {
         symbol: parsed.symbol ?? symbol,
         timeframe: parsed.timeframe,
-        exchange,
+        exchange: parsed.exchange ?? exchange,
         dateFrom,
         dateTo,
       },
@@ -850,7 +871,7 @@ export default function DatasetPage() {
   // so it composes safely while another operation is in progress.
   const refreshCoverageState = async (): Promise<void> => {
     try {
-      if (symbol === 'ALL') {
+      if (isAggregateSelectionMode) {
         setCoverage(null);
         setAllCoverages(null);
         return;
@@ -1037,7 +1058,7 @@ export default function DatasetPage() {
   }, [allJobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!isAllSymbolsMode) return;
+    if (!isAggregateSelectionMode) return;
     setCoverage(null);
     setAllCoverages(null);
     setSelectedTable(null);
@@ -1046,7 +1067,7 @@ export default function DatasetPage() {
     setQualityProgress(null);
     setRepairStages(null);
     setIsAllMode(false);
-  }, [isAllSymbolsMode]);
+  }, [isAggregateSelectionMode]);
 
   const handleListTables = async () => {
     if (operationLockRef.current) return;
@@ -1121,8 +1142,8 @@ export default function DatasetPage() {
   };
 
   const handleCheckCoverage = async () => {
-    if (symbol === 'ALL') {
-      toast('Для Symbol=ALL доступен только Ingest. Выберите конкретный датасет для coverage.', 'info');
+    if (isAggregateSelectionMode) {
+      toast('Для режимов Symbol=ALL или Exchange=ALL доступен только Ingest. Выберите конкретный датасет и биржу для coverage.', 'info');
       return;
     }
     if (operationLockRef.current) return;
@@ -1209,16 +1230,22 @@ export default function DatasetPage() {
       await refreshCoverageState();
 
       if (isMultiIngestMode) {
+        const selectedExchanges = exchange === 'all'
+          ? ACTIVE_EXCHANGES.map((item) => item.value)
+          : [exchange];
         const selectedSymbols = symbol === 'ALL' ? [...SYMBOLS] as string[] : [symbol];
         const selectedTimeframes = timeframe === 'ALL' || symbol === 'ALL'
           ? [...TIMEFRAMES] as string[]
           : [timeframe];
-        const targets = selectedSymbols.flatMap((targetSymbol) =>
-          selectedTimeframes.map((targetTimeframe) => ({
-            symbol: targetSymbol,
-            timeframe: targetTimeframe,
-            scopeKey: buildIngestScopeKey(targetSymbol, targetTimeframe),
-          })),
+        const targets = selectedExchanges.flatMap((targetExchange) =>
+          selectedSymbols.flatMap((targetSymbol) =>
+            selectedTimeframes.map((targetTimeframe) => ({
+              exchange: targetExchange,
+              symbol: targetSymbol,
+              timeframe: targetTimeframe,
+              scopeKey: buildIngestScopeKey(targetExchange, targetSymbol, targetTimeframe),
+            })),
+          ),
         );
         resetAllIngestErrorCleanup();
 
@@ -1239,7 +1266,7 @@ export default function DatasetPage() {
         const newJobIds: Record<string, string> = {};
 
         for (const target of targets) {
-          const scopeLabel = `${target.symbol} ${target.timeframe}`;
+          const scopeLabel = `${EXCHANGES.find((item) => item.value === target.exchange)?.label ?? target.exchange} ${target.symbol} ${target.timeframe}`;
           try {
             // 5s is plenty: the data-service replies synchronously after a
             // single INSERT. A longer wait would only mask backend bugs.
@@ -1253,9 +1280,9 @@ export default function DatasetPage() {
               Topics.CMD_DATA_DATASET_JOBS_START,
               {
                 type: 'ingest',
-                params: { symbol: target.symbol, timeframe: target.timeframe, start_ms: startMs, end_ms: endMs, exchange },
+                params: { symbol: target.symbol, timeframe: target.timeframe, start_ms: startMs, end_ms: endMs, exchange: target.exchange },
                 target_symbol: target.symbol, target_timeframe: target.timeframe,
-                target_exchange: exchange,
+                target_exchange: target.exchange,
                 target_start_ms: startMs, target_end_ms: endMs,
                 created_by: 'admin_ui',
               },
@@ -1284,7 +1311,7 @@ export default function DatasetPage() {
             seedQueuedJob({
               jobId: res.job_id,
               type: 'ingest',
-              target_table: makeTableName(target.symbol, target.timeframe, exchange),
+              target_table: makeTableName(target.symbol, target.timeframe, target.exchange),
             });
             if (res.deduped) toast(`${scopeLabel}: уже загружается (job deduped)`, 'info');
           } catch (e) {
@@ -1370,8 +1397,8 @@ export default function DatasetPage() {
   };
 
   const handleDeleteRows = async () => {
-    if (symbol === 'ALL') {
-      toast('Для Symbol=ALL доступен только Ingest. Очистка требует конкретный датасет.', 'info');
+    if (isAggregateSelectionMode) {
+      toast('Для режимов Symbol=ALL или Exchange=ALL доступен только Ingest. Очистка требует конкретный датасет и биржу.', 'info');
       return;
     }
     if (operationLockRef.current) return;
@@ -1442,8 +1469,8 @@ export default function DatasetPage() {
   };
 
   const handleExportCsv = async () => {
-    if (symbol === 'ALL') {
-      toast('Для Symbol=ALL export не поддерживается. Выберите конкретный датасет.', 'info');
+    if (isAggregateSelectionMode) {
+      toast('Для режимов Symbol=ALL или Exchange=ALL export не поддерживается. Выберите конкретный датасет и биржу.', 'info');
       return;
     }
     if (operationLockRef.current) return;
@@ -1642,8 +1669,8 @@ export default function DatasetPage() {
   };
 
   const handleRepairDataset = async () => {
-    if (symbol === 'ALL') {
-      toast('Для Symbol=ALL доступен только Ingest. Выберите конкретный датасет для проверки целостности.', 'info');
+    if (isAggregateSelectionMode) {
+      toast('Для режимов Symbol=ALL или Exchange=ALL доступен только Ingest. Выберите конкретный датасет и биржу для проверки целостности.', 'info');
       return;
     }
     if (loadingQuality || loadingRepair) return;
@@ -1856,7 +1883,7 @@ export default function DatasetPage() {
               </div>
             </div>
             <div className="flex flex-col gap-2">
-              <Button onClick={handleCheckCoverage} disabled={isBusy || isAllSymbolsMode} variant="outline" className="w-full gap-2">
+              <Button onClick={handleCheckCoverage} disabled={isBusy || isAggregateSelectionMode} variant="outline" className="w-full gap-2">
                 {loadingCov ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                 Check Coverage
               </Button>
@@ -1880,24 +1907,24 @@ export default function DatasetPage() {
                 {loadingList ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
                 List Tables
               </Button>
-              <Button onClick={handleExportCsv} disabled={isBusy || isAllSymbolsMode} variant="outline" className="w-full gap-2">
+              <Button onClick={handleExportCsv} disabled={isBusy || isAggregateSelectionMode} variant="outline" className="w-full gap-2">
                 {loadingExport
                   ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Подготовка данных...</>
                   : <><Download className="w-3.5 h-3.5" /> Export CSV</>}
               </Button>
-              <Button onClick={handleRepairDataset} disabled={isBusy || isAllSymbolsMode || loadingQuality || loadingRepair || fixAllRunning} variant="outline" className="w-full gap-2">
+              <Button onClick={handleRepairDataset} disabled={isBusy || isAggregateSelectionMode || loadingQuality || loadingRepair || fixAllRunning} variant="outline" className="w-full gap-2">
                 {loadingQuality
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <ShieldCheck className="w-3.5 h-3.5" />}
                 Проверить целостность
               </Button>
-              <Button onClick={handleDeleteRows} disabled={isBusy || isAllSymbolsMode} variant="destructive" className="w-full gap-2">
+              <Button onClick={handleDeleteRows} disabled={isBusy || isAggregateSelectionMode} variant="destructive" className="w-full gap-2">
                 {loadingDelete ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                 Очистить таблицу
               </Button>
-              {isAllSymbolsMode && (
+              {isAggregateSelectionMode && (
                 <p className="text-[11px] text-muted-foreground">
-                  Режим <span className="font-mono">ALL</span> запускает ingest по всем датасетам выбранной биржи и фиксирует timeframe в <span className="font-mono">ALL</span>. Coverage, export, repair и delete доступны только для конкретного symbol.
+                  Режим <span className="font-mono">ALL</span> на symbol или exchange запускает ingest fan-out по набору конкретных dataset jobs. Coverage, export, repair и delete доступны только для конкретного symbol и конкретной биржи.
                 </p>
               )}
             </div>
@@ -2005,9 +2032,9 @@ export default function DatasetPage() {
         </Card>
 
         {/* Right — coverage result */}
-        {isAllSymbolsMode ? (
+        {isAggregateSelectionMode ? (
           <div className="hidden lg:flex items-center justify-center rounded-lg border border-dashed border-border h-44 px-4 text-center text-sm text-muted-foreground">
-            Coverage для Symbol=ALL не считается как одна таблица. Используйте Ingest для постановки всех датасетов в очередь или выберите конкретный symbol для проверки покрытия.
+            Coverage для aggregate режима с ALL не считается как одна таблица. Используйте Ingest для постановки dataset jobs в очередь или выберите конкретный symbol и exchange для проверки покрытия.
           </div>
         ) : timeframe === 'ALL' && allCoverages !== null ? (
           <Card>
