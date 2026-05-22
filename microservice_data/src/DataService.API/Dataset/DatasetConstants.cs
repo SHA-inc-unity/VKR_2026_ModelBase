@@ -22,6 +22,10 @@ public static class DatasetConstants
     /// <summary>Max parallel windows for heavy timeframes (1m, 3m). Very low to
     /// avoid exhausting the shared 96 r/s Bybit budget on a single large fetch.</summary>
     public const int MaxParallelApiWorkers1m = 2;
+    /// <summary>Binance 1m/3m backfills are scheduler-serialized already, so they
+    /// can use a wider in-job page fan-out than Bybit while the shared
+    /// BinanceRateLimiter still enforces the real upstream budget.</summary>
+    public const int MaxParallelApiWorkersBinanceHeavy = 6;
     public const int DefaultWarmupCandles = 24;
 
     /// <summary>Timeframes that produce very large page counts per full-range fetch

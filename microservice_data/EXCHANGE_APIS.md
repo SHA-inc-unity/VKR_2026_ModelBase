@@ -136,6 +136,8 @@
 - Binance работает как full futures pipeline.
 - Для больших окон важно помнить, что kline weight растёт вместе с `limit`, а OI-history физически обрезана последними 30 днями.
 - В ModelLine безопасная трактовка `openInterestHist` — строгие 30 дней с подъёмом `startTime` до ближайшей допустимой границы периода; иначе Binance отвечает `400 parameter 'startTime' is invalid`.
+- Heavy `1m`/`3m` jobs у ModelLine по-прежнему сериализуются на уровне scheduler, поэтому внутри одного Binance job можно держать более широкий page fan-out, пока process-local limiter остаётся ниже общего REST weight budget.
+- Текущий Binance limiter в repo настроен заметно быстрее прежнего conservative режима: примерно `1.7k` weight/min shared budget вместо старых `~600/min`, что даёт кратный выигрыш на million-candle backfills без отказа от `Retry-After`/penalty semantics.
 
 ## Правило для ModelLine
 

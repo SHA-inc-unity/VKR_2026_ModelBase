@@ -6,11 +6,15 @@ public sealed class BinanceRateLimiter
     private readonly object _lock = new();
     private DateTimeOffset _nextAllowedAtUtc = DateTimeOffset.MinValue;
 
-    public BinanceRateLimiter(int maxConcurrentRequests = 3, TimeSpan? unitSpacing = null)
+    public BinanceRateLimiter(int maxConcurrentRequests = 6, TimeSpan? unitSpacing = null)
     {
         if (maxConcurrentRequests <= 0) maxConcurrentRequests = 1;
         _concurrencyGate = new SemaphoreSlim(maxConcurrentRequests, maxConcurrentRequests);
-        UnitSpacing = unitSpacing ?? TimeSpan.FromMilliseconds(100);
+        // Futures klines at limit=1500 cost weight 10. 35 ms per unit keeps the
+        // shared process-local budget around ~1.7k weight/minute, which is
+        // materially faster than the previous ~600 weight/minute while still
+        // leaving headroom under Binance's 2400 weight/minute exchangeInfo cap.
+        UnitSpacing = unitSpacing ?? TimeSpan.FromMilliseconds(35);
     }
 
     public TimeSpan UnitSpacing { get; }

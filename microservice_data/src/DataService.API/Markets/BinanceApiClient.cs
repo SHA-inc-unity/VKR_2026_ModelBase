@@ -11,13 +11,14 @@ public sealed class BinanceApiClient : IMarketDataClient
     private static readonly TimeSpan OpenInterestRetention = TimeSpan.FromDays(30);
     private const int KlineThrottleUnits = 10;
     private const int AuxiliaryThrottleUnits = 3;
+    public const string ExchangeName = "binance";
 
     private readonly HttpClient _http;
     private readonly ILogger<BinanceApiClient> _log;
     private readonly BinanceRateLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, (long LaunchMs, long FundingMs)> _instrumentCache = new();
 
-    public string Exchange => "binance";
+    public string Exchange => ExchangeName;
 
     public BinanceApiClient(HttpClient http, BinanceRateLimiter rateLimiter, ILogger<BinanceApiClient> log)
     {
@@ -126,16 +127,11 @@ public sealed class BinanceApiClient : IMarketDataClient
         });
 
         var pages = await Task.WhenAll(tasks);
-        var merged = new Dictionary<long, (decimal, decimal, decimal, decimal, decimal, decimal)>(pages.Sum(p => p.Count));
-        foreach (var page in pages)
-            foreach (var (t, o, h, l, c, v, tv) in page)
-                merged[t] = (o, h, l, c, v, tv);
-
-        return merged
-            .Where(kv => kv.Key >= startMs && kv.Key <= endMs)
-            .OrderBy(kv => kv.Key)
-            .Select(kv => (kv.Key, kv.Value.Item1, kv.Value.Item2, kv.Value.Item3, kv.Value.Item4, kv.Value.Item5, kv.Value.Item6))
-            .ToList();
+        return MergeOrderedPages(
+            pages,
+            static row => row.Item1,
+            startMs,
+            endMs);
     }
 
     public async Task<IReadOnlyList<(long TimestampMs, decimal Rate)>> FetchFundingRatesAsync(
@@ -183,16 +179,11 @@ public sealed class BinanceApiClient : IMarketDataClient
         });
 
         var pages = await Task.WhenAll(tasks);
-        var merged = new Dictionary<long, decimal>(pages.Sum(p => p.Count));
-        foreach (var page in pages)
-            foreach (var (t, v) in page)
-                merged[t] = v;
-
-        return merged
-            .Where(kv => kv.Key >= startMs && kv.Key <= endMs)
-            .OrderBy(kv => kv.Key)
-            .Select(kv => (kv.Key, kv.Value))
-            .ToList();
+        return MergeOrderedPages(
+            pages,
+            static row => row.Item1,
+            startMs,
+            endMs);
     }
 
     public async Task<IReadOnlyList<(long TimestampMs, decimal Oi)>> FetchOpenInterestAsync(
@@ -276,16 +267,11 @@ public sealed class BinanceApiClient : IMarketDataClient
         });
 
         var pages = await Task.WhenAll(tasks);
-        var merged = new Dictionary<long, decimal>(pages.Sum(p => p.Count));
-        foreach (var page in pages)
-            foreach (var (t, v) in page)
-                merged[t] = v;
-
-        return merged
-            .Where(kv => kv.Key >= startMs && kv.Key <= endMs)
-            .OrderBy(kv => kv.Key)
-            .Select(kv => (kv.Key, kv.Value))
-            .ToList();
+        return MergeOrderedPages(
+            pages,
+            static row => row.Item1,
+            startMs,
+            endMs);
     }
 
     private async Task<JsonDocument> GetJsonAsync(string url, int throttleUnits, CancellationToken ct)
@@ -417,6 +403,36 @@ public sealed class BinanceApiClient : IMarketDataClient
         var normalized = string.IsNullOrWhiteSpace(body) ? string.Empty : body.Trim();
         if (normalized.Length <= 240) return normalized;
         return normalized[..240];
+    }
+
+    private static List<TItem> MergeOrderedPages<TItem>(
+        IReadOnlyList<IReadOnlyList<TItem>> pages,
+        Func<TItem, long> getTimestamp,
+        long startMs,
+        long endMs)
+    {
+        var merged = new List<TItem>(pages.Sum(page => page.Count));
+        long? lastTimestamp = null;
+
+        foreach (var page in pages)
+        {
+            foreach (var item in page)
+            {
+                var timestamp = getTimestamp(item);
+                if (timestamp < startMs || timestamp > endMs) continue;
+
+                if (lastTimestamp == timestamp && merged.Count > 0)
+                {
+                    merged[^1] = item;
+                    continue;
+                }
+
+                merged.Add(item);
+                lastTimestamp = timestamp;
+            }
+        }
+
+        return merged;
     }
 
     private static decimal? TryDec(in JsonElement e)
