@@ -36,7 +36,9 @@ public static class ServiceCollectionExtensions
 
         // Database
         services.AddDbContext<AccountDbContext>(opt =>
-            opt.UseNpgsql(config.GetConnectionString("DefaultConnection"))
+            opt.UseNpgsql(
+                   config.GetConnectionString("DefaultConnection"),
+                   npgsql => npgsql.MigrationsAssembly(typeof(AccountDbContext).Assembly.GetName().Name))
                .UseSnakeCaseNamingConvention());
 
         // Redis (optional)

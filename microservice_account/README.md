@@ -135,6 +135,8 @@ cp .env.example .env
 
 `ADMIN_BOOTSTRAP_*` creates or promotes a login-only admin account during startup migrations. If all three variables are empty, Account Service seeds the first admin as `admin/admin` with email `admin@modelline.local`. Startup now resolves the bootstrap account by username first, so every container start verifies that the target nickname exists; if only the bootstrap email exists, the service assigns the expected username and admin role to that record. Custom bootstrap passwords still use the normal password policy; the default `admin/admin` fallback exists only for first-run bootstrap and should be overridden outside local/dev environments.
 
+Startup migration also hardens the empty-schema case that was observed in Docker runtime: if EF reports no discovered migrations and the database contains only `__EFMigrationsHistory`, the service now recreates the current core schema (`roles`, `users`, `user_roles`, `user_settings`, `refresh_tokens`, `audit_login_events`) from the EF model before bootstrap-admin seeding continues. This unblocks `admin/admin` login instead of leaving `account-api` in a crash-loop on `relation "roles" does not exist`. Partial schema drift still fails fast, because silently repairing a half-populated schema would be unsafe.
+
 ### 3. Run with Docker Compose
 
 ```bash
@@ -167,6 +169,8 @@ Swagger: <http://localhost:5000/swagger>
 ### 5. Migrations
 
 Migrations run automatically on startup via `MigrateAndSeedAsync()`.
+
+At startup the service now logs the discovered and pending EF migrations. If runtime discovery still returns no migrations and the target database has only `__EFMigrationsHistory`, startup performs a one-time schema recovery from the current EF model and only then proceeds to bootstrap-admin checks. If some application tables exist but others are missing, startup throws and stops so the drift can be repaired explicitly.
 
 To add a new migration:
 

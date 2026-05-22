@@ -1,7 +1,10 @@
 using AccountService.Infrastructure.Data;
 using AccountService.Application.Interfaces.Services;
 using AccountService.Domain.Entities;
+using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AccountService.API.Extensions;
 
@@ -10,6 +13,15 @@ public static class MigrationExtensions
     private const string DefaultAdminEmail = "admin@modelline.local";
     private const string DefaultAdminUsername = "admin";
     private const string DefaultAdminPassword = "admin";
+    private static readonly string[] RequiredTables =
+    [
+        "roles",
+        "users",
+        "user_roles",
+        "user_settings",
+        "refresh_tokens",
+        "audit_login_events",
+    ];
 
     public static async Task MigrateAndSeedAsync(this WebApplication app)
     {
@@ -20,8 +32,17 @@ public static class MigrationExtensions
 
         try
         {
+            var availableMigrations = db.Database.GetMigrations().ToArray();
+            var pendingMigrations = db.Database.GetPendingMigrations().ToArray();
+            logger.LogInformation(
+                "Account EF migrations discovered. Available: {AvailableMigrations}. Pending: {PendingMigrations}",
+                availableMigrations.Length == 0 ? "<none>" : string.Join(", ", availableMigrations),
+                pendingMigrations.Length == 0 ? "<none>" : string.Join(", ", pendingMigrations));
+
             await db.Database.MigrateAsync();
             logger.LogInformation("Database migration applied successfully");
+
+            await EnsureCoreSchemaAsync(db, logger);
 
             await EnsureBootstrapAdminAsync(app.Configuration, db, passwordService, logger);
         }
@@ -30,6 +51,74 @@ public static class MigrationExtensions
             logger.LogError(ex, "An error occurred while migrating the database");
             throw;
         }
+    }
+
+    private static async Task EnsureCoreSchemaAsync(AccountDbContext db, ILogger logger)
+    {
+        var existingTables = await GetExistingPublicTablesAsync(db);
+        var missingTables = RequiredTables.Where(table => !existingTables.Contains(table)).ToArray();
+        if (missingTables.Length == 0)
+        {
+            return;
+        }
+
+        if (missingTables.Length != RequiredTables.Length)
+        {
+            throw new InvalidOperationException(
+                $"Account database schema is partially present after migration. Missing tables: {string.Join(", ", missingTables)}");
+        }
+
+        logger.LogWarning(
+            "Account database has no application tables after migration. Recreating schema from current EF model.");
+
+        var creator = db.GetService<IRelationalDatabaseCreator>();
+        await creator.CreateTablesAsync();
+
+        existingTables = await GetExistingPublicTablesAsync(db);
+        missingTables = RequiredTables.Where(table => !existingTables.Contains(table)).ToArray();
+        if (missingTables.Length != 0)
+        {
+            throw new InvalidOperationException(
+                $"Account database schema recovery failed. Missing tables after CreateTablesAsync: {string.Join(", ", missingTables)}");
+        }
+
+        logger.LogInformation("Account database schema recovered from current EF model.");
+    }
+
+    private static async Task<HashSet<string>> GetExistingPublicTablesAsync(AccountDbContext db)
+    {
+        var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var connection = db.Database.GetDbConnection();
+        var shouldClose = connection.State != ConnectionState.Open;
+
+        if (shouldClose)
+        {
+            await connection.OpenAsync();
+        }
+
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "select table_name from information_schema.tables where table_schema = 'public';";
+
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    tables.Add(reader.GetString(0));
+                }
+            }
+        }
+        finally
+        {
+            if (shouldClose)
+            {
+                await connection.CloseAsync();
+            }
+        }
+
+        return tables;
     }
 
     private static async Task EnsureBootstrapAdminAsync(

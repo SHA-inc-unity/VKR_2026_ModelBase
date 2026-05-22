@@ -59,7 +59,7 @@ HTTP и Kafka-входные точки.
 
 - `Program.cs` — bootstrap, DI, middleware pipeline
 - `Controllers/` — public и internal HTTP endpoints
-- `Extensions/` — регистрация сервисов и миграций; startup migration flow на каждом запуске контейнера проверяет наличие bootstrap-admin по username, может создать/promote login-only admin account через `AdminBootstrap:*`, а при полностью пустом bootstrap-конфиге поднимает дефолтного admin-пользователя `admin/admin`
+- `Extensions/` — регистрация сервисов и миграций; startup migration flow на каждом запуске контейнера проверяет наличие bootstrap-admin по username, может создать/promote login-only admin account через `AdminBootstrap:*`, а при полностью пустом bootstrap-конфиге поднимает дефолтного admin-пользователя `admin/admin`. Если runtime видит пустую application schema (есть только `__EFMigrationsHistory`), тот же flow теперь восстанавливает core tables из текущей EF-модели до bootstrap-seed; partial schema drift остаётся hard-fail
 - `Kafka/` — Kafka request/reply интеграция сервиса
 - `Middleware/` — global exception handling и cross-cutting concerns
 - `appsettings*.json` — конфигурация окружений
