@@ -165,6 +165,7 @@ export interface DatasetJobCompletedEvent {
   skipped?: number | null;
   error_code?: string | null;
   error_message?: string | null;
+  started_at?: string;
   finished_at?: string;
 }
 

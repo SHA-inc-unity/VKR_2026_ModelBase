@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard,
+  Activity,
   Database,
   BrainCircuit,
   GitCompare,
@@ -29,6 +30,7 @@ const NAV_KEYS = [
   { href: '/anomaly',  key: 'nav.anomaly'   as const, icon: ShieldAlert },
   { href: '/logs',     key: 'nav.logs'      as const, icon: ScrollText },
   { href: '/queue',    key: 'nav.queue'     as const, icon: ListOrdered },
+  { href: '/market-watcher', key: 'nav.marketWatcher' as const, icon: Activity },
 ] as const;
 
 type Mode = 'expanded-collapsible' | 'icon-only' | 'bottom-nav';

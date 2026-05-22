@@ -27,7 +27,6 @@ public sealed class DatasetJobRunner : BackgroundService
     private static readonly Dictionary<string, int> Caps = new(StringComparer.OrdinalIgnoreCase)
     {
         [DatasetJobType.Ingest]          = IngestSlotsPerExchange * IngestExchanges.Length,
-        [DatasetJobType.MarketWatch]     = 1,
         [DatasetJobType.DetectAnomalies] = 8,
         [DatasetJobType.ComputeFeatures] = 2,
         [DatasetJobType.CleanApply]      = 2,
@@ -317,6 +316,7 @@ public sealed class DatasetJobRunner : BackgroundService
             skipped           = job.Skipped,
             error_code        = errorCode,
             error_message     = errorMessage,
+            started_at        = job.StartedAt?.ToUniversalTime().ToString("O"),
             finished_at       = job.FinishedAt?.ToUniversalTime().ToString("O"),
             ts                = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         }, ct);

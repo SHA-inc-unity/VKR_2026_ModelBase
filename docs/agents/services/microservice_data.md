@@ -4,6 +4,10 @@
 
 Data-сервис на .NET, владелец датасета, Kafka-команд и фоновых jobs.
 
+Отдельно владеет dedicated runtime market watcher-а: live overlay больше не живёт
+в `dataset_jobs`, а поднимается как hosted service внутри data-service и
+управляется через Kafka topics `cmd.data.market_watcher.{status,set_enabled,rows,logs}`.
+
 ## Что читать перед кодом
 
 - [../../../microservice_data/README.md](../../../microservice_data/README.md)
@@ -22,4 +26,5 @@ Data-сервис на .NET, владелец датасета, Kafka-коман
 
 - изменения Kafka handlers и topic contracts
 - изменения dataset jobs, ingest pipeline, retry, timeout, concurrency
+- изменения runtime/control-plane market watcher-а и `market_watch_live`
 - изменения структуры таблиц, схемы, MinIO/export и health/readiness

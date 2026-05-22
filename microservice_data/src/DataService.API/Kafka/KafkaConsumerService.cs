@@ -5,6 +5,7 @@ using Confluent.Kafka;
 using DataService.API.Bybit;
 using DataService.API.Database;
 using DataService.API.Dataset;
+using DataService.API.Jobs;
 using DataService.API.Markets;
 using DataService.API.Minio;
 using DataService.API.Settings;
@@ -22,6 +23,8 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly KafkaProducer              _producer;
     private readonly DatasetRepository          _repo;
     private readonly DatasetJobsRepository      _jobsRepo;
+    private readonly MarketWatchRepository      _marketWatchRepo;
+    private readonly MarketWatcherRuntimeState  _marketWatcher;
     private readonly MarketDataClientFactory    _markets;
     private readonly MinioClaimCheckService     _minio;
     // Browser-facing origin для presigned URL'ов, которые получает admin
@@ -80,6 +83,8 @@ public sealed partial class KafkaConsumerService : BackgroundService
         KafkaProducer producer,
         DatasetRepository repo,
         DatasetJobsRepository jobsRepo,
+        MarketWatchRepository marketWatchRepo,
+        MarketWatcherRuntimeState marketWatcher,
         MarketDataClientFactory markets,
         MinioClaimCheckService minio,
         ILogger<KafkaConsumerService> log)
@@ -87,6 +92,8 @@ public sealed partial class KafkaConsumerService : BackgroundService
         _producer                = producer;
         _repo                    = repo;
         _jobsRepo                = jobsRepo;
+        _marketWatchRepo         = marketWatchRepo;
+        _marketWatcher           = marketWatcher;
         _markets                 = markets;
         _minio                   = minio;
         _browserDownloadBaseUrl  = opts.Value.Minio.PublicDownloadBaseUrl;
@@ -270,6 +277,18 @@ public sealed partial class KafkaConsumerService : BackgroundService
         return null;
     }
 
+    private static bool? TryGetBool(JsonElement p, string name)
+    {
+        if (p.ValueKind != JsonValueKind.Object || !p.TryGetProperty(name, out var v)) return null;
+        return v.ValueKind switch
+        {
+            JsonValueKind.True  => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String when bool.TryParse(v.GetString(), out var b) => b,
+            _ => null,
+        };
+    }
+
     private async Task DispatchAsync(
         string topic, string correlationId, string replyTo,
         JsonElement payload, CancellationToken ct)
@@ -313,6 +332,10 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataDatasetJobsCancel      => await HandleJobsCancelAsync(payload, ct),
             Topics.CmdDataDatasetJobsGet         => await HandleJobsGetAsync(payload, ct),
             Topics.CmdDataDatasetJobsList        => await HandleJobsListAsync(payload, ct),
+            Topics.CmdDataMarketWatcherStatus    => HandleMarketWatcherStatus(),
+            Topics.CmdDataMarketWatcherSetEnabled=> HandleMarketWatcherSetEnabled(payload),
+            Topics.CmdDataMarketWatcherRows      => await HandleMarketWatcherRowsAsync(payload, ct),
+            Topics.CmdDataMarketWatcherLogs      => HandleMarketWatcherLogs(payload),
             _                                => new { error = $"Unknown topic: {topic}" },
         };
 
@@ -351,6 +374,70 @@ public sealed partial class KafkaConsumerService : BackgroundService
         });
         var tables = await Task.WhenAll(tasks);
         return new { tables };
+    }
+
+    private object HandleMarketWatcherStatus() => new
+    {
+        watcher = _marketWatcher.GetSnapshot(),
+    };
+
+    private object HandleMarketWatcherSetEnabled(JsonElement payload)
+    {
+        var enabled = TryGetBool(payload, "enabled");
+        if (enabled is null)
+        {
+            return new { error = "enabled is required", code = "bad_request" };
+        }
+
+        _marketWatcher.SetDesiredEnabled(enabled.Value, "api");
+        return new
+        {
+            ok = true,
+            desired_enabled = enabled.Value,
+            watcher = _marketWatcher.GetSnapshot(),
+        };
+    }
+
+    private async Task<object> HandleMarketWatcherRowsAsync(JsonElement payload, CancellationToken ct)
+    {
+        var exchange = TryGetString(payload, "exchange");
+        var search = TryGetString(payload, "search");
+        var limit = (int?)TryGetInt64(payload, "limit") ?? 100;
+        var offset = (int?)TryGetInt64(payload, "offset") ?? 0;
+        var page = await _marketWatchRepo.ReadLivePageAsync(exchange, search, limit, offset, ct);
+        return new
+        {
+            items = page.Items.Select(item => new
+            {
+                exchange = item.Exchange,
+                symbol = item.Symbol,
+                realtime_symbol = item.RealtimeSymbol,
+                last_price = item.LastPrice,
+                last_price_ts = item.LastPriceTimestampUtc.ToUniversalTime().ToString("O"),
+                updated_at = item.UpdatedAtUtc.ToUniversalTime().ToString("O"),
+                lag_ms = item.LagMs,
+                candles_json = ParseJsonOrEmpty(item.CandlesJson),
+            }),
+            total = page.Total,
+            limit = page.Limit,
+            offset = page.Offset,
+        };
+    }
+
+    private object HandleMarketWatcherLogs(JsonElement payload)
+    {
+        var limit = (int?)TryGetInt64(payload, "limit") ?? 200;
+        var logs = _marketWatcher.ReadLogs(limit).Select(entry => new
+        {
+            id = entry.Id,
+            ts = entry.Ts,
+            level = entry.Level,
+            evt = entry.Event,
+            message = entry.Message,
+            fields = entry.Fields,
+        });
+
+        return new { logs };
     }
 
     /// <summary>
@@ -963,6 +1050,14 @@ public sealed partial class KafkaConsumerService : BackgroundService
                 "running", 0, $"table={table}", ct);
 
             await _repo.CreateTableIfNotExistsAsync(table, ct);
+            var coverage = await _repo.GetCoverageRangeAsync(table, s, e, stepMs, ct);
+            if (coverage is { ExpectedInRange: > 0 } && coverage.Value.RowsInRange >= coverage.Value.ExpectedInRange)
+            {
+                await PublishIngestProgressAsync(correlationId, currentStage, currentLabel,
+                    "done", 100, $"missing=0", ct);
+                return new { status = "ok", rows_ingested = 0, table };
+            }
+
             var missing = await _repo.FindMissingTimestampsAsync(table, s, e, stepMs, ct);
 
             await PublishIngestProgressAsync(correlationId, currentStage, currentLabel,

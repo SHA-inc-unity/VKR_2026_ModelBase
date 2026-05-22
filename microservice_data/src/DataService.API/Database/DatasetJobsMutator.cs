@@ -143,6 +143,7 @@ public sealed class DatasetJobsMutator
             WHERE status='queued'
               AND (
                     params_hash = ''
+                      OR type='market_watch'
                  OR (type='ingest' AND (
                         target_table IS NULL
                      OR target_symbol IS NULL

@@ -70,9 +70,9 @@ try
     builder.Services.AddSingleton<DatasetJobsRepository>();
     builder.Services.AddSingleton<DatasetJobsMutator>();
     builder.Services.AddSingleton<MarketWatchRepository>();
+    builder.Services.AddSingleton<MarketWatcherRuntimeState>();
     builder.Services.AddSingleton<JobLockManager>();
     builder.Services.AddSingleton<IDatasetJobHandler, IngestJobHandler>();
-    builder.Services.AddSingleton<IDatasetJobHandler, MarketWatchJobHandler>();
     builder.Services.AddSingleton<IDatasetJobHandler, ComputeFeaturesJobHandler>();
     builder.Services.AddSingleton<IDatasetJobHandler, DetectAnomaliesJobHandler>();
     builder.Services.AddSingleton<IDatasetJobHandler, CleanApplyJobHandler>();
@@ -111,7 +111,7 @@ try
 
     // ── Phase B: dataset job runner (scheduler + lock + recovery) ─────────
     builder.Services.AddHostedService<DatasetJobRunner>();
-    builder.Services.AddHostedService<MarketWatchBootstrapService>();
+    builder.Services.AddHostedService<MarketWatcherService>();
 
     // ── Health checks ─────────────────────────────────────────────────────
     builder.Services.AddHealthChecks()

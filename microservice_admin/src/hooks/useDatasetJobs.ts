@@ -27,9 +27,11 @@ import type {
   DatasetJobType,
 } from '@/lib/types';
 
+type DatasetJobFeedType = DatasetJobType | 'market_watch';
+
 export interface DatasetJobView {
   job_id: string;
-  type: DatasetJobType;
+  type: DatasetJobFeedType;
   status: DatasetJobStatus;
   progress: number;          // overall job progress
   stage_progress?: number | null;
@@ -48,6 +50,7 @@ export interface DatasetJobView {
   skipped?: number | null;
   // Local fields
   finished: boolean;
+  started_at_ms?: number | null;
   last_update_ms: number;
 }
 
@@ -55,7 +58,7 @@ type Listener = () => void;
 
 type DatasetJobWire = {
   job_id: string;
-  type: DatasetJobType;
+  type: DatasetJobFeedType;
   status: DatasetJobStatus;
   progress?: number;
   overall_progress?: number;
@@ -73,6 +76,7 @@ type DatasetJobWire = {
   completed?: number | null;
   failed?: number | null;
   skipped?: number | null;
+  started_at_ms?: number | null;
   updated_at_ms?: number | null;
   finished_at_ms?: number | null;
 };
@@ -129,6 +133,12 @@ function scheduleFinishedJobCleanup(jobId: string, status: DatasetJobStatus): vo
 }
 
 async function recordTerminalJobHistory(job: DatasetJobView): Promise<void> {
+  if (job.type === 'market_watch') return;
+
+  const durationMs = typeof job.started_at_ms === 'number' && job.last_update_ms >= job.started_at_ms
+    ? job.last_update_ms - job.started_at_ms
+    : 0;
+
   try {
     const response = await fetch(TERMINAL_HISTORY_ENDPOINT, {
       method: 'POST',
@@ -138,7 +148,7 @@ async function recordTerminalJobHistory(job: DatasetJobView): Promise<void> {
         ts: new Date(job.last_update_ms).toISOString(),
         topic: Topics.EVT_DATA_DATASET_JOB_COMPLETED,
         level: job.status === 'failed' || job.status === 'canceled' ? 'error' : 'success',
-        durationMs: 0,
+        durationMs,
         payloadSummary: {
           job_id: job.job_id,
           type: job.type,
@@ -166,6 +176,7 @@ async function recordTerminalJobHistory(job: DatasetJobView): Promise<void> {
 
 function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
   if (!job?.job_id) return;
+  if (job.type === 'market_watch') return;
 
   const prev = _jobs.get(job.job_id);
   const finished = TERMINAL.has(job.status);
@@ -219,6 +230,9 @@ function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
     skipped: hasOwn(job, 'skipped')
       ? (typeof job.skipped === 'number' ? job.skipped : null)
       : (prev?.skipped ?? null),
+    started_at_ms: hasOwn(job, 'started_at_ms')
+      ? (typeof job.started_at_ms === 'number' ? job.started_at_ms : null)
+      : (prev?.started_at_ms ?? null),
     finished,
     last_update_ms:
       typeof job.finished_at_ms === 'number' ? job.finished_at_ms :
@@ -303,6 +317,7 @@ export function applyJobCompleted(e: DatasetJobCompletedEvent): void {
     completed: e.completed,
     failed: e.failed,
     skipped: e.skipped,
+    started_at_ms: typeof e.started_at === 'string' ? Date.parse(e.started_at) : null,
     finished_at_ms: typeof e.finished_at === 'string' ? Date.parse(e.finished_at) : null,
   });
 }

@@ -37,6 +37,12 @@ export const Topics = {
   CMD_DATA_DATASET_JOBS_GET:    'cmd.data.dataset.jobs.get',
   CMD_DATA_DATASET_JOBS_LIST:   'cmd.data.dataset.jobs.list',
 
+  // Dedicated market watcher control plane
+  CMD_DATA_MARKET_WATCHER_STATUS:      'cmd.data.market_watcher.status',
+  CMD_DATA_MARKET_WATCHER_SET_ENABLED: 'cmd.data.market_watcher.set_enabled',
+  CMD_DATA_MARKET_WATCHER_ROWS:        'cmd.data.market_watcher.rows',
+  CMD_DATA_MARKET_WATCHER_LOGS:        'cmd.data.market_watcher.logs',
+
   // Analitic-side dataset session + ML anomaly + distribution
   CMD_ANALITIC_DATASET_LOAD:              'cmd.analitic.dataset.load',
   CMD_ANALITIC_DATASET_UNLOAD:            'cmd.analitic.dataset.unload',

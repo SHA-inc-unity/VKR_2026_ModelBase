@@ -114,6 +114,23 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         await ctx.ReportAsync("prepare", 1,
             windowDetail is null ? $"table={table}" : $"table={table}; {windowDetail}");
         await _repo.CreateTableIfNotExistsAsync(table, ctx.CancellationToken);
+
+        var coverage = await _repo.GetCoverageRangeAsync(table, s, e, stepMs, ctx.CancellationToken);
+        if (coverage is { ExpectedInRange: > 0 } && coverage.Value.RowsInRange >= coverage.Value.ExpectedInRange)
+        {
+            await ctx.EndStageAsync(stagePrep, (int)coverage.Value.RowsInRange);
+            await ctx.ReportAsync(
+                "done",
+                100,
+                $"no missing rows in {table}",
+                stageProgress: 100,
+                stageTotal: (int)Math.Min(int.MaxValue, coverage.Value.ExpectedInRange),
+                stageCompleted: (int)Math.Min(int.MaxValue, coverage.Value.RowsInRange),
+                total: (int)Math.Min(int.MaxValue, coverage.Value.ExpectedInRange),
+                completed: 0);
+            return;
+        }
+
         var missing = await _repo.FindMissingTimestampsAsync(table, s, e, stepMs, ctx.CancellationToken);
         await ctx.EndStageAsync(stagePrep, missing.Count);
 

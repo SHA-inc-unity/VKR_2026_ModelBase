@@ -57,6 +57,18 @@ const QUEUE_HISTORY_TOPICS = new Set<string>([
   Topics.EVT_DATA_DATASET_JOB_COMPLETED,
 ]);
 
+function shouldShowQueueHistory(item: QueueHistoryEntry): boolean {
+  if (!item?.topic || !QUEUE_HISTORY_TOPICS.has(item.topic)) return false;
+
+  const payloadSummary = asRecord(item.payloadSummary);
+  const responseSummary = asRecord(item.responseSummary);
+  const type = payloadSummary?.type;
+  const targetTable = payloadSummary?.target_table ?? payloadSummary?.table;
+  if (type === 'market_watch' || targetTable === 'market_watch_live') return false;
+  if (responseSummary?.type === 'market_watch') return false;
+  return true;
+}
+
 const LEVEL_BADGE: Record<QueueHistoryLevel, 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'info'> = {
   success: 'success',
   error: 'destructive',
@@ -177,7 +189,7 @@ export default function QueuePage() {
     const res = await fetch(`${base}/api/queue/history?limit=${HISTORY_PAGE_SIZE}&offset=${offset}`, { cache: 'no-store' });
     const data = await res.json() as QueueHistoryResponse;
     const items = Array.isArray(data.items)
-      ? data.items.filter((item) => item?.topic && QUEUE_HISTORY_TOPICS.has(item.topic))
+      ? data.items.filter(shouldShowQueueHistory)
       : [];
     setHistory(items);
     setHistoryTotal(typeof data.total === 'number' ? data.total : 0);

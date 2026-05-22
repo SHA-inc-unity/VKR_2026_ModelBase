@@ -42,6 +42,12 @@ public static class Topics
     public const string CmdDataDatasetJobsGet    = "cmd.data.dataset.jobs.get";
     public const string CmdDataDatasetJobsList   = "cmd.data.dataset.jobs.list";
 
+    // ── Dedicated market watcher control plane (outside dataset_jobs) ───
+    public const string CmdDataMarketWatcherStatus    = "cmd.data.market_watcher.status";
+    public const string CmdDataMarketWatcherSetEnabled= "cmd.data.market_watcher.set_enabled";
+    public const string CmdDataMarketWatcherRows      = "cmd.data.market_watcher.rows";
+    public const string CmdDataMarketWatcherLogs      = "cmd.data.market_watcher.logs";
+
     // ── Events (fire-and-forget, no correlation round-trip) ──────────────
     public const string EvtDataIngestProgress         = "events.data.ingest.progress";
     public const string EvtDataDatasetJobProgress     = "events.data.dataset.job.progress";
@@ -80,5 +86,9 @@ public static class Topics
         CmdDataDatasetJobsCancel,
         CmdDataDatasetJobsGet,
         CmdDataDatasetJobsList,
+        CmdDataMarketWatcherStatus,
+        CmdDataMarketWatcherSetEnabled,
+        CmdDataMarketWatcherRows,
+        CmdDataMarketWatcherLogs,
     ];
 }
