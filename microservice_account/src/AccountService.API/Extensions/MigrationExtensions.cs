@@ -74,16 +74,29 @@ public static class MigrationExtensions
             ?? throw new InvalidOperationException("Admin role was not seeded.");
 
         var normalizedEmail = email.ToLowerInvariant();
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+        var normalizedUsername = username.Trim();
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Username == normalizedUsername);
         if (user is null)
         {
-            user = User.Create(email, username, passwordService.Hash(password));
+            user = await db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+        }
+
+        if (user is null)
+        {
+            user = User.Create(email, normalizedUsername, passwordService.Hash(password));
             await db.Users.AddAsync(user);
             await db.UserSettings.AddAsync(UserSettings.CreateDefault(user.Id));
             await db.UserRoles.AddAsync(UserRole.Create(user.Id, adminRole.Id));
             await db.SaveChangesAsync();
             logger.LogInformation("Bootstrap admin user {UserId} created", user.Id);
             return;
+        }
+
+        if (!string.Equals(user.Username, normalizedUsername, StringComparison.Ordinal))
+        {
+            user.UpdateProfile(normalizedUsername);
+            await db.SaveChangesAsync();
+            logger.LogInformation("Bootstrap admin username {Username} assigned to existing user {UserId}", normalizedUsername, user.Id);
         }
 
         var hasAdminRole = await db.UserRoles.AnyAsync(ur => ur.UserId == user.Id && ur.RoleId == adminRole.Id);

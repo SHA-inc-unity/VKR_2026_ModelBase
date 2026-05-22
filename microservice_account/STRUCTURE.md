@@ -59,7 +59,7 @@ HTTP и Kafka-входные точки.
 
 - `Program.cs` — bootstrap, DI, middleware pipeline
 - `Controllers/` — public и internal HTTP endpoints
-- `Extensions/` — регистрация сервисов и миграций; startup migration flow может создать/promote login-only admin account через `AdminBootstrap:*`, а при полностью пустом bootstrap-конфиге поднимает дефолтного admin-пользователя `admin/admin`
+- `Extensions/` — регистрация сервисов и миграций; startup migration flow на каждом запуске контейнера проверяет наличие bootstrap-admin по username, может создать/promote login-only admin account через `AdminBootstrap:*`, а при полностью пустом bootstrap-конфиге поднимает дефолтного admin-пользователя `admin/admin`
 - `Kafka/` — Kafka request/reply интеграция сервиса
 - `Middleware/` — global exception handling и cross-cutting concerns
 - `appsettings*.json` — конфигурация окружений
