@@ -138,17 +138,21 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         const long fundingMs = 28_800_000L;
 
         // ── fetch (klines + funding + OI in parallel) ──────────
-        // Keep heavy-timeframe scheduler serialization intact, but let Binance
-        // use a wider in-job page fan-out because its own client-side limiter
-        // enforces the real REST budget.
+        // Keep heavy-timeframe scheduler serialization intact, but let
+        // exchanges with their own client-side rate budget use a wider
+        // in-job page fan-out than the old conservative heavy default.
         var isHeavyTimeframe = DatasetConstants.HeavyTimeframes.Contains(key);
         var maxParallel = string.Equals(exchange, BinanceApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
             ? (isHeavyTimeframe
                 ? DatasetConstants.MaxParallelApiWorkersBinanceHeavy
                 : DatasetConstants.MaxParallelApiWorkers)
-            : (isHeavyTimeframe
-                ? DatasetConstants.MaxParallelApiWorkers1m
-                : DatasetConstants.MaxParallelApiWorkers);
+            : string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase)
+                ? (isHeavyTimeframe
+                    ? DatasetConstants.MaxParallelApiWorkersBybitHeavy
+                    : DatasetConstants.MaxParallelApiWorkers)
+                : (isHeavyTimeframe
+                    ? DatasetConstants.MaxParallelApiWorkers1m
+                    : DatasetConstants.MaxParallelApiWorkers);
 
         var stageFetch = await ctx.StartStageAsync("fetch");
         await ctx.ReportAsync(

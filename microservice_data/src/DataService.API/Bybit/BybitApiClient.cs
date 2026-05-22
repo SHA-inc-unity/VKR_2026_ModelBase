@@ -144,9 +144,9 @@ public sealed class BybitApiClient : IMarketDataClient
         var root = doc.RootElement;
         var item = root.GetProperty("result").GetProperty("list")[0];
 
-        var launchMs  = item.TryGetProperty("launchTime",  out var lt) ? lt.GetInt64() : 0L;
+        var launchMs  = item.TryGetProperty("launchTime", out var lt) ? TryMs(lt) ?? 0L : 0L;
         var fundingMs = item.TryGetProperty("fundingInterval", out var fi)
-            ? fi.GetInt64() * 60_000L   // Bybit returns minutes
+            ? (TryMs(fi) ?? 0L) * 60_000L   // Bybit returns minutes
             : 480 * 60_000L;            // default 8 h
 
         var result = (launchMs, fundingMs);

@@ -52,7 +52,7 @@
 
 Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handler routes requests through an exchange-specific market client. Supported exchanges today:
 
-- `bybit` — full perpetual pipeline: klines + funding + open interest.
+- `bybit` — full perpetual pipeline: klines + funding + open interest. Heavy `1m`/`3m` Bybit jobs remain scheduler-serialized per exchange, but inside one job the handler now uses a wider kline page fan-out under the shared Bybit token bucket, which materially speeds up long historical backfills without lifting the real IP budget.
 - `binance` — full USDT-margined futures pipeline: klines + funding + open interest. Binance HTTP calls now go through a process-local limiter, respect `Retry-After` on `418/429`, and clip/align `openInterestHist` requests to the upstream strict latest-30-day retention window instead of retrying impossible historical `startTime` values forever. Heavy `1m`/`3m` Binance jobs remain scheduler-serialized, but inside one job the client now uses a wider page fan-out plus a less conservative limiter budget, which materially speeds up long historical fetches without reopening the scheduler floodgate.
 - `kraken` — OHLC-only pipeline via public spot OHLC; funding/open-interest stay empty, and the upstream Kraken API exposes only the most recent 720 base candles. The ingest handler clamps each Kraken request to the overlap with that reachable lookback; if the requested window is completely outside it, the job finishes as a no-op instead of poisoning the queue with repeated failures. Kraken HTTP calls use a shorter `30 s` per-call deadline, retry Kraken-side throttle errors (`EGeneral:Too many requests`, `EAPI:Rate limit exceeded`, `EService: Throttled`) and now go through a process-local limiter inside the client, so four Kraken jobs may coexist in the scheduler without all four spamming public REST in parallel. For reachable windows the client first tries one OHLC request for the whole range and falls back to smaller throttled pages only when Kraken returns incomplete coverage. Symbol resolution uses narrow `GET /0/public/AssetPairs?pair=...` lookups one candidate at a time instead of fetching the whole pair catalog.
 
@@ -73,13 +73,16 @@ The handler:
     Each feed is sliced into independent time-windows and fetched concurrently
     under `DatasetConstants.MaxParallelApiWorkers` — **no server cursors**.
     - **Bybit** keeps the existing `/v5/market/kline`,
-       `/v5/market/funding/history` and `/v5/market/open-interest` flow.
+       `/v5/market/funding/history` and `/v5/market/open-interest` flow,
+       but heavy `1m`/`3m` backfills now use a wider in-job kline fan-out
+       because the scheduler already serializes heavy Bybit jobs and the
+       shared token bucket still caps the real upstream budget.
     - **Binance** uses `/fapi/v1/klines`, `/fapi/v1/fundingRate` and
        `/futures/data/openInterestHist` with the same incremental windowing
        strategy, but now paces all Binance REST calls through a shared
-       limiter. `1m`/`3m` backfills use a wider in-job page fan-out than
-       Bybit because the scheduler already serializes heavy Binance jobs,
-       while the limiter still keeps the real REST budget under control.
+       limiter. `1m`/`3m` backfills also use a wider in-job page fan-out
+       because the scheduler already serializes heavy Binance jobs, while
+       the limiter still keeps the real REST budget under control.
        `openInterestHist` windows are clipped to the latest 30 days and
        aligned to the selected interval because the upstream endpoint
        rejects stale or misaligned `startTime` values with `400`.

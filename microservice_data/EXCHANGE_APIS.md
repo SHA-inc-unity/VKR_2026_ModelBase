@@ -100,7 +100,7 @@
 ### Как ModelLine трактует Bybit
 
 - Bybit остаётся baseline exchange: полный pipeline `klines + funding + OI`.
-- Для тяжёлых TF параллелизм режется сильнее, чтобы не выжигать общий rate budget.
+- Heavy `1m`/`3m` jobs по-прежнему сериализуются scheduler-ом на уровне биржи, но внутри одного Bybit job ModelLine теперь держит более широкий kline fan-out `6`; общий IP budget всё равно ограничивается shared token bucket, поэтому ускорение long backfills не требует ослаблять safety-лимит.
 
 ## Binance
 

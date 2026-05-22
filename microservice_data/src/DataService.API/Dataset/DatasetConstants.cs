@@ -26,6 +26,10 @@ public static class DatasetConstants
     /// can use a wider in-job page fan-out than Bybit while the shared
     /// BinanceRateLimiter still enforces the real upstream budget.</summary>
     public const int MaxParallelApiWorkersBinanceHeavy = 6;
+    /// <summary>Bybit 1m/3m backfills are also scheduler-serialized per exchange,
+    /// and the shared token bucket still enforces the real REST budget, so
+    /// they can safely use a wider in-job page fan-out than the old default 2.</summary>
+    public const int MaxParallelApiWorkersBybitHeavy = 6;
     public const int DefaultWarmupCandles = 24;
 
     /// <summary>Timeframes that produce very large page counts per full-range fetch
