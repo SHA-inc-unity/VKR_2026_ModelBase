@@ -343,7 +343,8 @@ public sealed class BybitApiClient : IMarketDataClient
         FetchOpenInterestAsync(
             string symbol, string intervalLabel, long startMs, long endMs,
             long intervalMs,
-            CancellationToken ct = default)
+            CancellationToken ct = default,
+            Action<int, int>? onPageDone = null)
     {
         if (endMs < startMs) return Array.Empty<(long, decimal)>();
         if (intervalMs <= 0) throw new ArgumentException("intervalMs must be positive", nameof(intervalMs));
@@ -356,6 +357,8 @@ public sealed class BybitApiClient : IMarketDataClient
             windows.Add((s, e));
         }
 
+        var totalPages = windows.Count;
+        var completedPages = 0;
         using var gate = new SemaphoreSlim(
             DatasetConstants.MaxParallelApiWorkers, DatasetConstants.MaxParallelApiWorkers);
         var tasks = windows.Select(async w =>
@@ -381,7 +384,15 @@ public sealed class BybitApiClient : IMarketDataClient
                 }
                 return page;
             }
-            finally { gate.Release(); }
+            finally
+            {
+                gate.Release();
+                if (onPageDone is not null)
+                {
+                    var done = Interlocked.Increment(ref completedPages);
+                    try { onPageDone(done, totalPages); } catch { }
+                }
+            }
         });
 
         var pages = await Task.WhenAll(tasks);

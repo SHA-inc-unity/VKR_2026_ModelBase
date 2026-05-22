@@ -251,13 +251,13 @@ without unwrapping). The payload shape is:
 
 Every stage emits `running` on entry and `done` on completion; on failure
 the currently-active stage emits `status: error` before the command reply
-propagates the error. `fetch_klines` additionally emits throttled
-intermediate `running` updates (at most once every 10 completed pages +
-a final event), driven by the `onPageDone` callback on
-`BybitApiClient.FetchKlinesAsync`. `compute_rsi` emits one
-running` update per finished segment. Progress events are best-effort:
-Kafka delivery failures are logged, but they do not block the underlying
-job handler.
+propagates the error. `fetch_klines` emits throttled intermediate
+`running` updates while page windows complete. `fetch_oi` now does the
+same for exchanges that really paginate open-interest history (`bybit`,
+`binance`), so long OI fetches no longer sit forever on one fixed percent
+while the job is still healthy. `compute_rsi` emits one `running` update
+per finished segment. Progress events are best-effort: Kafka delivery
+failures are logged, but they do not block the underlying job handler.
 
 ### Performance & concurrency
 

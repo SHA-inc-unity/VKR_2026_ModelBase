@@ -184,7 +184,8 @@ public sealed class KrakenApiClient : IMarketDataClient
         long startMs,
         long endMs,
         long intervalMs,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Action<int, int>? onPageDone = null)
     {
         IReadOnlyList<(long TimestampMs, decimal Oi)> empty = Array.Empty<(long, decimal)>();
         return Task.FromResult(empty);

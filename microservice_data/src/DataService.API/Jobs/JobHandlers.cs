@@ -156,7 +156,15 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         var fundingT = market.FetchFundingRatesAsync(
             symbol.ToUpperInvariant(), missing[0] - fundingMs, missing[^1], fundingMs, ctx.CancellationToken);
         var oiT = market.FetchOpenInterestAsync(
-            symbol.ToUpperInvariant(), oiLabel, missing[0] - oiIntervalMs, missing[^1], oiIntervalMs, ctx.CancellationToken);
+            symbol.ToUpperInvariant(), oiLabel, missing[0] - oiIntervalMs, missing[^1], oiIntervalMs, ctx.CancellationToken,
+            onPageDone: (done, total) =>
+            {
+                if (total > 0 && (done == total || done % 5 == 0))
+                {
+                    var pct = (int)Math.Min(50, 47 + (long)done * 3 / total);
+                    _ = ctx.ReportAsync("fetch_oi", pct, $"{done}/{total} pages", total: missing.Count);
+                }
+            });
 
         var klines  = await klineT;
         if (!fundingT.IsCompleted)

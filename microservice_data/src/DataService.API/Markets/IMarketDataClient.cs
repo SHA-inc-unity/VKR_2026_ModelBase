@@ -33,5 +33,6 @@ public interface IMarketDataClient
         long startMs,
         long endMs,
         long intervalMs,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        Action<int, int>? onPageDone = null);
 }
