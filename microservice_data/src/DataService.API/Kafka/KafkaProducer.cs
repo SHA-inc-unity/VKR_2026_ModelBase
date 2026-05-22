@@ -51,18 +51,30 @@ public sealed class KafkaProducer : IDisposable
     /// rethrown: events are non-critical progress signals and must never
     /// break the caller's main flow.
     /// </summary>
-    public async Task PublishEventAsync(
+    public Task PublishEventAsync(
         string topic, object payload, CancellationToken ct = default)
     {
         try
         {
+            ct.ThrowIfCancellationRequested();
             var json = JsonSerializer.Serialize(payload);
-            await _producer.ProduceAsync(topic,
-                new Message<string, string> { Value = json }, ct);
+            _producer.Produce(topic,
+                new Message<string, string> { Value = json },
+                report =>
+                {
+                    if (report.Error.IsError)
+                        _log.LogWarning("Failed to publish event to {Topic}: {Reason}", topic, report.Error.Reason);
+                });
+            return Task.CompletedTask;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return Task.CompletedTask;
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Failed to publish event to {Topic}", topic);
+            return Task.CompletedTask;
         }
     }
 

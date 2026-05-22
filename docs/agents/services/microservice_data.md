@@ -8,12 +8,14 @@ Data-сервис на .NET, владелец датасета, Kafka-коман
 
 - [../../../microservice_data/README.md](../../../microservice_data/README.md)
 - [../../../microservice_data/STRUCTURE.md](../../../microservice_data/STRUCTURE.md)
+- [../../../microservice_data/EXCHANGE_APIS.md](../../../microservice_data/EXCHANGE_APIS.md)
 - [../WORKFLOW.md](../WORKFLOW.md)
 
 ## Что обновлять после кода
 
 - `microservice_data/README.md`
 - `microservice_data/STRUCTURE.md`
+- `microservice_data/EXCHANGE_APIS.md`
 - [../CHANGE_LOG.md](../CHANGE_LOG.md)
 
 ## Когда обязательно обновлять Markdown

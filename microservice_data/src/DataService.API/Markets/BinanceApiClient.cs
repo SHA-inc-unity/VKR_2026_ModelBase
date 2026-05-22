@@ -258,7 +258,7 @@ public sealed class BinanceApiClient : IMarketDataClient
             HttpResponseMessage? response = null;
             try
             {
-                response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                response = await _http.GetAsync(url, HttpCompletionOption.ResponseContentRead, ct);
                 if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
                 {
                     last = new HttpRequestException($"HTTP {(int)response.StatusCode}");
@@ -272,9 +272,7 @@ public sealed class BinanceApiClient : IMarketDataClient
                 }
 
                 response.EnsureSuccessStatusCode();
-                return await JsonDocument.ParseAsync(
-                    await response.Content.ReadAsStreamAsync(ct),
-                    cancellationToken: ct);
+                return JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
             {

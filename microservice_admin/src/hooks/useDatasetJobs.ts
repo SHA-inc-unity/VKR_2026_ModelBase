@@ -86,15 +86,58 @@ const TERMINAL: ReadonlySet<DatasetJobStatus> = new Set([
   'succeeded', 'failed', 'canceled', 'skipped',
 ]);
 
+const SHORT_LIVED_TERMINAL: ReadonlySet<DatasetJobStatus> = new Set(['failed', 'canceled']);
+const LONG_LIVED_TERMINAL: ReadonlySet<DatasetJobStatus> = new Set(['succeeded', 'skipped']);
+const TERMINAL_HISTORY_ENDPOINT = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/api/queue/history`;
+
 function scheduleFinishedJobCleanup(jobId: string, status: DatasetJobStatus): void {
-  if (status !== 'succeeded' && status !== 'skipped') return;
+  const delayMs = SHORT_LIVED_TERMINAL.has(status)
+    ? 10_000
+    : LONG_LIVED_TERMINAL.has(status)
+      ? 30_000
+      : null;
+  if (delayMs === null) return;
+
   setTimeout(() => {
     const cur = _jobs.get(jobId);
-    if (cur && cur.finished && (cur.status === 'succeeded' || cur.status === 'skipped')) {
+    if (cur && cur.finished && cur.status === status) {
       _jobs.delete(jobId);
       rebuildSnapshot();
     }
-  }, 30_000);
+  }, delayMs);
+}
+
+async function recordTerminalJobHistory(job: DatasetJobView): Promise<void> {
+  try {
+    await fetch(TERMINAL_HISTORY_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: `dataset-job:${job.job_id}`,
+        ts: new Date(job.last_update_ms).toISOString(),
+        topic: Topics.EVT_DATA_DATASET_JOB_COMPLETED,
+        level: job.status === 'failed' || job.status === 'canceled' ? 'error' : 'success',
+        durationMs: 0,
+        payloadSummary: {
+          job_id: job.job_id,
+          type: job.type,
+          target_table: job.target_table,
+        },
+        responseSummary: {
+          status: job.status,
+          completed: job.completed ?? 0,
+        },
+        message: job.status === 'failed' || job.status === 'canceled'
+          ? (job.error_message ?? job.detail ?? 'Dataset job failed')
+          : (job.detail ?? 'Dataset job finished'),
+        code: job.error_code,
+        detail: job.error_message ?? job.detail,
+        correlationId: job.job_id,
+      }),
+    });
+  } catch {
+    // Queue history enrichment is best-effort only.
+  }
 }
 
 function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
@@ -126,6 +169,7 @@ function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
 
   if (!prev?.finished && finished) {
     scheduleFinishedJobCleanup(job.job_id, job.status);
+    void recordTerminalJobHistory(_jobs.get(job.job_id)!);
   }
 
   if (!deferRebuild) rebuildSnapshot();

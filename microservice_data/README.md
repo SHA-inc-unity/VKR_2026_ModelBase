@@ -13,6 +13,7 @@
 ## Документация для агентов
 
 - [STRUCTURE.md](STRUCTURE.md) — карта модулей, Kafka handlers, jobs и инфраструктурных компонентов
+- [EXCHANGE_APIS.md](EXCHANGE_APIS.md) — краткая памятка по Kraken / Bybit / Binance API, ограничениям и тому, что реально поддерживает dataset pipeline
 - [../docs/agents/services/microservice_data.md](../docs/agents/services/microservice_data.md) — профиль сервиса для agent workflow
 - [../docs/agents/WORKFLOW.md](../docs/agents/WORKFLOW.md) — общий docs-first маршрут работы
 
@@ -53,7 +54,7 @@ Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handl
 
 - `bybit` — full perpetual pipeline: klines + funding + open interest.
 - `binance` — full USDT-margined futures pipeline: klines + funding + open interest.
-- `kraken` — OHLC-only pipeline via public spot OHLC; funding/open-interest stay empty, and the upstream Kraken API exposes only the most recent 720 base candles.
+- `kraken` — OHLC-only pipeline via public spot OHLC; funding/open-interest stay empty, and the upstream Kraken API exposes only the most recent 720 base candles. The ingest handler clamps each Kraken request to the overlap with that reachable lookback; if the requested window is completely outside it, the job finishes as a no-op instead of poisoning the queue with repeated failures. Kraken HTTP calls use a shorter `30 s` per-call deadline with `2` attempts, and symbol resolution now uses narrow `GET /0/public/AssetPairs?pair=...` lookups one candidate at a time instead of fetching the whole pair catalog.
 
 The handler:
 
@@ -76,9 +77,15 @@ The handler:
     - **Binance** uses `/fapi/v1/klines`, `/fapi/v1/fundingRate` and
        `/futures/data/openInterestHist` with the same incremental windowing
        strategy.
-    - **Kraken** uses `/0/public/OHLC`; unsupported higher-level timeframes
+    - **Kraken** uses `/0/public/OHLC`; pair resolution goes through
+       filtered `/0/public/AssetPairs?pair=...` lookups one candidate at a
+       time for the current symbol, so ingest never needs the full Kraken
+       pair catalog on the hot path.
+       Unsupported higher-level timeframes
        (`3m`, `120m`, `360m`, `720m`) are aggregated from smaller upstream bars
-       inside the client.
+       inside the client. The fetch window is clipped to Kraken's reachable
+       lookback before `FindMissingTimestampsAsync`, so impossible historical
+       ranges complete as a no-op instead of retrying forever.
 5. Forward-fills funding rate + OI onto candle timestamps when the selected
     exchange provides these feeds. For Kraken both series stay `NULL`.
 6. Computes **Wilder's RSI (period 14)** over the warmup+main series
@@ -248,7 +255,9 @@ propagates the error. `fetch_klines` additionally emits throttled
 intermediate `running` updates (at most once every 10 completed pages +
 a final event), driven by the `onPageDone` callback on
 `BybitApiClient.FetchKlinesAsync`. `compute_rsi` emits one
-`running` update per finished segment.
+running` update per finished segment. Progress events are best-effort:
+Kafka delivery failures are logged, but they do not block the underlying
+job handler.
 
 ### Performance & concurrency
 
@@ -286,8 +295,8 @@ in background; until it succeeds callers get `{ error, code:
 
 | Constraint | Value | Purpose |
 | ---------- | ----- | ------- |
-| Max concurrent ingest jobs | 4 | Keeps dataset queue moving faster while staying within the shared Bybit 96 r/s budget |
-| Heavy-TF ingest slot | 1 | At most one `1m`/`3m` ingest runs at a time |
+| Max concurrent ingest jobs | 4 per exchange | One exchange cannot starve the others; `bybit`, `binance`, `kraken` each get their own ingest pool |
+| Heavy-TF ingest slot | 1 per exchange | At most one `1m`/`3m` ingest runs at a time for the same exchange |
 
 **Per-timeframe API parallelism** inside a single ingest job:
 
@@ -303,6 +312,13 @@ in background; until it succeeds callers get `{ error, code:
 - Bybit `retCode 10006` (rate-limited) → 5–10 s random back-off.
 - Bybit `retCode 10018` (IP-banned) → 30 s wait.
 - HTTP 5xx → exponential back-off (2^n s, capped at 60 s).
+
+**HTTP response timeout scope**: JSON responses are fully buffered before
+parsing, so the configured timeout covers the whole response body instead
+of only the response headers. `BybitApiClient` and `BinanceApiClient` stay
+on the shared `RequestTimeoutSeconds=90`; `KrakenApiClient` uses a tighter
+`30 s` per-call deadline with `2` attempts to fast-fail unreachable
+Kraken endpoints.
 - Transient errors (`HttpRequestException`, `TaskCanceledException` with inner `TimeoutException`, `SocketException`, `IOException` wrapping `SocketException`) are all retried.
 
 **HTTP timeout**: `RequestTimeoutSeconds = 90` (was 20). This prevents

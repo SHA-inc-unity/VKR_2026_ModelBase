@@ -1,6 +1,7 @@
 using DataService.API.Database;
 using DataService.API.Dataset;
 using DataService.API.Kafka;
+using System.Text.Json;
 
 namespace DataService.API.Jobs;
 
@@ -16,8 +17,8 @@ public sealed class DatasetJobRunner : BackgroundService
     // and Bybit rate-limit budget reasonable. Single-instance deployment
     // — these are process-local semaphores.
     //
-    // Ingest cap raised back to 4: at 8 parallel windows × 4 jobs = 32 concurrent
-    // HTTP requests, still within the shared 96 r/s budget for a single instance.
+    // Ingest cap is isolated per exchange: one exchange cannot starve the others.
+    // Each exchange gets 4 slots; non-ingest job types keep the global per-type caps.
     private static readonly Dictionary<string, int> Caps = new(StringComparer.OrdinalIgnoreCase)
     {
         [DatasetJobType.Ingest]          = 4,
@@ -30,9 +31,9 @@ public sealed class DatasetJobRunner : BackgroundService
     };
 
     // Extra gate for heavy timeframes (1m, 3m): at most 1 may run concurrently
-    // regardless of the type-level slot cap, to prevent two large 1m ingests
-    // from competing for the shared Bybit rate-limit budget simultaneously.
-    private readonly SemaphoreSlim _heavyIngestSlot = new(1, 1);
+    // per exchange, so Kraken cannot block Bybit heavy jobs and vice versa.
+    private readonly Dictionary<string, SemaphoreSlim> _heavyIngestSlotsByExchange;
+    private readonly Dictionary<string, SemaphoreSlim> _ingestSlotsByExchange;
 
     private readonly Dictionary<string, SemaphoreSlim> _slots;
     private readonly Dictionary<string, IDatasetJobHandler> _handlers;
@@ -57,6 +58,8 @@ public sealed class DatasetJobRunner : BackgroundService
         _log = log;
         _handlers = handlers.ToDictionary(h => h.Type, StringComparer.OrdinalIgnoreCase);
         _slots = Caps.ToDictionary(kv => kv.Key, kv => new SemaphoreSlim(kv.Value, kv.Value), StringComparer.OrdinalIgnoreCase);
+        _ingestSlotsByExchange = BuildExchangeSlots(4);
+        _heavyIngestSlotsByExchange = BuildExchangeSlots(1);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stopping)
@@ -99,10 +102,24 @@ public sealed class DatasetJobRunner : BackgroundService
                     if (!_slots.TryGetValue(job.Type, out var slot)) continue;
                     if (slot.CurrentCount == 0) continue;
 
+                    SemaphoreSlim? exchangeSlot = null;
+                    SemaphoreSlim? heavySlot = null;
+                    var ingestExchange = ResolveIngestExchange(job);
+
+                    if (string.Equals(job.Type, DatasetJobType.Ingest, StringComparison.OrdinalIgnoreCase))
+                    {
+                        exchangeSlot = GetExchangeSlot(_ingestSlotsByExchange, ingestExchange);
+                        if (exchangeSlot.CurrentCount == 0) continue;
+                    }
+
                     // Heavy timeframes (1m, 3m) additionally require the exclusive
                     // heavy-ingest slot so they cannot run two at a time.
                     var isHeavy = IsHeavyIngest(job);
-                    if (isHeavy && _heavyIngestSlot.CurrentCount == 0) continue;
+                    if (isHeavy)
+                    {
+                        heavySlot = GetExchangeSlot(_heavyIngestSlotsByExchange, ingestExchange);
+                        if (heavySlot.CurrentCount == 0) continue;
+                    }
 
                     if (!_locks.TryAcquire(job.TargetTable, job.ConflictClass)) continue;
 
@@ -114,10 +131,11 @@ public sealed class DatasetJobRunner : BackgroundService
                     }
 
                     await slot.WaitAsync(stopping);
-                    if (isHeavy) await _heavyIngestSlot.WaitAsync(stopping);
+                    if (exchangeSlot is not null) await exchangeSlot.WaitAsync(stopping);
+                    if (heavySlot is not null) await heavySlot.WaitAsync(stopping);
                     picked++;
                     _ = Task.Run(() => RunOneAsync(handler, job, slot,
-                        isHeavy ? _heavyIngestSlot : null, stopping), stopping);
+                        exchangeSlot, heavySlot, stopping), stopping);
                 }
 
                 await Task.Delay(picked > 0 ? 100 : 500, stopping);
@@ -161,7 +179,7 @@ public sealed class DatasetJobRunner : BackgroundService
 
     private async Task RunOneAsync(
         IDatasetJobHandler handler, DatasetJobRecord job,
-        SemaphoreSlim slot, SemaphoreSlim? heavySlot, CancellationToken stopping)
+        SemaphoreSlim slot, SemaphoreSlim? exchangeSlot, SemaphoreSlim? heavySlot, CancellationToken stopping)
     {
         var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         var heartbeat = Task.Run(() => HeartbeatLoopAsync(job.JobId, heartbeatCts.Token));
@@ -197,6 +215,7 @@ public sealed class DatasetJobRunner : BackgroundService
             try { await heartbeat; } catch { /* heartbeat exit is best-effort */ }
             _locks.Release(job.TargetTable, job.ConflictClass);
             heavySlot?.Release();
+            exchangeSlot?.Release();
             slot.Release();
         }
     }
@@ -215,6 +234,50 @@ public sealed class DatasetJobRunner : BackgroundService
         job.Type == DatasetJobType.Ingest &&
         job.TargetTimeframe is { } tf &&
         DatasetConstants.HeavyTimeframes.Contains(tf);
+
+    private static Dictionary<string, SemaphoreSlim> BuildExchangeSlots(int cap) =>
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["bybit"] = new SemaphoreSlim(cap, cap),
+            ["binance"] = new SemaphoreSlim(cap, cap),
+            ["kraken"] = new SemaphoreSlim(cap, cap),
+        };
+
+    private static SemaphoreSlim GetExchangeSlot(Dictionary<string, SemaphoreSlim> slots, string exchange) =>
+        slots.TryGetValue(exchange, out var slot) ? slot : slots["bybit"];
+
+    private static string ResolveIngestExchange(DatasetJobRecord job)
+    {
+        if (!string.Equals(job.Type, DatasetJobType.Ingest, StringComparison.OrdinalIgnoreCase))
+            return "bybit";
+
+        if (!string.IsNullOrWhiteSpace(job.ParamsJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(job.ParamsJson);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("exchange", out var exchange)
+                    && exchange.ValueKind == JsonValueKind.String)
+                {
+                    var value = exchange.GetString()?.Trim().ToLowerInvariant();
+                    if (!string.IsNullOrWhiteSpace(value)) return value;
+                }
+            }
+            catch
+            {
+                // Fall back to target_table inference below.
+            }
+        }
+
+        if (job.TargetTable is { } table)
+        {
+            if (table.StartsWith("kraken_", StringComparison.OrdinalIgnoreCase)) return "kraken";
+            if (table.StartsWith("binance_", StringComparison.OrdinalIgnoreCase)) return "binance";
+        }
+
+        return "bybit";
+    }
 
     private async Task HeartbeatLoopAsync(Guid jobId, CancellationToken ct)
     {

@@ -8,17 +8,42 @@ namespace DataService.API.Markets;
 public sealed class KrakenApiClient : IMarketDataClient
 {
     private const string BaseUrl = "https://api.kraken.com";
+    public const string ExchangeName = "kraken";
+    public const int MaxBaseCandles = 720;
+    private static readonly TimeSpan RequestDeadline = TimeSpan.FromSeconds(30);
+    private const int MaxRequestAttempts = 2;
 
     private readonly HttpClient _http;
     private readonly ILogger<KrakenApiClient> _log;
     private readonly ConcurrentDictionary<string, string> _pairCache = new(StringComparer.OrdinalIgnoreCase);
 
-    public string Exchange => "kraken";
+    public string Exchange => ExchangeName;
 
     public KrakenApiClient(HttpClient http, ILogger<KrakenApiClient> log)
     {
         _http = http;
         _log = log;
+    }
+
+    public static (long EffectiveStartMs, long EffectiveEndMs, bool Clipped) ClampRequestedWindow(
+        long requestedStartMs,
+        long requestedEndMs,
+        long stepMs,
+        long nowMs)
+    {
+        var availableStartMs = Math.Max(0L, nowMs - GetReachableLookbackMs(stepMs));
+        var effectiveStartMs = Math.Max(requestedStartMs, availableStartMs);
+        var effectiveEndMs = Math.Min(requestedEndMs, nowMs);
+        return (effectiveStartMs, effectiveEndMs,
+            effectiveStartMs != requestedStartMs || effectiveEndMs != requestedEndMs);
+    }
+
+    public static string DescribeReachableLookback(long stepMs)
+    {
+        var (baseIntervalMinutes, aggregateFactor) = ResolveOhlcStrategy(stepMs);
+        var targetCandles = Math.Max(1, MaxBaseCandles / aggregateFactor);
+        var targetLookback = TimeSpan.FromMilliseconds(targetCandles * stepMs);
+        return $"last {targetCandles} candles (~{FormatLookback(targetLookback)}) from {MaxBaseCandles} upstream {baseIntervalMinutes}m candles";
     }
 
     public async Task<(long LaunchMs, long FundingMs)> FetchInstrumentDetailsAsync(
@@ -121,25 +146,31 @@ public sealed class KrakenApiClient : IMarketDataClient
         var normalized = symbol.Trim().ToUpperInvariant();
         if (_pairCache.TryGetValue(normalized, out var cached)) return cached;
 
-        using var doc = await GetJsonAsync($"{BaseUrl}/0/public/AssetPairs", ct);
-        if (!doc.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
-            throw new ArgumentException($"kraken asset pair catalog unavailable for {symbol}");
-
-        var candidates = BuildPairCandidates(normalized);
-        foreach (var prop in result.EnumerateObject())
+        foreach (var candidate in BuildPairCandidates(normalized))
         {
-            var altname = prop.Value.TryGetProperty("altname", out var alt) ? alt.GetString() : null;
-            var wsname = prop.Value.TryGetProperty("wsname", out var ws) ? ws.GetString() : null;
-            if (!candidates.Contains(prop.Name)
-                && (altname is null || !candidates.Contains(altname))
-                && (wsname is null || !candidates.Contains(wsname)))
+            using var doc = await GetJsonAsync(
+                $"{BaseUrl}/0/public/AssetPairs?pair={Uri.EscapeDataString(candidate)}",
+                ct);
+            if (!doc.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
             {
                 continue;
             }
 
-            var resolved = altname ?? prop.Name;
-            _pairCache.TryAdd(normalized, resolved);
-            return resolved;
+            foreach (var prop in result.EnumerateObject())
+            {
+                var altname = prop.Value.TryGetProperty("altname", out var alt) ? alt.GetString() : null;
+                var wsname = prop.Value.TryGetProperty("wsname", out var ws) ? ws.GetString() : null;
+                if (!string.Equals(prop.Name, candidate, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(altname, candidate, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(wsname, candidate, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var resolved = altname ?? prop.Name;
+                _pairCache.TryAdd(normalized, resolved);
+                return resolved;
+            }
         }
 
         throw new ArgumentException($"unsupported Kraken symbol: {symbol}");
@@ -148,12 +179,14 @@ public sealed class KrakenApiClient : IMarketDataClient
     private async Task<JsonDocument> GetJsonAsync(string url, CancellationToken ct)
     {
         Exception? last = null;
-        for (int attempt = 0; attempt < DatasetConstants.MaxRetries; attempt++)
+        for (int attempt = 0; attempt < MaxRequestAttempts; attempt++)
         {
             HttpResponseMessage? response = null;
+            using var requestCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            requestCts.CancelAfter(RequestDeadline);
             try
             {
-                response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                response = await _http.GetAsync(url, HttpCompletionOption.ResponseContentRead, requestCts.Token);
                 if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
                 {
                     last = new HttpRequestException($"HTTP {(int)response.StatusCode}");
@@ -164,20 +197,21 @@ public sealed class KrakenApiClient : IMarketDataClient
                 }
 
                 response.EnsureSuccessStatusCode();
-                return await JsonDocument.ParseAsync(
-                    await response.Content.ReadAsStreamAsync(ct),
-                    cancellationToken: ct);
+                return JsonDocument.Parse(await response.Content.ReadAsStringAsync(requestCts.Token));
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
             {
                 last = ex;
+                _log.LogWarning(ex,
+                    "Kraken GET {Url} exceeded {DeadlineSeconds}s (attempt {Attempt}/{Max})",
+                    url, RequestDeadline.TotalSeconds, attempt + 1, MaxRequestAttempts);
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 1000), ct);
             }
             catch (Exception ex) when (IsTransient(ex))
             {
                 last = ex;
                 _log.LogWarning(ex, "Transient Kraken error on GET {Url} (attempt {Attempt}/{Max})",
-                    url, attempt + 1, DatasetConstants.MaxRetries);
+                    url, attempt + 1, MaxRequestAttempts);
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 1000 + Random.Shared.Next(0, 500)), ct);
             }
             finally
@@ -186,7 +220,7 @@ public sealed class KrakenApiClient : IMarketDataClient
             }
         }
 
-        throw new HttpRequestException($"GET {url} failed after {DatasetConstants.MaxRetries} attempts", last);
+        throw new HttpRequestException($"GET {url} failed after {MaxRequestAttempts} attempts", last);
     }
 
     private static bool IsTransient(Exception ex) => ex switch
@@ -198,17 +232,23 @@ public sealed class KrakenApiClient : IMarketDataClient
         _ => false,
     };
 
-    private static HashSet<string> BuildPairCandidates(string symbol)
+    private static string[] BuildPairCandidates(string symbol)
     {
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { symbol };
-        if (!symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase)) return candidates;
+        if (!symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase)) return candidates.ToArray();
 
         var baseAsset = symbol[..^4];
         var mappedBase = baseAsset.Equals("BTC", StringComparison.OrdinalIgnoreCase) ? "XBT" : baseAsset;
         candidates.Add($"{baseAsset}/USDT");
         candidates.Add($"{mappedBase}USDT");
         candidates.Add($"{mappedBase}/USDT");
-        return candidates;
+        return candidates.ToArray();
+    }
+
+    private static long GetReachableLookbackMs(long stepMs)
+    {
+        var (baseIntervalMinutes, _) = ResolveOhlcStrategy(stepMs);
+        return MaxBaseCandles * baseIntervalMinutes * 60_000L;
     }
 
     private static (int BaseIntervalMinutes, int AggregateFactor) ResolveOhlcStrategy(long stepMs) => stepMs switch
@@ -226,6 +266,15 @@ public sealed class KrakenApiClient : IMarketDataClient
         86_400_000 => (1440, 1),
         _ => throw new ArgumentException($"unsupported Kraken step_ms: {stepMs}", nameof(stepMs)),
     };
+
+    private static string FormatLookback(TimeSpan lookback)
+    {
+        if (lookback.TotalDays >= 1)
+            return $"{Math.Round(lookback.TotalDays, 1):0.#}d";
+        if (lookback.TotalHours >= 1)
+            return $"{Math.Round(lookback.TotalHours, 1):0.#}h";
+        return $"{Math.Round(lookback.TotalMinutes, 1):0.#}m";
+    }
 
     private static IReadOnlyList<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>
         AggregateRows(

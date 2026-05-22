@@ -45,6 +45,12 @@ const STATUS_BAR_CLASS: Record<string, string> = {
   skipped:   'bg-muted-foreground/60',
 };
 
+function shortenMessage(value: string | null | undefined, max = 180): string {
+  const normalized = (value ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+}
+
 function getJobNote(job: DatasetJobView): string | null {
   if (job.status === 'queued') return 'Ожидает планировщика';
   if (job.status === 'running') return job.detail ?? 'Job выполняется во владельце сервиса';
@@ -114,12 +120,12 @@ export default function DatasetJobsPanel(): JSX.Element | null {
             </div>
 
             {note ? (
-              <div className="mt-2 text-[11px] text-muted-foreground">{note}</div>
+              <div className="mt-2 break-words text-[11px] text-muted-foreground">{shortenMessage(note)}</div>
             ) : null}
 
             {isError && j.error_message ? (
-              <div className="mt-1 text-[11px] text-destructive">
-                {j.error_code ? `[${j.error_code}] ` : ''}{j.error_message}
+              <div className="mt-1 break-words text-[11px] text-destructive">
+                {j.error_code ? `[${j.error_code}] ` : ''}{shortenMessage(j.error_message)}
               </div>
             ) : null}
 

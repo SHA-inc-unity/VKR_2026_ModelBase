@@ -52,7 +52,7 @@ public sealed class BybitApiClient : IMarketDataClient
             HttpResponseMessage? response = null;
             try
             {
-                response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                response = await _http.GetAsync(url, HttpCompletionOption.ResponseContentRead, ct);
 
                 // ── HTTP-level transient errors ───────────────────────────
                 if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
@@ -70,8 +70,7 @@ public sealed class BybitApiClient : IMarketDataClient
                 }
 
                 response.EnsureSuccessStatusCode();
-                var doc = await JsonDocument.ParseAsync(
-                    await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
 
                 // ── Bybit API-level errors in JSON body ───────────────────
                 if (doc.RootElement.TryGetProperty("retCode", out var rc)

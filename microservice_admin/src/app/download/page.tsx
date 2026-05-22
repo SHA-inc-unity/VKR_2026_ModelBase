@@ -50,6 +50,7 @@ const PARAMS_TTL = 60 * 60 * 24 * 365 * 5;
 const CACHE_TABLES_KEY         = 'modelline:dataset-tables:v1';
 const CACHE_TABLES_TTL         = 3600; // 60 minutes
 const CACHE_COVERAGE_TTL       = 1800; // 30 minutes
+const ALL_INGEST_ERROR_RETENTION_MS = 10_000;
 const EXCHANGES = [
   { value: 'bybit', label: 'Bybit' },
   { value: 'binance', label: 'Binance' },
@@ -67,6 +68,12 @@ function allCoverageCacheKey(symbol: string, exchange: DatasetExchange) {
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 function daysAgoStr(n: number) {
   const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10);
+}
+
+function shortenMessage(value: string | null | undefined, max = 180): string {
+  const normalized = (value ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
 }
 
 interface DatasetPageParams {
@@ -385,7 +392,7 @@ function AllIngestProgress({
                       <span className="text-[10px] text-muted-foreground">{row.jobId ? `job ${row.jobId.slice(0, 8)}` : 'job'}</span>
                     </div>
                     <div className="mt-1 text-[11px] font-medium text-foreground">{stage}</div>
-                    <div className="text-[10px] text-muted-foreground truncate">{detail}</div>
+                    <div className="break-words text-[10px] text-muted-foreground">{shortenMessage(detail)}</div>
                   </div>
                   <div className="text-right shrink-0">
                     <div className="text-xs font-semibold tabular-nums text-primary">{pct}%</div>
@@ -439,6 +446,9 @@ function AllIngestProgress({
                   : undefined;
                 const isError = row.status === 'error';
                 const completedRows = row.meta?.rows ?? 0;
+                const recentMessage = isError
+                  ? shortenMessage(row.meta?.error ?? 'Job failed')
+                  : shortenMessage(row.meta?.detail ?? (completedRows > 0 ? 'Job завершена' : 'Дозагрузка не потребовалась'));
                 return (
                   <div key={row.tf} className="flex items-start justify-between gap-3 text-[11px]">
                     <div className="min-w-0 flex items-start gap-2">
@@ -454,8 +464,8 @@ function AllIngestProgress({
                             </span>
                           )}
                         </div>
-                        <div className={cn('truncate text-[10px]', isError ? 'text-destructive/80' : 'text-muted-foreground')}>
-                          {isError ? (row.meta?.error ?? 'Job failed') : (completedRows > 0 ? 'Job завершена' : 'Дозагрузка не потребовалась')}
+                        <div className={cn('break-words text-[10px]', isError ? 'text-destructive/80' : 'text-muted-foreground')}>
+                          {recentMessage}
                         </div>
                       </div>
                     </div>
@@ -571,8 +581,11 @@ export default function DatasetPage() {
   // Maps tf → job_id for the current ALL-mode jobs-based ingest.
   const [allIngestJobIds, setAllIngestJobIds] = useState<Record<string, string>>({});
   const allIngestJobIdsRef = useRef<Record<string, string>>({});
+  const allIngestErrorCleanupTimersRef = useRef<Record<string, number>>({});
+  const handledTerminalErrorJobsRef = useRef<Set<string>>(new Set());
   // Job ID for single-TF job-based ingest.
   const [ingestJobId, setIngestJobId] = useState<string | null>(null);
+  const ingestStartedAtRef = useRef<number | null>(null);
   const [loadingExport,  setLoadingExport]  = useState(false);
 
   // Ingest progress (staged, driven by EVT_DATA_INGEST_PROGRESS events).
@@ -617,6 +630,62 @@ export default function DatasetPage() {
     finished: boolean;
     errorLog: { tf: string; message: string }[];
   } | null>(null);
+
+  const clearAllIngestErrorCleanup = (tf: string) => {
+    const timerId = allIngestErrorCleanupTimersRef.current[tf];
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+      delete allIngestErrorCleanupTimersRef.current[tf];
+    }
+  };
+
+  const resetAllIngestErrorCleanup = () => {
+    Object.values(allIngestErrorCleanupTimersRef.current).forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    allIngestErrorCleanupTimersRef.current = {};
+  };
+
+  const scheduleAllIngestErrorCleanup = (tf: string) => {
+    clearAllIngestErrorCleanup(tf);
+    allIngestErrorCleanupTimersRef.current[tf] = window.setTimeout(() => {
+      delete allIngestErrorCleanupTimersRef.current[tf];
+      setAllIngestStatuses(prev => {
+        if (!prev || prev[tf] !== 'error') return prev;
+        const next = { ...prev };
+        delete next[tf];
+        return Object.keys(next).length > 0 ? next : null;
+      });
+      setAllIngestMeta(prev => {
+        if (!(tf in prev)) return prev;
+        const next = { ...prev };
+        delete next[tf];
+        return next;
+      });
+      setAllIngestJobIds(prev => {
+        if (!(tf in prev)) return prev;
+        const next = { ...prev };
+        delete next[tf];
+        allIngestJobIdsRef.current = next;
+        return next;
+      });
+    }, ALL_INGEST_ERROR_RETENTION_MS);
+  };
+
+  const addDownloadErrorHistory = (tf: string, message: string, durationMs: number) => {
+    addEntry({
+      action: 'Download',
+      params: { symbol, timeframe: tf, exchange, dateFrom, dateTo },
+      result: `Error: ${shortenMessage(message)}`,
+      durationMs,
+    });
+  };
+
+  useEffect(() => {
+    return () => {
+      resetAllIngestErrorCleanup();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEvents({
     EVT_DATA_INGEST_PROGRESS: (ev) => {
@@ -773,7 +842,9 @@ export default function DatasetPage() {
         const job = allJobs.find(j => j.job_id === jobId);
         if (!job) continue;
         if (job.finished) {
-          const newStatus: TfStatus = job.status === 'succeeded' ? 'done' : 'error';
+          const isSuccessful = job.status === 'succeeded' || job.status === 'skipped';
+          const newStatus: TfStatus = isSuccessful ? 'done' : 'error';
+          clearAllIngestErrorCleanup(tf);
           setAllIngestStatuses(prev =>
             !prev || prev[tf] === newStatus ? prev : { ...prev, [tf]: newStatus },
           );
@@ -785,16 +856,28 @@ export default function DatasetPage() {
               [tf]: {
                 ...(existing ?? { startedAt: Date.now() }),
                 endedAt: Date.now(),
-                rows:  job.status === 'succeeded' ? (job.completed ?? 0) : existing?.rows,
-                pct:   job.status === 'succeeded' ? 100 : existing?.pct,
+                rows:  isSuccessful ? (job.completed ?? 0) : existing?.rows,
+                pct:   isSuccessful ? 100 : existing?.pct,
                 stage: job.stage ?? existing?.stage,
                 detail: job.detail ?? existing?.detail,
-                error: job.status !== 'succeeded' ? (job.error_message ?? 'failed') : undefined,
+                error: !isSuccessful ? (job.error_message ?? 'failed') : undefined,
               },
             };
           });
+          if (!isSuccessful) {
+            scheduleAllIngestErrorCleanup(tf);
+            if (!handledTerminalErrorJobsRef.current.has(job.job_id)) {
+              handledTerminalErrorJobsRef.current.add(job.job_id);
+              addDownloadErrorHistory(
+                tf,
+                job.error_message ?? job.detail ?? 'Ingest failed',
+                Math.max(0, Date.now() - (allIngestMeta[tf]?.startedAt ?? Date.now())),
+              );
+            }
+          }
         } else if (job.status === 'running') {
           // Honest transition: queued → running on first scheduler dispatch.
+          clearAllIngestErrorCleanup(tf);
           setAllIngestStatuses(prev =>
             !prev || prev[tf] === 'running' ? prev : { ...prev, [tf]: 'running' },
           );
@@ -819,6 +902,7 @@ export default function DatasetPage() {
           });
         } else if (job.status === 'queued') {
           // Job exists in DB queue but scheduler hasn't picked it up yet.
+          clearAllIngestErrorCleanup(tf);
           setAllIngestStatuses(prev =>
             !prev || prev[tf] === 'queued' ? prev : { ...prev, [tf]: 'queued' },
           );
@@ -847,13 +931,24 @@ export default function DatasetPage() {
         if (job.finished) {
           setLoadingIngest(false);
           operationLockRef.current = false;
-          if (job.status === 'succeeded') {
+          const isSuccessful = job.status === 'succeeded' || job.status === 'skipped';
+          if (isSuccessful) {
             toast(formatIngestSuccessToast(job.completed), 'success');
             void handleListTables();
             void refreshCoverageState();
           } else {
-            toast(job.error_message ?? 'Ingest failed', 'error');
+            const message = job.error_message ?? 'Ingest failed';
+            toast(message, 'error');
+            if (!handledTerminalErrorJobsRef.current.has(job.job_id)) {
+              handledTerminalErrorJobsRef.current.add(job.job_id);
+              addDownloadErrorHistory(
+                timeframe,
+                message,
+                Math.max(0, Date.now() - (ingestStartedAtRef.current ?? Date.now())),
+              );
+            }
           }
+          ingestStartedAtRef.current = null;
           setIngestJobId(null);
         } else if (job.status === 'running') {
           // Initialise the staged progress strip only once the scheduler
@@ -1024,6 +1119,7 @@ export default function DatasetPage() {
 
       if (timeframe === 'ALL') {
         const tfs = [...TIMEFRAMES] as string[];
+        resetAllIngestErrorCleanup();
 
         // Initialize per-TF status dictionary. 'pending' = local pre-Kafka
         // placeholder; flips to 'queued' on JOBS_START reply, then
@@ -1071,6 +1167,8 @@ export default function DatasetPage() {
               const msg = res.error ?? 'no job_id in reply';
               setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
               setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now(), error: msg } }));
+              scheduleAllIngestErrorCleanup(tf);
+              addDownloadErrorHistory(tf, msg, Date.now() - t0);
               toast(`${tf}: не удалось запустить job — ${msg}`, 'info');
               continue;
             }
@@ -1078,6 +1176,7 @@ export default function DatasetPage() {
             // Honest status: queued, NOT running. The scheduler hasn't
             // necessarily picked the job up yet; the UI flips to
             // 'running' only when the first progress event arrives.
+            clearAllIngestErrorCleanup(tf);
             setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'queued' }));
             setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now() } }));
             seedQueuedJob({
@@ -1090,6 +1189,8 @@ export default function DatasetPage() {
             const msg = e instanceof Error ? e.message : String(e);
             setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
             setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now(), error: msg } }));
+            scheduleAllIngestErrorCleanup(tf);
+            addDownloadErrorHistory(tf, msg, Date.now() - t0);
             toast(`${tf}: не удалось запустить job — ${msg}`, 'info');
           }
         }
@@ -1132,6 +1233,7 @@ export default function DatasetPage() {
         if (res.error || !res.job_id) {
           throw new Error(res.error ?? 'no job_id in reply');
         }
+        ingestStartedAtRef.current = Date.now();
         setIngestJobId(res.job_id);
         seedQueuedJob({
           jobId: res.job_id,

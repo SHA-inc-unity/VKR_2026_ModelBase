@@ -47,6 +47,9 @@ internal static class JobHandlerHelpers
             _ => def,
         };
     }
+
+    public static string FormatUtc(long ms) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss'Z'");
 }
 
 public sealed class IngestJobHandler : IDatasetJobHandler
@@ -74,10 +77,39 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         var (s, e) = DatasetCore.NormalizeWindow(startMs, endMs, stepMs);
         var table = DatasetCore.MakeTableName(symbol, key, exchange);
         var market = _markets.GetRequiredClient(exchange);
+        string? windowDetail = null;
+
+        if (string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase))
+        {
+            var (effectiveStartMs, effectiveEndMs, clipped) = KrakenApiClient.ClampRequestedWindow(
+                s, e, stepMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            if (effectiveStartMs > effectiveEndMs)
+            {
+                await ctx.ReportAsync(
+                    "done",
+                    100,
+                    $"kraken window outside reachable history for {table}; requested {JobHandlerHelpers.FormatUtc(s)} .. {JobHandlerHelpers.FormatUtc(e)}; " +
+                    $"available {KrakenApiClient.DescribeReachableLookback(stepMs)}",
+                    total: 0,
+                    completed: 0,
+                    skipped: 1);
+                return;
+            }
+
+            if (clipped)
+            {
+                windowDetail =
+                    $"kraken window clipped to {JobHandlerHelpers.FormatUtc(effectiveStartMs)} .. {JobHandlerHelpers.FormatUtc(effectiveEndMs)} " +
+                    $"({KrakenApiClient.DescribeReachableLookback(stepMs)})";
+                s = effectiveStartMs;
+                e = effectiveEndMs;
+            }
+        }
 
         // ── prepare ────────────────────────────────────────────
         var stagePrep = await ctx.StartStageAsync("prepare");
-        await ctx.ReportAsync("prepare", 1, $"table={table}");
+        await ctx.ReportAsync("prepare", 1,
+            windowDetail is null ? $"table={table}" : $"table={table}; {windowDetail}");
         await _repo.CreateTableIfNotExistsAsync(table, ctx.CancellationToken);
         var missing = await _repo.FindMissingTimestampsAsync(table, s, e, stepMs, ctx.CancellationToken);
         await ctx.EndStageAsync(stagePrep, missing.Count);
@@ -103,7 +135,13 @@ public sealed class IngestJobHandler : IDatasetJobHandler
             : DatasetConstants.MaxParallelApiWorkers;
 
         var stageFetch = await ctx.StartStageAsync("fetch");
-        await ctx.ReportAsync("fetch_klines", 5, $"missing={missing.Count}, fetching market data", total: missing.Count);
+        await ctx.ReportAsync(
+            "fetch_klines",
+            5,
+            windowDetail is null
+                ? $"missing={missing.Count}, fetching market data"
+                : $"missing={missing.Count}, fetching market data; {windowDetail}",
+            total: missing.Count);
 
         var klineT = market.FetchKlinesAsync(
             symbol.ToUpperInvariant(), interval, fetchStart, e, stepMs, maxParallel, ctx.CancellationToken,
