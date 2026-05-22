@@ -166,17 +166,6 @@ public sealed class DatasetJobsMutator
         return await conn.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
 
-    /// <summary>
-    /// Remove legacy queue-owned market watcher rows. The watcher now runs as a
-    /// dedicated hosted service and should never surface in dataset_jobs again.
-    /// </summary>
-    public async Task<int> DeleteLegacyMarketWatchAsync(CancellationToken ct = default)
-    {
-        const string sql = "DELETE FROM dataset_jobs WHERE type='market_watch'";
-        await using var conn = await _pg.OpenAsync(ct);
-        return await conn.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
-    }
-
     // ── Subtasks ─────────────────────────────────────────────────────────
 
     public async Task<Guid> AddSubtaskAsync(

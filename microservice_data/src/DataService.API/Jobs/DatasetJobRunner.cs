@@ -41,10 +41,6 @@ public sealed class DatasetJobRunner : BackgroundService
     private readonly Dictionary<string, SemaphoreSlim> _ingestSlotsByExchange;
 
     private readonly Dictionary<string, SemaphoreSlim> _slots;
-
-            var legacyMarketWatch = await _mut.DeleteLegacyMarketWatchAsync(stopping);
-            if (legacyMarketWatch > 0)
-                _log.LogInformation("DatasetJobRunner removed {N} legacy market_watch queue rows", legacyMarketWatch);
     private readonly Dictionary<string, IDatasetJobHandler> _handlers;
     private readonly DatasetJobsRepository _repo;
     private readonly DatasetJobsMutator _mut;
