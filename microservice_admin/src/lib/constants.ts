@@ -7,6 +7,8 @@ export const SYMBOLS = [
   'TONUSDT', 'SUIUSDT', 'APTUSDT',
 ] as const;
 
+export const SYMBOLS_ALL = ['ALL', ...SYMBOLS] as const;
+
 export const TIMEFRAMES = [
   '1m', '3m', '5m', '15m', '30m', '60m', '120m', '240m', '360m', '720m', '1d',
 ] as const;

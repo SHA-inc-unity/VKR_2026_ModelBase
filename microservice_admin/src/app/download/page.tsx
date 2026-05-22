@@ -12,6 +12,7 @@ import { useDatasetJobsFeed } from '@/hooks/useDatasetJobsFeed';
 import type { DatasetJobView } from '@/hooks/useDatasetJobs';
 import {
   SYMBOLS,
+  SYMBOLS_ALL,
   TIMEFRAMES,
   TIMEFRAMES_ALL,
   TF_STEP_MS,
@@ -185,6 +186,26 @@ function parseTableName(table: string): { exchange: DatasetExchange; symbol: str
   };
 }
 
+function buildIngestScopeKey(symbol: string, timeframe: string): string {
+  return `${symbol}::${timeframe}`;
+}
+
+function parseIngestScopeKey(scopeKey: string): { symbol: string | null; timeframe: string } {
+  const separatorIdx = scopeKey.indexOf('::');
+  if (separatorIdx === -1) {
+    return { symbol: null, timeframe: scopeKey };
+  }
+  return {
+    symbol: scopeKey.slice(0, separatorIdx),
+    timeframe: scopeKey.slice(separatorIdx + 2),
+  };
+}
+
+function formatIngestScopeLabel(scopeKey: string): string {
+  const parsed = parseIngestScopeKey(scopeKey);
+  return parsed.symbol ? `${parsed.symbol} ${parsed.timeframe}` : parsed.timeframe;
+}
+
 function normalizeIngestJobStage(stage?: string | null): 'prepare' | 'fetch' | 'upsert' | 'compute_features' | null {
   switch (stage) {
     case 'prepare':
@@ -327,11 +348,18 @@ function AllIngestProgress({
   }
 
   const jobsById = new Map(jobs.map(job => [job.job_id, job]));
-  const rows = Object.keys(statuses).map(tf => {
-    const jobId = jobIds[tf];
+  const rows = Object.keys(statuses).map(scopeKey => {
+    const jobId = jobIds[scopeKey];
     const job = jobId ? jobsById.get(jobId) : undefined;
-    const m = meta[tf];
-    return { tf, status: statuses[tf], meta: m, job, jobId };
+    const m = meta[scopeKey];
+    return {
+      scopeKey,
+      label: formatIngestScopeLabel(scopeKey),
+      status: statuses[scopeKey],
+      meta: m,
+      job,
+      jobId,
+    };
   });
 
   const runningRows = rows
@@ -403,12 +431,12 @@ function AllIngestProgress({
             const elapsed = Date.now() - (row.meta?.runningAt ?? row.meta?.startedAt ?? Date.now());
 
             return (
-              <div key={row.tf} className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
+              <div key={row.scopeKey} className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Slot {slotIdx + 1}</span>
-                      <span className="text-xs font-mono text-foreground">{row.tf}</span>
+                      <span className="text-xs font-mono text-foreground">{row.label}</span>
                       <span className="text-[10px] text-muted-foreground">{row.jobId ? `job ${row.jobId.slice(0, 8)}` : 'job'}</span>
                     </div>
                     <div className="mt-1 text-[11px] font-medium text-foreground">{stage}</div>
@@ -437,10 +465,10 @@ function AllIngestProgress({
               {queuedRows.slice(0, 6).map(row => {
                 const waitMs = Date.now() - (row.meta?.startedAt ?? Date.now());
                 return (
-                  <div key={row.tf} className="flex items-center justify-between gap-2 text-[11px]">
+                  <div key={row.scopeKey} className="flex items-center justify-between gap-2 text-[11px]">
                     <div className="min-w-0 flex items-center gap-2">
                       <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/60 bg-muted-foreground/20" />
-                      <span className="font-mono text-foreground">{row.tf}</span>
+                      <span className="font-mono text-foreground">{row.label}</span>
                       <span className="truncate text-muted-foreground">ждёт планировщика</span>
                     </div>
                     <span className="shrink-0 tabular-nums text-muted-foreground">{fmtDur(waitMs)}</span>
@@ -470,14 +498,14 @@ function AllIngestProgress({
                   ? shortenMessage(row.meta?.error ?? 'Job failed')
                   : shortenMessage(row.meta?.detail ?? (completedRows > 0 ? 'Job завершена' : 'Дозагрузка не потребовалась'));
                 return (
-                  <div key={row.tf} className="flex items-start justify-between gap-3 text-[11px]">
+                  <div key={row.scopeKey} className="flex items-start justify-between gap-3 text-[11px]">
                     <div className="min-w-0 flex items-start gap-2">
                       {isError
                         ? <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
                         : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />}
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className={cn('font-mono', isError ? 'text-destructive' : 'text-foreground')}>{row.tf}</span>
+                          <span className={cn('font-mono', isError ? 'text-destructive' : 'text-foreground')}>{row.label}</span>
                           {row.meta?.rows !== undefined && !isError && (
                             <span className="tabular-nums text-muted-foreground">
                               {completedRows > 0 ? `${completedRows.toLocaleString()} новых строк` : 'без новых строк'}
@@ -545,7 +573,7 @@ export default function DatasetPage() {
     let cancelled = false;
     void cacheRead<DatasetPageParams>(PARAMS_KEY).then((cached) => {
       if (cancelled) return;
-      if (cached?.symbol && SYMBOLS.includes(cached.symbol as typeof SYMBOLS[number])) setSymbol(cached.symbol);
+      if (cached?.symbol && SYMBOLS_ALL.includes(cached.symbol as typeof SYMBOLS_ALL[number])) setSymbol(cached.symbol);
       if (cached?.timeframe && TIMEFRAMES_ALL.includes(cached.timeframe as typeof TIMEFRAMES_ALL[number])) setTimeframe(cached.timeframe);
       if (typeof cached?.dateFrom === 'string' && cached.dateFrom.length > 0) setDateFrom(cached.dateFrom);
       if (typeof cached?.dateTo === 'string' && cached.dateTo.length > 0) setDateTo(cached.dateTo);
@@ -559,6 +587,15 @@ export default function DatasetPage() {
       cancelled = true;
     };
   }, []);
+
+  const isAllSymbolsMode = symbol === 'ALL';
+  const isMultiIngestMode = timeframe === 'ALL' || isAllSymbolsMode;
+
+  useEffect(() => {
+    if (symbol === 'ALL' && timeframe !== 'ALL') {
+      setTimeframe('ALL');
+    }
+  }, [symbol, timeframe]);
 
   useEffect(() => {
     if (!paramsHydrated) return;
@@ -579,6 +616,11 @@ export default function DatasetPage() {
   // On symbol/timeframe change: restore coverage from cache
   useEffect(() => {
     async function tryRestoreCache() {
+      if (symbol === 'ALL') {
+        setCoverage(null);
+        setAllCoverages(null);
+        return;
+      }
       const [cachedCov, cachedAll] = await Promise.all([
         cacheRead<CoverageResult>(coverageCacheKey(symbol, timeframe, exchange)),
         cacheRead<AllCoverageItem[]>(allCoverageCacheKey(symbol, exchange)),
@@ -587,7 +629,7 @@ export default function DatasetPage() {
       setAllCoverages(cachedAll ?? null);
     }
     void tryRestoreCache();
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, exchange]);
 
   const [tables,        setTables]        = useState<DataTableInfo[] | null>(null);
   const [coverage,      setCoverage]      = useState<CoverageResult | null>(null);
@@ -598,7 +640,8 @@ export default function DatasetPage() {
   const [allCoverages, setAllCoverages] = useState<AllCoverageItem[] | null>(null);
   const [allIngestStatuses, setAllIngestStatuses] = useState<Record<string, TfStatus> | null>(null);
   const [allIngestMeta,    setAllIngestMeta]    = useState<Record<string, TfMeta>>({});
-  // Maps tf → job_id for the current ALL-mode jobs-based ingest.
+  // Maps dataset scope (`symbol::timeframe`) → job_id for the current
+  // multi-job jobs-based ingest.
   const [allIngestJobIds, setAllIngestJobIds] = useState<Record<string, string>>({});
   const allIngestJobIdsRef = useRef<Record<string, string>>({});
   const allIngestErrorCleanupTimersRef = useRef<Record<string, number>>({});
@@ -651,11 +694,11 @@ export default function DatasetPage() {
     errorLog: { tf: string; message: string }[];
   } | null>(null);
 
-  const clearAllIngestErrorCleanup = (tf: string) => {
-    const timerId = allIngestErrorCleanupTimersRef.current[tf];
+  const clearAllIngestErrorCleanup = (scopeKey: string) => {
+    const timerId = allIngestErrorCleanupTimersRef.current[scopeKey];
     if (timerId !== undefined) {
       window.clearTimeout(timerId);
-      delete allIngestErrorCleanupTimersRef.current[tf];
+      delete allIngestErrorCleanupTimersRef.current[scopeKey];
     }
   };
 
@@ -666,36 +709,43 @@ export default function DatasetPage() {
     allIngestErrorCleanupTimersRef.current = {};
   };
 
-  const scheduleAllIngestErrorCleanup = (tf: string) => {
-    clearAllIngestErrorCleanup(tf);
-    allIngestErrorCleanupTimersRef.current[tf] = window.setTimeout(() => {
-      delete allIngestErrorCleanupTimersRef.current[tf];
+  const scheduleAllIngestErrorCleanup = (scopeKey: string) => {
+    clearAllIngestErrorCleanup(scopeKey);
+    allIngestErrorCleanupTimersRef.current[scopeKey] = window.setTimeout(() => {
+      delete allIngestErrorCleanupTimersRef.current[scopeKey];
       setAllIngestStatuses(prev => {
-        if (!prev || prev[tf] !== 'error') return prev;
+        if (!prev || prev[scopeKey] !== 'error') return prev;
         const next = { ...prev };
-        delete next[tf];
+        delete next[scopeKey];
         return Object.keys(next).length > 0 ? next : null;
       });
       setAllIngestMeta(prev => {
-        if (!(tf in prev)) return prev;
+        if (!(scopeKey in prev)) return prev;
         const next = { ...prev };
-        delete next[tf];
+        delete next[scopeKey];
         return next;
       });
       setAllIngestJobIds(prev => {
-        if (!(tf in prev)) return prev;
+        if (!(scopeKey in prev)) return prev;
         const next = { ...prev };
-        delete next[tf];
+        delete next[scopeKey];
         allIngestJobIdsRef.current = next;
         return next;
       });
     }, ALL_INGEST_ERROR_RETENTION_MS);
   };
 
-  const addDownloadErrorHistory = (tf: string, message: string, durationMs: number) => {
+  const addDownloadErrorHistory = (scopeKey: string, message: string, durationMs: number) => {
+    const parsed = parseIngestScopeKey(scopeKey);
     addEntry({
       action: 'Download',
-      params: { symbol, timeframe: tf, exchange, dateFrom, dateTo },
+      params: {
+        symbol: parsed.symbol ?? symbol,
+        timeframe: parsed.timeframe,
+        exchange,
+        dateFrom,
+        dateTo,
+      },
       result: `Error: ${shortenMessage(message)}`,
       durationMs,
     });
@@ -800,6 +850,11 @@ export default function DatasetPage() {
   // so it composes safely while another operation is in progress.
   const refreshCoverageState = async (): Promise<void> => {
     try {
+      if (symbol === 'ALL') {
+        setCoverage(null);
+        setAllCoverages(null);
+        return;
+      }
       if (timeframe === 'ALL') {
         const results = await Promise.all(
           TIMEFRAMES.map(async tf => {
@@ -858,22 +913,22 @@ export default function DatasetPage() {
     // ALL-mode: update per-TF statuses from job events.
     const ids = Object.entries(allIngestJobIdsRef.current);
     if (ids.length > 0) {
-      for (const [tf, jobId] of ids) {
+      for (const [scopeKey, jobId] of ids) {
         const job = allJobs.find(j => j.job_id === jobId);
         if (!job) continue;
         if (job.finished) {
           const isSuccessful = job.status === 'succeeded' || job.status === 'skipped';
           const newStatus: TfStatus = isSuccessful ? 'done' : 'error';
-          clearAllIngestErrorCleanup(tf);
+          clearAllIngestErrorCleanup(scopeKey);
           setAllIngestStatuses(prev =>
-            !prev || prev[tf] === newStatus ? prev : { ...prev, [tf]: newStatus },
+            !prev || prev[scopeKey] === newStatus ? prev : { ...prev, [scopeKey]: newStatus },
           );
           setAllIngestMeta(prev => {
-            const existing = prev[tf];
+            const existing = prev[scopeKey];
             if (existing?.endedAt !== undefined) return prev;
             return {
               ...prev,
-              [tf]: {
+              [scopeKey]: {
                 ...(existing ?? { startedAt: Date.now() }),
                 endedAt: Date.now(),
                 rows:  isSuccessful ? (job.completed ?? 0) : existing?.rows,
@@ -885,24 +940,24 @@ export default function DatasetPage() {
             };
           });
           if (!isSuccessful) {
-            scheduleAllIngestErrorCleanup(tf);
+            scheduleAllIngestErrorCleanup(scopeKey);
             if (!handledTerminalErrorJobsRef.current.has(job.job_id)) {
               handledTerminalErrorJobsRef.current.add(job.job_id);
               addDownloadErrorHistory(
-                tf,
+                scopeKey,
                 job.error_message ?? job.detail ?? 'Ingest failed',
-                Math.max(0, Date.now() - (allIngestMeta[tf]?.startedAt ?? Date.now())),
+                Math.max(0, Date.now() - (allIngestMeta[scopeKey]?.startedAt ?? Date.now())),
               );
             }
           }
         } else if (job.status === 'running') {
           // Honest transition: queued → running on first scheduler dispatch.
-          clearAllIngestErrorCleanup(tf);
+          clearAllIngestErrorCleanup(scopeKey);
           setAllIngestStatuses(prev =>
-            !prev || prev[tf] === 'running' ? prev : { ...prev, [tf]: 'running' },
+            !prev || prev[scopeKey] === 'running' ? prev : { ...prev, [scopeKey]: 'running' },
           );
           setAllIngestMeta(prev => {
-            const m = prev[tf];
+            const m = prev[scopeKey];
             if (
               m?.pct === job.progress &&
               m?.stage === (job.stage ?? undefined) &&
@@ -911,7 +966,7 @@ export default function DatasetPage() {
             ) return prev;
             return {
               ...prev,
-              [tf]: {
+              [scopeKey]: {
                 ...(m ?? { startedAt: Date.now() }),
                 runningAt: m?.runningAt ?? Date.now(),
                 pct: job.progress,
@@ -922,9 +977,9 @@ export default function DatasetPage() {
           });
         } else if (job.status === 'queued') {
           // Job exists in DB queue but scheduler hasn't picked it up yet.
-          clearAllIngestErrorCleanup(tf);
+          clearAllIngestErrorCleanup(scopeKey);
           setAllIngestStatuses(prev =>
-            !prev || prev[tf] === 'queued' ? prev : { ...prev, [tf]: 'queued' },
+            !prev || prev[scopeKey] === 'queued' ? prev : { ...prev, [scopeKey]: 'queued' },
           );
         }
       }
@@ -980,6 +1035,18 @@ export default function DatasetPage() {
       }
     }
   }, [allJobs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!isAllSymbolsMode) return;
+    setCoverage(null);
+    setAllCoverages(null);
+    setSelectedTable(null);
+    setQualityReport(null);
+    setAllQualityResults(null);
+    setQualityProgress(null);
+    setRepairStages(null);
+    setIsAllMode(false);
+  }, [isAllSymbolsMode]);
 
   const handleListTables = async () => {
     if (operationLockRef.current) return;
@@ -1054,6 +1121,10 @@ export default function DatasetPage() {
   };
 
   const handleCheckCoverage = async () => {
+    if (symbol === 'ALL') {
+      toast('Для Symbol=ALL доступен только Ingest. Выберите конкретный датасет для coverage.', 'info');
+      return;
+    }
     if (operationLockRef.current) return;
     operationLockRef.current = true;
     setLoadingCov(true);
@@ -1137,8 +1208,18 @@ export default function DatasetPage() {
       // with a fake "0 rows" skeleton). Failures are non-fatal.
       await refreshCoverageState();
 
-      if (timeframe === 'ALL') {
-        const tfs = [...TIMEFRAMES] as string[];
+      if (isMultiIngestMode) {
+        const selectedSymbols = symbol === 'ALL' ? [...SYMBOLS] as string[] : [symbol];
+        const selectedTimeframes = timeframe === 'ALL' || symbol === 'ALL'
+          ? [...TIMEFRAMES] as string[]
+          : [timeframe];
+        const targets = selectedSymbols.flatMap((targetSymbol) =>
+          selectedTimeframes.map((targetTimeframe) => ({
+            symbol: targetSymbol,
+            timeframe: targetTimeframe,
+            scopeKey: buildIngestScopeKey(targetSymbol, targetTimeframe),
+          })),
+        );
         resetAllIngestErrorCleanup();
 
         // Initialize per-TF status dictionary. 'pending' = local pre-Kafka
@@ -1146,7 +1227,7 @@ export default function DatasetPage() {
         // 'running' once the scheduler dispatches the job (see job-sync
         // useEffect). Existing coverage data is intentionally preserved.
         const initialStatuses: Record<string, TfStatus> = {};
-        for (const tf of tfs) initialStatuses[tf] = 'pending';
+        for (const target of targets) initialStatuses[target.scopeKey] = 'pending';
         setAllIngestStatuses(initialStatuses);
         setAllIngestMeta({});
         setAllIngestJobIds({});
@@ -1157,7 +1238,8 @@ export default function DatasetPage() {
         const endMs   = new Date(dateTo + 'T23:59:59').getTime();
         const newJobIds: Record<string, string> = {};
 
-        for (const tf of tfs) {
+        for (const target of targets) {
+          const scopeLabel = `${target.symbol} ${target.timeframe}`;
           try {
             // 5s is plenty: the data-service replies synchronously after a
             // single INSERT. A longer wait would only mask backend bugs.
@@ -1171,8 +1253,8 @@ export default function DatasetPage() {
               Topics.CMD_DATA_DATASET_JOBS_START,
               {
                 type: 'ingest',
-                params: { symbol, timeframe: tf, start_ms: startMs, end_ms: endMs, exchange },
-                target_symbol: symbol, target_timeframe: tf,
+                params: { symbol: target.symbol, timeframe: target.timeframe, start_ms: startMs, end_ms: endMs, exchange },
+                target_symbol: target.symbol, target_timeframe: target.timeframe,
                 target_exchange: exchange,
                 target_start_ms: startMs, target_end_ms: endMs,
                 created_by: 'admin_ui',
@@ -1185,33 +1267,33 @@ export default function DatasetPage() {
             // actually started.
             if (res.error || !res.job_id) {
               const msg = res.error ?? 'no job_id in reply';
-              setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
-              setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now(), error: msg } }));
-              scheduleAllIngestErrorCleanup(tf);
-              addDownloadErrorHistory(tf, msg, Date.now() - t0);
-              toast(`${tf}: не удалось запустить job — ${msg}`, 'info');
+              setAllIngestStatuses(prev => ({ ...(prev ?? {}), [target.scopeKey]: 'error' }));
+              setAllIngestMeta(prev => ({ ...prev, [target.scopeKey]: { startedAt: Date.now(), error: msg } }));
+              scheduleAllIngestErrorCleanup(target.scopeKey);
+              addDownloadErrorHistory(target.scopeKey, msg, Date.now() - t0);
+              toast(`${scopeLabel}: не удалось запустить job — ${msg}`, 'info');
               continue;
             }
-            newJobIds[tf] = res.job_id;
+            newJobIds[target.scopeKey] = res.job_id;
             // Honest status: queued, NOT running. The scheduler hasn't
             // necessarily picked the job up yet; the UI flips to
             // 'running' only when the first progress event arrives.
-            clearAllIngestErrorCleanup(tf);
-            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'queued' }));
-            setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now() } }));
+            clearAllIngestErrorCleanup(target.scopeKey);
+            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [target.scopeKey]: 'queued' }));
+            setAllIngestMeta(prev => ({ ...prev, [target.scopeKey]: { startedAt: Date.now() } }));
             seedQueuedJob({
               jobId: res.job_id,
               type: 'ingest',
-              target_table: makeTableName(symbol, tf, exchange),
+              target_table: makeTableName(target.symbol, target.timeframe, exchange),
             });
-            if (res.deduped) toast(`${tf}: уже загружается (job deduped)`, 'info');
+            if (res.deduped) toast(`${scopeLabel}: уже загружается (job deduped)`, 'info');
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [tf]: 'error' }));
-            setAllIngestMeta(prev => ({ ...prev, [tf]: { startedAt: Date.now(), error: msg } }));
-            scheduleAllIngestErrorCleanup(tf);
-            addDownloadErrorHistory(tf, msg, Date.now() - t0);
-            toast(`${tf}: не удалось запустить job — ${msg}`, 'info');
+            setAllIngestStatuses(prev => ({ ...(prev ?? {}), [target.scopeKey]: 'error' }));
+            setAllIngestMeta(prev => ({ ...prev, [target.scopeKey]: { startedAt: Date.now(), error: msg } }));
+            scheduleAllIngestErrorCleanup(target.scopeKey);
+            addDownloadErrorHistory(target.scopeKey, msg, Date.now() - t0);
+            toast(`${scopeLabel}: не удалось запустить job — ${msg}`, 'info');
           }
         }
 
@@ -1220,7 +1302,7 @@ export default function DatasetPage() {
         keepIngestBusy = Object.keys(newJobIds).length > 0;
         addEntry({
           action: 'Download',
-          params: { symbol, timeframe: 'ALL', exchange, dateFrom, dateTo },
+          params: { symbol, timeframe, exchange, dateFrom, dateTo },
           result: `Started ${Object.keys(newJobIds).length} ingest jobs`,
           durationMs: Date.now() - t0,
         });
@@ -1288,6 +1370,10 @@ export default function DatasetPage() {
   };
 
   const handleDeleteRows = async () => {
+    if (symbol === 'ALL') {
+      toast('Для Symbol=ALL доступен только Ingest. Очистка требует конкретный датасет.', 'info');
+      return;
+    }
     if (operationLockRef.current) return;
     operationLockRef.current = true;
     if (timeframe === 'ALL') {
@@ -1356,6 +1442,10 @@ export default function DatasetPage() {
   };
 
   const handleExportCsv = async () => {
+    if (symbol === 'ALL') {
+      toast('Для Symbol=ALL export не поддерживается. Выберите конкретный датасет.', 'info');
+      return;
+    }
     if (operationLockRef.current) return;
     operationLockRef.current = true;
     if (!dateFrom || !dateTo) {
@@ -1552,6 +1642,10 @@ export default function DatasetPage() {
   };
 
   const handleRepairDataset = async () => {
+    if (symbol === 'ALL') {
+      toast('Для Symbol=ALL доступен только Ingest. Выберите конкретный датасет для проверки целостности.', 'info');
+      return;
+    }
     if (loadingQuality || loadingRepair) return;
     setQualityReport(null);
     setAllQualityResults(null);
@@ -1742,14 +1836,14 @@ export default function DatasetPage() {
                 <label className="text-xs text-muted-foreground">Symbol</label>
                 <Select value={symbol} onValueChange={setSymbol}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>{SYMBOLS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                  <SelectContent>{SYMBOLS_ALL.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div className="flex flex-col gap-1.5">
                 <label className="text-xs text-muted-foreground">Timeframe</label>
                 <Select value={timeframe} onValueChange={setTimeframe}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>{TIMEFRAMES_ALL.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+                  <SelectContent>{(symbol === 'ALL' ? ['ALL'] : TIMEFRAMES_ALL).map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div className="flex flex-col gap-1.5">
@@ -1762,7 +1856,7 @@ export default function DatasetPage() {
               </div>
             </div>
             <div className="flex flex-col gap-2">
-              <Button onClick={handleCheckCoverage} disabled={isBusy} variant="outline" className="w-full gap-2">
+              <Button onClick={handleCheckCoverage} disabled={isBusy || isAllSymbolsMode} variant="outline" className="w-full gap-2">
                 {loadingCov ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                 Check Coverage
               </Button>
@@ -1786,23 +1880,28 @@ export default function DatasetPage() {
                 {loadingList ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
                 List Tables
               </Button>
-              <Button onClick={handleExportCsv} disabled={isBusy} variant="outline" className="w-full gap-2">
+              <Button onClick={handleExportCsv} disabled={isBusy || isAllSymbolsMode} variant="outline" className="w-full gap-2">
                 {loadingExport
                   ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Подготовка данных...</>
                   : <><Download className="w-3.5 h-3.5" /> Export CSV</>}
               </Button>
-              <Button onClick={handleRepairDataset} disabled={isBusy || loadingQuality || loadingRepair || fixAllRunning} variant="outline" className="w-full gap-2">
+              <Button onClick={handleRepairDataset} disabled={isBusy || isAllSymbolsMode || loadingQuality || loadingRepair || fixAllRunning} variant="outline" className="w-full gap-2">
                 {loadingQuality
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <ShieldCheck className="w-3.5 h-3.5" />}
                 Проверить целостность
               </Button>
-              <Button onClick={handleDeleteRows} disabled={isBusy} variant="destructive" className="w-full gap-2">
+              <Button onClick={handleDeleteRows} disabled={isBusy || isAllSymbolsMode} variant="destructive" className="w-full gap-2">
                 {loadingDelete ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                 Очистить таблицу
               </Button>
+              {isAllSymbolsMode && (
+                <p className="text-[11px] text-muted-foreground">
+                  Режим <span className="font-mono">ALL</span> запускает ingest по всем датасетам выбранной биржи и фиксирует timeframe в <span className="font-mono">ALL</span>. Coverage, export, repair и delete доступны только для конкретного symbol.
+                </p>
+              )}
             </div>
-            {timeframe === 'ALL' && allIngestStatuses !== null && (
+            {isMultiIngestMode && allIngestStatuses !== null && (
               <AllIngestProgress
                 statuses={allIngestStatuses}
                 meta={allIngestMeta}
@@ -1906,7 +2005,11 @@ export default function DatasetPage() {
         </Card>
 
         {/* Right — coverage result */}
-        {timeframe === 'ALL' && allCoverages !== null ? (
+        {isAllSymbolsMode ? (
+          <div className="hidden lg:flex items-center justify-center rounded-lg border border-dashed border-border h-44 px-4 text-center text-sm text-muted-foreground">
+            Coverage для Symbol=ALL не считается как одна таблица. Используйте Ingest для постановки всех датасетов в очередь или выберите конкретный symbol для проверки покрытия.
+          </div>
+        ) : timeframe === 'ALL' && allCoverages !== null ? (
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-semibold">Coverage: {symbol} — all timeframes</CardTitle>
