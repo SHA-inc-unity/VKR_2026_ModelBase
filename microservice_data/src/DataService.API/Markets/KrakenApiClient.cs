@@ -12,19 +12,22 @@ public sealed class KrakenApiClient : IMarketDataClient
     private const string BaseUrl = "https://api.kraken.com";
     public const string ExchangeName = "kraken";
     public const int MaxBaseCandles = 720;
-        private const int MaxKlinePageCandles = 120;
+    private const int MaxKlinePageCandles = 120;
+    private const int MaxParallelPageFetches = 2;
     private static readonly TimeSpan RequestDeadline = TimeSpan.FromSeconds(30);
-    private const int MaxRequestAttempts = 2;
+    private const int MaxRequestAttempts = 4;
 
     private readonly HttpClient _http;
     private readonly ILogger<KrakenApiClient> _log;
+    private readonly KrakenRateLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, string> _pairCache = new(StringComparer.OrdinalIgnoreCase);
 
     public string Exchange => ExchangeName;
 
-    public KrakenApiClient(HttpClient http, ILogger<KrakenApiClient> log)
+    public KrakenApiClient(HttpClient http, KrakenRateLimiter rateLimiter, ILogger<KrakenApiClient> log)
     {
         _http = http;
+        _rateLimiter = rateLimiter;
         _log = log;
     }
 
@@ -88,7 +91,8 @@ public sealed class KrakenApiClient : IMarketDataClient
 
         var totalPages = windows.Count;
         var completedPages = 0;
-        var degree = maxParallel > 0 ? maxParallel : DatasetConstants.MaxParallelApiWorkers;
+        var requestedDegree = maxParallel > 0 ? maxParallel : DatasetConstants.MaxParallelApiWorkers;
+        var degree = Math.Min(requestedDegree, MaxParallelPageFetches);
         using var gate = new SemaphoreSlim(degree, degree);
         var tasks = windows.Select(async w =>
         {
@@ -236,6 +240,7 @@ public sealed class KrakenApiClient : IMarketDataClient
             requestCts.CancelAfter(RequestDeadline);
             try
             {
+                using var rateLease = await _rateLimiter.AcquireAsync(ct);
                 using var request = new HttpRequestMessage(HttpMethod.Get, url)
                 {
                     Version = HttpVersion.Version11,
@@ -249,9 +254,14 @@ public sealed class KrakenApiClient : IMarketDataClient
                 if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
                 {
                     last = BuildHttpException(url, response.StatusCode, body);
+                    var delay = GetHttpRetryDelay(response, attempt);
+                    if ((int)response.StatusCode == 429)
+                    {
+                        _rateLimiter.Penalize(delay);
+                    }
                     response.Dispose();
                     response = null;
-                    await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt) + Random.Shared.NextDouble()), ct);
+                    await Task.Delay(delay, ct);
                     continue;
                 }
 
@@ -260,7 +270,19 @@ public sealed class KrakenApiClient : IMarketDataClient
 
                 var doc = JsonDocument.Parse(body);
                 if (TryExtractKrakenErrors(doc.RootElement, out var errors))
+                {
+                    if (TryGetKrakenRetryDelay(errors, attempt, out var delay))
+                    {
+                        last = new InvalidOperationException($"Kraken API error for {url}: {errors}");
+                        _rateLimiter.Penalize(delay);
+                        doc.Dispose();
+                        await Task.Delay(delay, ct);
+                        continue;
+                    }
+
+                    doc.Dispose();
                     throw new InvalidOperationException($"Kraken API error for {url}: {errors}");
+                }
 
                 return doc;
             }
@@ -286,6 +308,54 @@ public sealed class KrakenApiClient : IMarketDataClient
         }
 
         throw new HttpRequestException($"GET {url} failed after {MaxRequestAttempts} attempts", last);
+    }
+
+    private static TimeSpan GetHttpRetryDelay(HttpResponseMessage response, int attempt)
+    {
+        if (response.Headers.RetryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
+        {
+            return delta;
+        }
+
+        return TimeSpan.FromSeconds(Math.Min(12, Math.Pow(2, attempt + 1)) + Random.Shared.NextDouble());
+    }
+
+    private static bool TryGetKrakenRetryDelay(string errors, int attempt, out TimeSpan delay)
+    {
+        delay = TimeSpan.Zero;
+        if (string.IsNullOrWhiteSpace(errors)) return false;
+
+        if (TryParseThrottleUntil(errors, out var untilUtc))
+        {
+            delay = untilUtc - DateTimeOffset.UtcNow;
+            if (delay < TimeSpan.FromSeconds(1)) delay = TimeSpan.FromSeconds(1);
+            return true;
+        }
+
+        if (errors.Contains("Too many requests", StringComparison.OrdinalIgnoreCase)
+            || errors.Contains("Rate limit exceeded", StringComparison.OrdinalIgnoreCase)
+            || errors.Contains("Throttled", StringComparison.OrdinalIgnoreCase))
+        {
+            delay = TimeSpan.FromSeconds(Math.Min(20, 3 * (attempt + 1)) + Random.Shared.NextDouble());
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseThrottleUntil(string errors, out DateTimeOffset untilUtc)
+    {
+        untilUtc = default;
+        const string marker = "Throttled:";
+        var index = errors.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (index < 0) return false;
+
+        var suffix = errors[(index + marker.Length)..].Trim();
+        var digits = new string(suffix.TakeWhile(char.IsDigit).ToArray());
+        if (!long.TryParse(digits, out var unixSeconds)) return false;
+
+        untilUtc = DateTimeOffset.FromUnixTimeSeconds(unixSeconds).AddSeconds(1);
+        return true;
     }
 
     private static bool IsTransient(Exception ex) => ex switch

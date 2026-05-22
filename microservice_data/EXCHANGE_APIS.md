@@ -44,6 +44,7 @@
 - Допустимые интервалы OHLC: `1, 5, 15, 30, 60, 240, 1440, 10080, 21600` минут.
 - AssetPairs endpoint поддерживает query parameter `pair`, поэтому для одного символа нельзя тащить весь каталог. Для ModelLine правильный путь: узкий lookup по одному candidate за раз (`BTCUSDT`, затем `BTC/USDT`, затем `XBTUSDT`, ...), потому что Kraken может вернуть `EQuery:Unknown asset pair`, если смешать валидные и невалидные candidates в одном запросе.
 - Публичный REST имеет общий call counter. При перегрузе возможны ошибки `EAPI:Rate limit exceeded` и `EService: Throttled: <timestamp>`.
+- На практике public OHLC path для ModelLine также возвращал `EGeneral:Too many requests`, если несколько Kraken ingest jobs одновременно запускали paged window-fetch без локального throttling.
 
 ### Что можно
 
@@ -64,6 +65,7 @@
 - Requested window сначала клипуется к reachable lookback.
 - Если окно полностью вне reachable history, ingest завершается как no-op, а не как runtime failure.
 - Pair resolution идёт через filtered `AssetPairs?pair=...` candidate-by-candidate, чтобы не зависать на гигантском каталоге и не ловить mixed-candidate `EQuery:Unknown asset pair`.
+- Scheduler может держать до 4 Kraken ingest jobs одновременно, но сам HTTP client теперь сериализует/разрежает реальные REST calls process-local limiter-ом и ретраит Kraken throttle-ответы вместо мгновенного job failure.
 
 ## Bybit
 

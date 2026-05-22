@@ -54,7 +54,7 @@ Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handl
 
 - `bybit` — full perpetual pipeline: klines + funding + open interest.
 - `binance` — full USDT-margined futures pipeline: klines + funding + open interest.
-- `kraken` — OHLC-only pipeline via public spot OHLC; funding/open-interest stay empty, and the upstream Kraken API exposes only the most recent 720 base candles. The ingest handler clamps each Kraken request to the overlap with that reachable lookback; if the requested window is completely outside it, the job finishes as a no-op instead of poisoning the queue with repeated failures. Kraken HTTP calls use a shorter `30 s` per-call deadline with `2` attempts, and symbol resolution now uses narrow `GET /0/public/AssetPairs?pair=...` lookups one candidate at a time instead of fetching the whole pair catalog.
+- `kraken` — OHLC-only pipeline via public spot OHLC; funding/open-interest stay empty, and the upstream Kraken API exposes only the most recent 720 base candles. The ingest handler clamps each Kraken request to the overlap with that reachable lookback; if the requested window is completely outside it, the job finishes as a no-op instead of poisoning the queue with repeated failures. Kraken HTTP calls use a shorter `30 s` per-call deadline, retry Kraken-side throttle errors (`EGeneral:Too many requests`, `EAPI:Rate limit exceeded`, `EService: Throttled`) and now go through a process-local limiter inside the client, so four Kraken jobs may coexist in the scheduler without all four spamming public REST in parallel. Symbol resolution uses narrow `GET /0/public/AssetPairs?pair=...` lookups one candidate at a time instead of fetching the whole pair catalog.
 
 The handler:
 

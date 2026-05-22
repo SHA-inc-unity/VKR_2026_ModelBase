@@ -82,6 +82,7 @@ try
 
     // BybitApiClient via typed HttpClient
     builder.Services.AddSingleton<BybitRateLimiter>();
+    builder.Services.AddSingleton<KrakenRateLimiter>();
     builder.Services.AddHttpClient<BybitApiClient>(client =>
     {
         client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
