@@ -49,6 +49,10 @@ namespace GatewayService.API.Controllers;
 ///   POST /api/admin/dataset/jobs/cancel           → cmd.data.dataset.jobs.cancel
 ///   POST /api/admin/dataset/jobs/get              → cmd.data.dataset.jobs.get
 ///   POST /api/admin/dataset/jobs/list             → cmd.data.dataset.jobs.list
+///   POST /api/admin/market-watcher/status         → cmd.data.market_watcher.status
+///   POST /api/admin/market-watcher/set-enabled    → cmd.data.market_watcher.set_enabled
+///   POST /api/admin/market-watcher/rows           → cmd.data.market_watcher.rows
+///   POST /api/admin/market-watcher/logs           → cmd.data.market_watcher.logs
 ///   POST /api/admin/dataset/db-ping               → cmd.data.db.ping
 ///   POST /api/admin/analytic/dataset/load         → cmd.analitic.dataset.load
 ///   POST /api/admin/analytic/dataset/unload       → cmd.analitic.dataset.unload
@@ -281,6 +285,24 @@ public sealed class AdminController : ControllerBase
     [HttpPost("dataset/jobs/list")]
     public Task<IActionResult> JobsList([FromBody] JsonElement? body, CancellationToken ct)
         => Forward(AdminTopics.JobsList, body, ct);
+
+    // ── Dedicated market watcher ─────────────────────────────────────────────
+
+    [HttpPost("market-watcher/status")]
+    public Task<IActionResult> MarketWatcherStatus([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.MarketWatcherStatus, body, ct);
+
+    [HttpPost("market-watcher/set-enabled")]
+    public Task<IActionResult> MarketWatcherSetEnabled([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.MarketWatcherSetEnabled, body, ct);
+
+    [HttpPost("market-watcher/rows")]
+    public Task<IActionResult> MarketWatcherRows([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.MarketWatcherRows, body, ct);
+
+    [HttpPost("market-watcher/logs")]
+    public Task<IActionResult> MarketWatcherLogs([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.MarketWatcherLogs, body, ct);
 
     // ── DB ────────────────────────────────────────────────────────────────────
 

@@ -43,6 +43,12 @@ public static class AdminTopics
     public const string JobsGet    = "cmd.data.dataset.jobs.get";
     public const string JobsList   = "cmd.data.dataset.jobs.list";
 
+    // ── Dedicated market watcher ─────────────────────────────────────────────
+    public const string MarketWatcherStatus      = "cmd.data.market_watcher.status";
+    public const string MarketWatcherSetEnabled  = "cmd.data.market_watcher.set_enabled";
+    public const string MarketWatcherRows        = "cmd.data.market_watcher.rows";
+    public const string MarketWatcherLogs        = "cmd.data.market_watcher.logs";
+
     // ── DB ────────────────────────────────────────────────────────────────────
     public const string DbPing = "cmd.data.db.ping";
 

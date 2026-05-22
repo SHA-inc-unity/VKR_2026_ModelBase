@@ -229,6 +229,7 @@ UID в теле запроса не используется как источн
 | GET | `/api/notifications` | Required | уведомления пользователя |
 | POST | `/api/admin/health/*` | Admin JWT | backend facade для health-check команд admin |
 | POST | `/api/admin/dataset/*` | Admin JWT | backend facade для dataset/data-service команд |
+| POST | `/api/admin/market-watcher/*` | Admin JWT | backend facade для dedicated market watcher control-plane |
 | POST | `/api/admin/analytic/*` | Admin JWT | backend facade для analytic dataset/anomaly команд |
 | POST | `/api/admin/analytics/*` | Admin JWT | backend facade для ML train/model/predict команд |
 
@@ -416,6 +417,15 @@ Authorization должен содержать admin JWT, полученный ч
 | POST | `/api/admin/dataset/jobs/get` | получить один dataset job |
 | POST | `/api/admin/dataset/jobs/list` | список dataset jobs |
 | POST | `/api/admin/dataset/db-ping` | DB connectivity ping |
+
+#### Dedicated market watcher
+
+| Method | Route | Downstream intent |
+| ------ | ----- | ----------------- |
+| POST | `/api/admin/market-watcher/status` | runtime snapshot dedicated watcher-а |
+| POST | `/api/admin/market-watcher/set-enabled` | включить/выключить watcher без рестарта |
+| POST | `/api/admin/market-watcher/rows` | paged realtime rows из `market_watch_live` |
+| POST | `/api/admin/market-watcher/logs` | watcher-only runtime log stream |
 
 #### Analitic / dataset session / anomaly
 

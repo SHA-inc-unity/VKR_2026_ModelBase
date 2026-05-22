@@ -79,6 +79,12 @@ const TOPIC_PATH: Readonly<Record<string, string>> = {
   [Topics.CMD_DATA_DATASET_JOBS_GET]:     'dataset/jobs/get',
   [Topics.CMD_DATA_DATASET_JOBS_LIST]:    'dataset/jobs/list',
 
+  // Dedicated market watcher
+  [Topics.CMD_DATA_MARKET_WATCHER_STATUS]:       'market-watcher/status',
+  [Topics.CMD_DATA_MARKET_WATCHER_SET_ENABLED]:  'market-watcher/set-enabled',
+  [Topics.CMD_DATA_MARKET_WATCHER_ROWS]:         'market-watcher/rows',
+  [Topics.CMD_DATA_MARKET_WATCHER_LOGS]:         'market-watcher/logs',
+
   // DB
   [Topics.CMD_DATA_DB_PING]:  'dataset/db-ping',
 

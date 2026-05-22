@@ -5,6 +5,7 @@
 Mobile BFF gateway для внешних HTTP-запросов.
 
 `/api/admin/*` — server-to-server admin facade, защищённый Account Service JWT с ролью `admin`; legacy static-key auth не используется.
+Фасад теперь включает и dedicated `market-watcher/*` routes для split-mode страницы `microservice_admin` `/market-watcher`.
 
 ## Что читать перед кодом
 
