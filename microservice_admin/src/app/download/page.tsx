@@ -185,11 +185,31 @@ function parseTableName(table: string): { exchange: DatasetExchange; symbol: str
   };
 }
 
+function normalizeIngestJobStage(stage?: string | null): 'prepare' | 'fetch' | 'upsert' | 'compute_features' | null {
+  switch (stage) {
+    case 'prepare':
+      return 'prepare';
+    case 'fetch':
+    case 'fetch_klines':
+    case 'fetch_funding':
+    case 'fetch_oi':
+    case 'compute_rsi':
+      return 'fetch';
+    case 'upsert':
+      return 'upsert';
+    case 'compute_features':
+      return 'compute_features';
+    default:
+      return null;
+  }
+}
+
 /** Map a running/finished job's state onto INITIAL_STAGES so IngestProgress
  * shows correct live stage status for job-based ingest. */
 function mapJobToStages(prev: IngestStage[], job: DatasetJobView): IngestStage[] {
   const stageOrder = ['prepare', 'fetch', 'upsert', 'compute_features'];
-  const curIdx = stageOrder.indexOf(job.stage ?? '');
+  const normalizedJobStage = normalizeIngestJobStage(job.stage);
+  const curIdx = stageOrder.indexOf(normalizedJobStage ?? '');
   return prev.map(s => {
     const jobStageName =
       s.id === 'fetch_klines' || s.id === 'fetch_funding' ||
@@ -198,9 +218,9 @@ function mapJobToStages(prev: IngestStage[], job: DatasetJobView): IngestStage[]
     const sIdx = stageOrder.indexOf(jobStageName);
     if (sIdx < 0)                return { ...s, status: 'pending' as const };
     if (job.status === 'succeeded') return { ...s, status: 'done'  as const, progress: 100 };
-    if (job.status === 'failed') return { ...s, status: sIdx <= curIdx ? 'error' as const : 'pending' as const };
+    if (job.status === 'failed') return { ...s, status: sIdx <= curIdx && curIdx >= 0 ? 'error' as const : 'pending' as const };
     if (sIdx < curIdx)           return { ...s, status: 'done'  as const, progress: 100 };
-    if (jobStageName === job.stage) return { ...s, status: 'running' as const, progress: job.progress };
+    if (jobStageName === normalizedJobStage) return { ...s, status: 'running' as const, progress: job.progress };
     return { ...s, status: 'pending' as const };
   });
 }

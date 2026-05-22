@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { appendQueueHistory, clearQueueHistory, readQueueHistory } from '@/lib/queueHistoryStore';
+import { appendQueueHistory, clearQueueHistory, readQueueHistoryPaged } from '@/lib/queueHistoryStore';
 import { requireAdminSession } from '@/lib/adminSession';
 
 export const dynamic = 'force-dynamic';
@@ -9,8 +9,10 @@ export async function GET(req: NextRequest) {
   if (!session.ok) return session.response;
 
   const limitParam = req.nextUrl.searchParams.get('limit');
-  const limit = Math.min(Math.max(Number(limitParam) || 200, 1), 400);
-  return NextResponse.json({ items: await readQueueHistory(limit) });
+  const offsetParam = req.nextUrl.searchParams.get('offset');
+  const limit = Math.min(Math.max(Number(limitParam) || 30, 1), 5000);
+  const offset = Math.max(Number(offsetParam) || 0, 0);
+  return NextResponse.json(await readQueueHistoryPaged(limit, offset));
 }
 
 export async function DELETE(req: NextRequest) {

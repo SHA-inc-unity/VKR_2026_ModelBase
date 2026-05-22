@@ -159,7 +159,24 @@ public sealed class IngestJobHandler : IDatasetJobHandler
             symbol.ToUpperInvariant(), oiLabel, missing[0] - oiIntervalMs, missing[^1], oiIntervalMs, ctx.CancellationToken);
 
         var klines  = await klineT;
+        if (!fundingT.IsCompleted)
+        {
+            await ctx.ReportAsync(
+                "fetch_funding",
+                42,
+                $"klines={klines.Count}, waiting for funding history",
+                total: missing.Count);
+        }
         var funding = await fundingT;
+
+        if (!oiT.IsCompleted)
+        {
+            await ctx.ReportAsync(
+                "fetch_oi",
+                47,
+                $"klines={klines.Count}, funding={funding.Count}, waiting for open interest",
+                total: missing.Count);
+        }
         var oi      = await oiT;
         await ctx.EndStageAsync(stageFetch, klines.Count);
 

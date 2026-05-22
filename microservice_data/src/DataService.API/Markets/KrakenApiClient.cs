@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Net;
+using System.Net.Http;
 using System.Text.Json;
 using DataService.API.Dataset;
 
@@ -10,6 +12,7 @@ public sealed class KrakenApiClient : IMarketDataClient
     private const string BaseUrl = "https://api.kraken.com";
     public const string ExchangeName = "kraken";
     public const int MaxBaseCandles = 720;
+        private const int MaxKlinePageCandles = 120;
     private static readonly TimeSpan RequestDeadline = TimeSpan.FromSeconds(30);
     private const int MaxRequestAttempts = 2;
 
@@ -71,51 +74,97 @@ public sealed class KrakenApiClient : IMarketDataClient
 
         var pair = await ResolvePairAsync(symbol, ct);
         var (baseIntervalMinutes, aggregateFactor) = ResolveOhlcStrategy(stepMs);
-        var sinceSeconds = Math.Max(0L, startMs / 1000L);
-        var url = $"{BaseUrl}/0/public/OHLC?pair={Uri.EscapeDataString(pair)}&interval={baseIntervalMinutes}&since={sinceSeconds}";
-
-        using var doc = await GetJsonAsync(url, ct);
-        var root = doc.RootElement;
-        var candles = new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>();
-        if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
-            return candles;
-
-        JsonElement? data = null;
-        foreach (var prop in result.EnumerateObject())
+        var baseStepMs = baseIntervalMinutes * 60_000L;
+        var pageSpanMs = MaxKlinePageCandles * baseStepMs;
+        var windows = new List<(long Start, long End)>();
+        for (var windowEnd = endMs; windowEnd >= startMs;)
         {
-            if (string.Equals(prop.Name, "last", StringComparison.OrdinalIgnoreCase)) continue;
-            data = prop.Value;
-            break;
+            var windowStart = Math.Max(startMs, windowEnd - pageSpanMs + baseStepMs);
+            windows.Add((windowStart, windowEnd));
+            if (windowStart == startMs) break;
+            windowEnd = windowStart - baseStepMs;
         }
-        if (data is null || data.Value.ValueKind != JsonValueKind.Array) return candles;
+        windows.Reverse();
 
-        var baseRows = new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>(data.Value.GetArrayLength());
-        foreach (var item in data.Value.EnumerateArray())
+        var totalPages = windows.Count;
+        var completedPages = 0;
+        var degree = maxParallel > 0 ? maxParallel : DatasetConstants.MaxParallelApiWorkers;
+        using var gate = new SemaphoreSlim(degree, degree);
+        var tasks = windows.Select(async w =>
         {
-            if (item.ValueKind != JsonValueKind.Array || item.GetArrayLength() < 8) continue;
-            var tsSec = TryLong(item[0]);
-            var open = TryDec(item[1]);
-            var high = TryDec(item[2]);
-            var low = TryDec(item[3]);
-            var close = TryDec(item[4]);
-            var vwap = TryDec(item[5]);
-            var volume = TryDec(item[6]);
-            if (tsSec is null || open is null || high is null || low is null || close is null || volume is null) continue;
-            var tsMs = tsSec.Value * 1000L;
-            if (tsMs < startMs || tsMs > endMs) continue;
-            var turnover = (vwap ?? close.Value) * volume.Value;
-            baseRows.Add((tsMs, open.Value, high.Value, low.Value, close.Value, volume.Value, turnover));
+            await gate.WaitAsync(ct);
+            try
+            {
+                var sinceSeconds = Math.Max(0L, w.Start / 1000L);
+                var url = $"{BaseUrl}/0/public/OHLC?pair={Uri.EscapeDataString(pair)}&interval={baseIntervalMinutes}&since={sinceSeconds}";
+
+                using var doc = await GetJsonAsync(url, ct);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
+                    return new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>();
+
+                JsonElement? data = null;
+                foreach (var prop in result.EnumerateObject())
+                {
+                    if (string.Equals(prop.Name, "last", StringComparison.OrdinalIgnoreCase)) continue;
+                    data = prop.Value;
+                    break;
+                }
+                if (data is null || data.Value.ValueKind != JsonValueKind.Array)
+                    return new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>();
+
+                var page = new List<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>(data.Value.GetArrayLength());
+                foreach (var item in data.Value.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Array || item.GetArrayLength() < 8) continue;
+                    var tsSec = TryLong(item[0]);
+                    var open = TryDec(item[1]);
+                    var high = TryDec(item[2]);
+                    var low = TryDec(item[3]);
+                    var close = TryDec(item[4]);
+                    var vwap = TryDec(item[5]);
+                    var volume = TryDec(item[6]);
+                    if (tsSec is null || open is null || high is null || low is null || close is null || volume is null) continue;
+                    var tsMs = tsSec.Value * 1000L;
+                    if (tsMs < w.Start || tsMs > w.End) continue;
+                    var turnover = (vwap ?? close.Value) * volume.Value;
+                    page.Add((tsMs, open.Value, high.Value, low.Value, close.Value, volume.Value, turnover));
+                }
+
+                return page;
+            }
+            finally
+            {
+                gate.Release();
+                if (onPageDone is not null)
+                {
+                    var done = Interlocked.Increment(ref completedPages);
+                    try { onPageDone(done, totalPages); } catch { }
+                }
+            }
+        });
+
+        var pages = await Task.WhenAll(tasks);
+        var merged = new Dictionary<long, (decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)>(pages.Sum(p => p.Count));
+        foreach (var page in pages)
+        {
+            foreach (var (timestampMs, open, high, low, close, volume, turnover) in page)
+            {
+                merged[timestampMs] = (open, high, low, close, volume, turnover);
+            }
         }
+
+        var baseRows = merged
+            .OrderBy(kv => kv.Key)
+            .Select(kv => (kv.Key, kv.Value.Open, kv.Value.High, kv.Value.Low, kv.Value.Close, kv.Value.Volume, kv.Value.Turnover))
+            .ToList();
 
         IReadOnlyList<(long TimestampMs, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume, decimal Turnover)> rows =
-            aggregateFactor == 1 ? baseRows.OrderBy(x => x.TimestampMs).ToList() : AggregateRows(baseRows, stepMs, aggregateFactor);
+            aggregateFactor == 1 ? baseRows : AggregateRows(baseRows, stepMs, aggregateFactor);
 
-        if (onPageDone is not null)
-        {
-            try { onPageDone(1, 1); } catch { }
-        }
-
-        return rows;
+        return rows
+            .Where(row => row.TimestampMs >= startMs && row.TimestampMs <= endMs)
+            .ToList();
     }
 
     public Task<IReadOnlyList<(long TimestampMs, decimal Rate)>> FetchFundingRatesAsync(
@@ -186,18 +235,33 @@ public sealed class KrakenApiClient : IMarketDataClient
             requestCts.CancelAfter(RequestDeadline);
             try
             {
-                response = await _http.GetAsync(url, HttpCompletionOption.ResponseContentRead, requestCts.Token);
+                using var request = new HttpRequestMessage(HttpMethod.Get, url)
+                {
+                    Version = HttpVersion.Version11,
+                    VersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+                };
+                request.Headers.ConnectionClose = true;
+
+                response = await _http.SendAsync(request, HttpCompletionOption.ResponseContentRead, requestCts.Token);
+                var body = await response.Content.ReadAsStringAsync(requestCts.Token);
+
                 if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
                 {
-                    last = new HttpRequestException($"HTTP {(int)response.StatusCode}");
+                    last = BuildHttpException(url, response.StatusCode, body);
                     response.Dispose();
                     response = null;
                     await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt) + Random.Shared.NextDouble()), ct);
                     continue;
                 }
 
-                response.EnsureSuccessStatusCode();
-                return JsonDocument.Parse(await response.Content.ReadAsStringAsync(requestCts.Token));
+                if (!response.IsSuccessStatusCode)
+                    throw BuildHttpException(url, response.StatusCode, body);
+
+                var doc = JsonDocument.Parse(body);
+                if (TryExtractKrakenErrors(doc.RootElement, out var errors))
+                    throw new InvalidOperationException($"Kraken API error for {url}: {errors}");
+
+                return doc;
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
             {
@@ -225,12 +289,43 @@ public sealed class KrakenApiClient : IMarketDataClient
 
     private static bool IsTransient(Exception ex) => ex switch
     {
-        HttpRequestException => true,
+        HttpRequestException httpEx when httpEx.StatusCode is null => true,
+        HttpRequestException httpEx when httpEx.StatusCode == HttpStatusCode.TooManyRequests => true,
+        HttpRequestException httpEx when httpEx.StatusCode is >= HttpStatusCode.InternalServerError => true,
         TaskCanceledException { InnerException: TimeoutException } => true,
         System.Net.Sockets.SocketException => true,
         IOException { InnerException: System.Net.Sockets.SocketException } => true,
         _ => false,
     };
+
+    private static bool TryExtractKrakenErrors(JsonElement root, out string errors)
+    {
+        errors = string.Empty;
+        if (!root.TryGetProperty("error", out var errorNode) || errorNode.ValueKind != JsonValueKind.Array)
+            return false;
+
+        var parts = errorNode
+            .EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString())
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Cast<string>()
+            .ToArray();
+
+        if (parts.Length == 0)
+            return false;
+
+        errors = string.Join(", ", parts);
+        return true;
+    }
+
+    private static HttpRequestException BuildHttpException(string url, HttpStatusCode statusCode, string body)
+    {
+        var snippet = string.IsNullOrWhiteSpace(body)
+            ? string.Empty
+            : $": {body[..Math.Min(body.Length, 240)].Replace('\r', ' ').Replace('\n', ' ')}";
+        return new HttpRequestException($"GET {url} returned {(int)statusCode} ({statusCode}){snippet}", null, statusCode);
+    }
 
     private static string[] BuildPairCandidates(string symbol)
     {

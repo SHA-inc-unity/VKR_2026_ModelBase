@@ -3,8 +3,10 @@ import 'server-only';
 import {
   appendQueueHistoryRow,
   clearQueueHistoryRows,
+  readQueueHistoryPage,
   readQueueHistoryRows,
 } from '@/lib/sqliteStore';
+import type { QueueHistoryPage } from '@/lib/sqliteStore';
 
 export type QueueHistoryLevel = 'success' | 'error';
 
@@ -25,6 +27,10 @@ export interface QueueHistoryEntry {
 
 export async function readQueueHistory(limit = 200): Promise<QueueHistoryEntry[]> {
   return readQueueHistoryRows(limit);
+}
+
+export async function readQueueHistoryPaged(limit = 30, offset = 0): Promise<QueueHistoryPage> {
+  return readQueueHistoryPage(limit, offset);
 }
 
 export async function appendQueueHistory(entry: QueueHistoryEntry): Promise<void> {

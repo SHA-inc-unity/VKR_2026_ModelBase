@@ -109,7 +109,7 @@ function scheduleFinishedJobCleanup(jobId: string, status: DatasetJobStatus): vo
 
 async function recordTerminalJobHistory(job: DatasetJobView): Promise<void> {
   try {
-    await fetch(TERMINAL_HISTORY_ENDPOINT, {
+    const response = await fetch(TERMINAL_HISTORY_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -135,6 +135,9 @@ async function recordTerminalJobHistory(job: DatasetJobView): Promise<void> {
         correlationId: job.job_id,
       }),
     });
+    if (!response.ok) {
+      throw new Error(`queue history write failed: ${response.status}`);
+    }
   } catch {
     // Queue history enrichment is best-effort only.
   }

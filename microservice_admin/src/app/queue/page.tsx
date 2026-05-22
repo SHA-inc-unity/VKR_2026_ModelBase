@@ -33,7 +33,13 @@ interface QueueHistoryEntry {
 
 interface QueueHistoryResponse {
   items: QueueHistoryEntry[];
+  total: number;
+  errorCount: number;
+  limit: number;
+  offset: number;
 }
+
+const HISTORY_PAGE_SIZE = 30;
 
 const QUEUE_HISTORY_TOPICS = new Set<string>([
   Topics.CMD_DATA_DATASET_JOBS_START,
@@ -48,6 +54,7 @@ const QUEUE_HISTORY_TOPICS = new Set<string>([
   Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES,
   Topics.CMD_ANALITIC_ANOMALY_DBSCAN,
   Topics.CMD_ANALYTICS_TRAIN_START,
+  Topics.EVT_DATA_DATASET_JOB_COMPLETED,
 ]);
 
 const LEVEL_BADGE: Record<QueueHistoryLevel, 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'info'> = {
@@ -95,6 +102,7 @@ function humanizeTopic(topic: string): string {
     case Topics.CMD_ANALITIC_DATASET_RECOMPUTE_FEATURES: return 'Recompute features';
     case Topics.CMD_ANALITIC_ANOMALY_DBSCAN: return 'Run DBSCAN';
     case Topics.CMD_ANALYTICS_TRAIN_START: return 'Start training';
+    case Topics.EVT_DATA_DATASET_JOB_COMPLETED: return 'Dataset job completed';
     default: return topic;
   }
 }
@@ -137,6 +145,15 @@ function buildHistorySummary(item: QueueHistoryEntry): { request: string; result
     if (resultParts.length === 0) resultParts.push('Accepted');
   }
 
+  if (topic === Topics.EVT_DATA_DATASET_JOB_COMPLETED) {
+    requestParts.push(String(payloadSummary?.type ?? 'job'));
+    if (targetTable) requestParts.push(String(targetTable));
+    resultParts.length = 0;
+    if (responseSummary?.status) resultParts.push(String(responseSummary.status));
+    if (typeof responseSummary?.completed === 'number') resultParts.push(`${responseSummary.completed} rows`);
+    if (item.message && item.level === 'error') resultParts.push(item.message);
+  }
+
   return {
     request: requestParts.join(' · '),
     result: resultParts.join(' · '),
@@ -150,16 +167,24 @@ export default function QueuePage() {
 
   const [history, setHistory] = useState<QueueHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyErrorCount, setHistoryErrorCount] = useState(0);
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE_SIZE);
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = useCallback(async (offset = historyOffset) => {
     const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-    const res = await fetch(`${base}/api/queue/history?limit=250`, { cache: 'no-store' });
+    const res = await fetch(`${base}/api/queue/history?limit=${HISTORY_PAGE_SIZE}&offset=${offset}`, { cache: 'no-store' });
     const data = await res.json() as QueueHistoryResponse;
     const items = Array.isArray(data.items)
       ? data.items.filter((item) => item?.topic && QUEUE_HISTORY_TOPICS.has(item.topic))
       : [];
     setHistory(items);
-  }, []);
+    setHistoryTotal(typeof data.total === 'number' ? data.total : 0);
+    setHistoryErrorCount(typeof data.errorCount === 'number' ? data.errorCount : 0);
+    setHistoryLimit(typeof data.limit === 'number' ? data.limit : HISTORY_PAGE_SIZE);
+    setHistoryOffset(typeof data.offset === 'number' ? data.offset : offset);
+  }, [historyOffset]);
 
   const refreshQueue = useCallback(async () => {
     setLoading(true);
@@ -174,6 +199,9 @@ export default function QueuePage() {
     const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
     await fetch(`${base}/api/queue/history`, { method: 'DELETE' });
     setHistory([]);
+    setHistoryOffset(0);
+    setHistoryTotal(0);
+    setHistoryErrorCount(0);
   }, []);
 
   useEffect(() => {
@@ -183,7 +211,7 @@ export default function QueuePage() {
   useEffect(() => {
     const refreshNow = () => {
       if (typeof document !== 'undefined' && document.hidden) return;
-      void loadHistory();
+      void loadHistory(historyOffset);
     };
 
     const timer = window.setInterval(() => {
@@ -198,14 +226,18 @@ export default function QueuePage() {
       window.removeEventListener('focus', refreshNow);
       document.removeEventListener('visibilitychange', refreshNow);
     };
-  }, [loadHistory]);
+  }, [historyOffset, loadHistory]);
 
   const activeJobs = useMemo(() => jobs.filter(job => !job.finished).length, [jobs]);
   const runningJobs = useMemo(() => jobs.filter(job => job.status === 'running').length, [jobs]);
   const queuedJobs = useMemo(() => jobs.filter(job => job.status === 'queued').length, [jobs]);
   const finishedJobs = useMemo(() => jobs.filter(job => job.finished).length, [jobs]);
-  const errors = useMemo(() => history.filter(item => item.level === 'error').length, [history]);
+  const errors = historyErrorCount;
   const lastHistoryItem = history[0];
+  const historyStart = historyTotal === 0 ? 0 : historyOffset + 1;
+  const historyEnd = historyTotal === 0 ? 0 : Math.min(historyOffset + history.length, historyTotal);
+  const canPrevHistory = historyOffset > 0;
+  const canNextHistory = historyOffset + historyLimit < historyTotal;
 
   return (
     <div className="space-y-4 lg:space-y-5">
@@ -292,7 +324,32 @@ export default function QueuePage() {
 
       <Card>
         <CardHeader className="px-5 pb-3 pt-5">
-          <CardTitle className="text-base">{t('queue.requests')}</CardTitle>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle className="text-base">{t('queue.requests')}</CardTitle>
+            <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground sm:justify-end">
+              <span>{`${historyStart}–${historyEnd} из ${historyTotal}`}</span>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={!canPrevHistory || loading}
+                  onClick={() => void loadHistory(Math.max(0, historyOffset - historyLimit))}
+                >
+                  Prev
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={!canNextHistory || loading}
+                  onClick={() => void loadHistory(historyOffset + historyLimit)}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          </div>
         </CardHeader>
         <CardContent className="px-5 pb-5">
           <div className="overflow-x-auto rounded-md border border-border">

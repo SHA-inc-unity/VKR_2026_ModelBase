@@ -22,7 +22,7 @@ const DB_PATH = process.env.SQLITE_DB_PATH?.trim().length
   ? process.env.SQLITE_DB_PATH.trim()
   : path.join(process.cwd(), '.runtime-data', 'admin-state.sqlite');
 
-const MAX_QUEUE_HISTORY = 400;
+const MAX_QUEUE_HISTORY = 5000;
 
 let db: SqliteDatabase | null = null;
 
@@ -115,6 +115,14 @@ export interface QueueHistoryRow {
   correlationId: string | null;
 }
 
+export interface QueueHistoryPage {
+  items: QueueHistoryRow[];
+  total: number;
+  errorCount: number;
+  limit: number;
+  offset: number;
+}
+
 function parseRecordJson(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'string' || value.length === 0) return null;
   try {
@@ -125,6 +133,23 @@ function parseRecordJson(value: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function mapQueueHistoryRows(rows: Record<string, unknown>[]): QueueHistoryRow[] {
+  return rows.map((row) => ({
+    id: String(row.id),
+    ts: String(row.ts),
+    topic: String(row.topic),
+    level: row.level === 'error' ? 'error' : 'success',
+    durationMs: typeof row.duration_ms === 'number' ? row.duration_ms : 0,
+    splitMode: row.split_mode === 1,
+    payloadSummary: parseRecordJson(row.payload_summary),
+    responseSummary: parseRecordJson(row.response_summary),
+    message: typeof row.message === 'string' ? row.message : null,
+    code: typeof row.code === 'string' ? row.code : null,
+    detail: typeof row.detail === 'string' ? row.detail : null,
+    correlationId: typeof row.correlation_id === 'string' ? row.correlation_id : null,
+  }));
 }
 
 export function appendQueueHistoryRow(entry: QueueHistoryRow): void {
@@ -194,20 +219,47 @@ export function readQueueHistoryRows(limit = 200): QueueHistoryRow[] {
     `)
     .all(safeLimit);
 
-  return rows.map((row) => ({
-    id: String(row.id),
-    ts: String(row.ts),
-    topic: String(row.topic),
-    level: row.level === 'error' ? 'error' : 'success',
-    durationMs: typeof row.duration_ms === 'number' ? row.duration_ms : 0,
-    splitMode: row.split_mode === 1,
-    payloadSummary: parseRecordJson(row.payload_summary),
-    responseSummary: parseRecordJson(row.response_summary),
-    message: typeof row.message === 'string' ? row.message : null,
-    code: typeof row.code === 'string' ? row.code : null,
-    detail: typeof row.detail === 'string' ? row.detail : null,
-    correlationId: typeof row.correlation_id === 'string' ? row.correlation_id : null,
-  }));
+  return mapQueueHistoryRows(rows);
+}
+
+export function readQueueHistoryPage(limit = 30, offset = 0): QueueHistoryPage {
+  const safeLimit = Math.min(Math.max(limit, 1), MAX_QUEUE_HISTORY);
+  const safeOffset = Math.max(offset, 0);
+  const database = getDb();
+  const totalRow = database
+    .prepare('SELECT COUNT(*) AS total FROM queue_history')
+    .get() as { total?: number } | undefined;
+  const errorRow = database
+    .prepare("SELECT COUNT(*) AS total FROM queue_history WHERE level='error'")
+    .get() as { total?: number } | undefined;
+  const rows = database
+    .prepare(`
+      SELECT
+        id,
+        ts,
+        topic,
+        level,
+        duration_ms,
+        split_mode,
+        payload_summary,
+        response_summary,
+        message,
+        code,
+        detail,
+        correlation_id
+      FROM queue_history
+      ORDER BY ts DESC
+      LIMIT ? OFFSET ?
+    `)
+    .all(safeLimit, safeOffset);
+
+  return {
+    items: mapQueueHistoryRows(rows),
+    total: typeof totalRow?.total === 'number' ? totalRow.total : 0,
+    errorCount: typeof errorRow?.total === 'number' ? errorRow.total : 0,
+    limit: safeLimit,
+    offset: safeOffset,
+  };
 }
 
 export function clearQueueHistoryRows(): void {
