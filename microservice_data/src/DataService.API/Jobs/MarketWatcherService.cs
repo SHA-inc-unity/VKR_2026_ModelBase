@@ -2,11 +2,14 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Binance.Net.Clients;
 using Bybit.Net.Clients;
+using CryptoExchange.Net.Interfaces;
+using CryptoExchange.Net.Objects;
 using DataService.API.Database;
 using DataService.API.Dataset;
 using DataService.API.Markets;
 using DataService.API.Settings;
 using Kraken.Net.Clients;
+using Kraken.Net.SymbolOrderBooks;
 using Microsoft.Extensions.Options;
 
 namespace DataService.API.Jobs;
@@ -15,6 +18,9 @@ public sealed class MarketWatcherService : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan DiscoveryDeadline = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan KrakenDiscoveryDeadline = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan SubscriptionRetryDelay = TimeSpan.FromSeconds(3);
+    private const int SubscriptionStartAttempts = 3;
 
     private readonly MarketWatchRepository _repo;
     private readonly MarketDataClientFactory _marketDataClientFactory;
@@ -261,7 +267,7 @@ public sealed class MarketWatcherService : BackgroundService
             var client = _marketDataClientFactory.GetRequiredClient(exchange);
             try
             {
-                var discoveredSymbols = await FetchMarketWatchSymbolsAsync(client, exchange, ct);
+                var discoveredSymbols = await FetchMarketWatchSymbolsAsync(client, exchange, configuredSymbols, ct);
                 var filteredSymbols = FilterConfiguredSymbols(discoveredSymbols, configuredSymbols);
                 if (filteredSymbols.Count == 0)
                 {
@@ -322,19 +328,28 @@ public sealed class MarketWatcherService : BackgroundService
     private static async Task<IReadOnlyList<MarketWatchSymbol>> FetchMarketWatchSymbolsAsync(
         IMarketDataClient client,
         string exchange,
+        HashSet<string> configuredSymbols,
         CancellationToken ct)
     {
         using var discoveryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        discoveryCts.CancelAfter(DiscoveryDeadline);
+        var deadline = string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
+            ? KrakenDiscoveryDeadline
+            : DiscoveryDeadline;
+        discoveryCts.CancelAfter(deadline);
 
         try
         {
+            if (client is KrakenApiClient krakenClient)
+            {
+                return await krakenClient.FetchMarketWatchSymbolsAsync(configuredSymbols, discoveryCts.Token);
+            }
+
             return await client.FetchMarketWatchSymbolsAsync(discoveryCts.Token);
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && discoveryCts.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"Market watcher discovery for {exchange} exceeded {DiscoveryDeadline.TotalSeconds:0}s",
+                $"Market watcher discovery for {exchange} exceeded {deadline.TotalSeconds:0}s",
                 ex);
         }
     }
@@ -364,21 +379,50 @@ public sealed class MarketWatcherService : BackgroundService
             string exchange,
             Func<Task<IAsyncDisposable>> factory)
         {
-            try
+            Exception? lastError = null;
+            for (var attempt = 1; attempt <= SubscriptionStartAttempts; attempt++)
             {
-                handles.Add(await factory());
-                _state.AppendLog("success", "subscribe.exchange", $"Subscriptions active for {exchange}");
-            }
-            catch (Exception ex)
-            {
-                failures.Add($"{exchange}: {ex.Message}");
-                _state.AppendLog("error", "subscribe.failed", $"Subscription failed for {exchange}", new Dictionary<string, object?>
+                try
                 {
-                    ["exchange"] = exchange,
-                    ["error"] = ex.Message,
-                });
-                _log.LogError(ex, "Market watcher subscription failed for {Exchange}", exchange);
+                    handles.Add(await factory());
+                    _state.AppendLog("success", "subscribe.exchange", $"Subscriptions active for {exchange}", new Dictionary<string, object?>
+                    {
+                        ["exchange"] = exchange,
+                        ["attempt"] = attempt,
+                    });
+                    return;
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    lastError = ex;
+
+                    if (attempt < SubscriptionStartAttempts)
+                    {
+                        _state.AppendLog("warning", "subscribe.retry", $"Retrying subscription for {exchange}", new Dictionary<string, object?>
+                        {
+                            ["exchange"] = exchange,
+                            ["attempt"] = attempt,
+                            ["maxAttempts"] = SubscriptionStartAttempts,
+                            ["error"] = ex.Message,
+                        });
+                        _log.LogWarning(ex,
+                            "Market watcher subscription start failed for {Exchange} on attempt {Attempt}/{MaxAttempts}; retrying",
+                            exchange, attempt, SubscriptionStartAttempts);
+                        await Task.Delay(SubscriptionRetryDelay, ct);
+                        continue;
+                    }
+                }
             }
+
+            var message = lastError?.Message ?? "unknown subscription start failure";
+            failures.Add($"{exchange}: {message}");
+            _state.AppendLog("error", "subscribe.failed", $"Subscription failed for {exchange}", new Dictionary<string, object?>
+            {
+                ["exchange"] = exchange,
+                ["attempts"] = SubscriptionStartAttempts,
+                ["error"] = message,
+            });
+            _log.LogError(lastError, "Market watcher subscription failed for {Exchange} after {Attempts} attempts", exchange, SubscriptionStartAttempts);
         }
 
         if (universe.TryGetValue("binance", out var binanceSymbols) && binanceSymbols.Count > 0)
@@ -403,7 +447,12 @@ public sealed class MarketWatcherService : BackgroundService
 
         if (failures.Count > 0)
         {
-            _state.MarkDegraded($"Some subscriptions failed: {string.Join("; ", failures)}", string.Join("; ", failures));
+            foreach (var handle in handles)
+            {
+                await handle.DisposeAsync();
+            }
+
+            throw new InvalidOperationException($"Some subscriptions failed: {string.Join("; ", failures)}");
         }
 
         return new CompositeAsyncDisposable(handles);
@@ -540,43 +589,118 @@ public sealed class MarketWatcherService : BackgroundService
         Action<string, string, decimal, DateTimeOffset> onPrice,
         CancellationToken ct)
     {
-        var socketClient = new KrakenSocketClient();
-        var disposers = new List<Func<ValueTask>>();
-        var symbolMap = symbols
-            .Where(item => !string.IsNullOrWhiteSpace(item.RealtimeSymbol))
-            .ToDictionary(item => item.RealtimeSymbol!, item => item.Symbol, StringComparer.OrdinalIgnoreCase);
-
-        foreach (var chunk in symbolMap.Keys.Chunk(Math.Max(1, settings.KrakenSymbolsPerSubscription)))
+        void PublishCurrentPrice(KrakenSpotSymbolOrderBook orderBook, string symbol)
         {
-            var subscription = await socketClient.SpotApi.SubscribeToTickerUpdatesAsync(chunk, update =>
+            var price = SelectMidPrice(orderBook.BestBid?.Price, orderBook.BestAsk?.Price);
+            if (!price.HasValue)
             {
-                if (string.IsNullOrWhiteSpace(update.Data.Symbol) || update.Data.LastPrice <= 0)
-                {
-                    return;
-                }
-
-                var normalized = symbolMap.TryGetValue(update.Data.Symbol, out var symbol)
-                    ? symbol
-                    : update.Data.Symbol.Replace("/", string.Empty, StringComparison.Ordinal);
-                onPrice("kraken", normalized, update.Data.LastPrice, DateTimeOffset.UtcNow);
-            }, snapshot: true, ct: ct);
-
-            if (!subscription.Success)
-            {
-                socketClient.Dispose();
-                throw new InvalidOperationException($"Kraken ticker subscription failed: {subscription.Error}");
+                return;
             }
 
-            disposers.Add(() => new ValueTask(socketClient.UnsubscribeAsync(subscription.Data)));
+            onPrice("kraken", symbol, price.Value, DateTimeOffset.UtcNow);
         }
 
-        disposers.Add(() =>
+        async Task<(MarketWatchSymbol Symbol, KrakenSpotSymbolOrderBook OrderBook, AsyncDisposeAction Disposer)> StartOrderBookAsync(MarketWatchSymbol symbol)
         {
-            socketClient.Dispose();
-            return ValueTask.CompletedTask;
-        });
+            var realtimeSymbol = symbol.RealtimeSymbol!;
+            var orderBook = new KrakenSpotSymbolOrderBook(realtimeSymbol, _ => { });
+            Action<(ISymbolOrderBookEntry BestBid, ISymbolOrderBookEntry BestAsk)> handler = _ =>
+            {
+                PublishCurrentPrice(orderBook, symbol.Symbol);
+            };
 
-        return new CompositeAsyncDisposable(disposers.Select(action => new AsyncDisposeAction(action)).ToArray());
+            orderBook.OnBestOffersChanged += handler;
+
+            async ValueTask DisposeOrderBookAsync()
+            {
+                orderBook.OnBestOffersChanged -= handler;
+                await orderBook.StopAsync();
+                (orderBook as IDisposable)?.Dispose();
+            }
+
+            try
+            {
+                var startResult = await orderBook.StartAsync(ct);
+                if (!startResult.Success || !startResult.Data)
+                {
+                    await DisposeOrderBookAsync();
+                    throw new InvalidOperationException($"Kraken order book subscription failed for {realtimeSymbol}: {startResult.Error}");
+                }
+
+                return (symbol, orderBook, new AsyncDisposeAction(DisposeOrderBookAsync));
+            }
+            catch
+            {
+                await DisposeOrderBookAsync();
+                throw;
+            }
+        }
+
+        var startTasks = symbols
+            .Where(item => !string.IsNullOrWhiteSpace(item.RealtimeSymbol))
+            .Select(StartOrderBookAsync)
+            .ToArray();
+
+        try
+        {
+            var orderBooks = await Task.WhenAll(startTasks);
+            var refreshCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var refreshTask = Task.Run(async () =>
+            {
+                using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(750));
+                while (await timer.WaitForNextTickAsync(refreshCts.Token))
+                {
+                    foreach (var orderBook in orderBooks)
+                    {
+                        if (orderBook.OrderBook.Status != OrderBookStatus.Synced)
+                        {
+                            continue;
+                        }
+
+                        var dataAge = orderBook.OrderBook.DataAge;
+                        if (dataAge.HasValue && dataAge.Value > TimeSpan.FromSeconds(5))
+                        {
+                            continue;
+                        }
+
+                        PublishCurrentPrice(orderBook.OrderBook, orderBook.Symbol.Symbol);
+                    }
+                }
+            }, CancellationToken.None);
+
+            var disposers = orderBooks
+                .Select(item => (IAsyncDisposable)item.Disposer)
+                .ToList();
+            disposers.Add(new AsyncDisposeAction(async () =>
+            {
+                refreshCts.Cancel();
+                try
+                {
+                    await refreshTask;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                finally
+                {
+                    refreshCts.Dispose();
+                }
+            }));
+
+            return new CompositeAsyncDisposable(disposers);
+        }
+        catch
+        {
+            foreach (var task in startTasks)
+            {
+                if (task.IsCompletedSuccessfully)
+                {
+                    await task.Result.Disposer.DisposeAsync();
+                }
+            }
+
+            throw;
+        }
     }
 
     private static List<PendingSnapshot> CollectPendingSnapshots(

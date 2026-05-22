@@ -44,7 +44,7 @@ budget API, особенно для Kraken.
 
 - `Binance.Net` — targeted USD-M book-ticker stream по whitelist symbols
 - `Bybit.Net` — V5 linear depth-1 orderbook subscriptions
-- `KrakenExchange.Net` — Spot V2 ticker subscriptions
+- `KrakenExchange.Net` — managed spot order books по whitelist symbols
 
 Watcher считает live-price по best bid/ask midpoint там, где биржа даёт более
 частые book/orderbook updates, чем last-trade ticker. В `market_watch_live`
@@ -89,7 +89,8 @@ Watcher считает live-price по best bid/ask midpoint там, где би
 - Если окно полностью вне reachable history, ingest завершается как no-op, а не как runtime failure.
 - Pair resolution идёт через filtered `AssetPairs?pair=...` candidate-by-candidate, чтобы не зависать на гигантском каталоге и не ловить mixed-candidate `EQuery:Unknown asset pair`.
 - Scheduler может держать до 4 Kraken ingest jobs одновременно, но сам HTTP client теперь сериализует/разрежает реальные REST calls process-local limiter-ом и ретраит Kraken throttle-ответы вместо мгновенного job failure.
-- Для realtime worker Kraken сейчас ограничен `*USDT` spot universe. При этом наружу worker держит канонический dataset symbol (`BTCUSDT`-style), а Kraken-specific `altname/wsname` использует только как realtime alias для websocket subscription, чтобы whitelist из Admin Dataset Configuration совпадал с тем, что видит watcher.
+- Для realtime worker Kraken сейчас ограничен `*USDT` spot universe. При этом наружу worker держит канонический dataset symbol (`BTCUSDT`-style), а startup discovery больше не зависит от полного `AssetPairs` каталога: watcher адресно резолвит только whitelist `BASE/USDT` pairs и использует этот canonical alias для websocket subscription. Это устраняет runtime defect, при котором медленный каталог или Kraken metadata вроде `XBTUSDT`/`XBT/USDT` выбрасывали третью биржу из live watcher-а после рестарта.
+- Live price для Kraken теперь идёт не через sparse ticker/last-trade signal, а через managed spot order books. Watcher публикует midpoint best bid/ask по synced book и дополнительно переиздаёт текущий top-of-book коротким runtime refresh-loop'ом. На итоговой runtime-проверке через gateway-admin API это вернуло `kraken` к тем же subsecond-lag ожиданиям, что и `binance`/`bybit`.
 
 ## Bybit
 

@@ -467,7 +467,10 @@ Realtime price sources remain websocket-first:
    whitelist only
 - Bybit V5 linear depth-1 orderbook streams via `Bybit.Net`; the watcher also
    uses best bid/ask midpoint instead of sparse last-trade ticker updates
-- Kraken Spot V2 ticker streams via `KrakenExchange.Net`
+- Kraken managed spot order books via `KrakenExchange.Net`; the watcher uses
+   synced best bid/ask midpoint and republishes the current top-of-book on a
+   short runtime cadence so quieter Kraken pairs do not drift into multi-second
+   lag between best-offer changes
 
 Symbol discovery still comes from the in-repo REST clients, but the raw
 exchange universe is now filtered by `DataService:MarketWatch:Symbols`.
@@ -478,8 +481,19 @@ expanding to every tradable instrument returned by exchange metadata, and stale
 If discovery for one exchange fails or stalls at startup, the watcher now degrades
 instead of failing or blocking the whole runtime and can fall back to the
 persisted symbol list from `market_watch_live`. Current live Kraken coverage
-remains intentionally limited to the `*USDT` spot universe that the service
-already resolves reliably.
+remains intentionally limited to the `*USDT` spot universe, but startup
+discovery no longer depends on a full Kraken `AssetPairs` catalog fetch.
+Instead, the watcher resolves only the configured whitelist pairs via narrow
+`pair=BASE/USDT` lookups and uses the canonical `BASE/USDT` alias for websocket
+subscriptions, so the third exchange does not disappear just because the full
+catalog is slow or because Kraken returns `XBTUSDT` metadata for `BTCUSDT`.
+Subscription startup is also retried per exchange and treated as all-or-nothing:
+if one exchange cannot come up after retries, the watcher tears down partial
+subscriptions and restarts instead of silently leaving one venue stale. After
+the latest runtime validation through the protected gateway admin endpoints,
+all three exchanges were live simultaneously with runtime lag below one second
+(`binance avg ~124 ms`, `bybit avg ~323 ms`, `kraken avg ~251 ms`, overall
+`maxLagMs ~919`).
 
 Current candles are derived locally from the live price stream and are meant
 as a low-latency overlay. Authoritative historical candles still belong to

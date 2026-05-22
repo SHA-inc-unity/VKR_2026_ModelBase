@@ -64,6 +64,36 @@ public sealed class KrakenApiClient : IMarketDataClient
         return symbols;
     }
 
+    public async Task<IReadOnlyList<MarketWatchSymbol>> FetchMarketWatchSymbolsAsync(
+        IEnumerable<string> requestedSymbols,
+        CancellationToken ct = default)
+    {
+        var normalizedSymbols = requestedSymbols
+            .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+            .Select(symbol => symbol.Trim().ToUpperInvariant())
+            .Where(symbol => symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(symbol => symbol, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (normalizedSymbols.Length == 0)
+        {
+            return Array.Empty<MarketWatchSymbol>();
+        }
+
+        var symbols = new List<MarketWatchSymbol>(normalizedSymbols.Length);
+        foreach (var symbol in normalizedSymbols)
+        {
+            var resolved = await TryResolveMarketWatchSymbolAsync(symbol, ct);
+            if (resolved is not null)
+            {
+                symbols.Add(resolved);
+            }
+        }
+
+        return symbols;
+    }
+
     public static (long EffectiveStartMs, long EffectiveEndMs, bool Clipped) ClampRequestedWindow(
         long requestedStartMs,
         long requestedEndMs,
@@ -308,6 +338,56 @@ public sealed class KrakenApiClient : IMarketDataClient
         throw new ArgumentException($"unsupported Kraken symbol: {symbol}");
     }
 
+    private async Task<MarketWatchSymbol?> TryResolveMarketWatchSymbolAsync(string symbol, CancellationToken ct)
+    {
+        var normalized = symbol.Trim().ToUpperInvariant();
+        if (_websocketNameCache.TryGetValue(normalized, out var cachedWsName)
+            && !string.IsNullOrWhiteSpace(cachedWsName))
+        {
+            return new MarketWatchSymbol(normalized, cachedWsName);
+        }
+
+        var candidate = BuildMarketWatchPairCandidate(normalized);
+        try
+        {
+            using var doc = await GetJsonAsync(
+                $"{BaseUrl}/0/public/AssetPairs?pair={Uri.EscapeDataString(candidate)}",
+                ct);
+            if (!doc.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            foreach (var prop in result.EnumerateObject())
+            {
+                var altname = prop.Value.TryGetProperty("altname", out var altNode) ? altNode.GetString() : null;
+                var wsname = prop.Value.TryGetProperty("wsname", out var wsNode) ? wsNode.GetString() : null;
+                if (string.IsNullOrWhiteSpace(wsname))
+                {
+                    continue;
+                }
+
+                var datasetSymbol = NormalizeDatasetSymbol(altname ?? prop.Name);
+                if (!string.Equals(datasetSymbol, normalized, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var resolvedPair = altname ?? prop.Name;
+                _pairCache[normalized] = resolvedPair;
+                _websocketNameCache[normalized] = candidate;
+                return new MarketWatchSymbol(normalized, candidate);
+            }
+
+            return null;
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Unknown asset pair", StringComparison.OrdinalIgnoreCase))
+        {
+            _log.LogInformation("Kraken market watcher skips unsupported symbol {Symbol}", normalized);
+            return null;
+        }
+    }
+
     private async Task<JsonDocument> GetJsonAsync(string url, CancellationToken ct)
     {
         Exception? last = null;
@@ -487,6 +567,17 @@ public sealed class KrakenApiClient : IMarketDataClient
         candidates.Add($"{mappedBase}USDT");
         candidates.Add($"{mappedBase}/USDT");
         return candidates.ToArray();
+    }
+
+    private static string BuildMarketWatchPairCandidate(string symbol)
+    {
+        if (!symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase))
+        {
+            return symbol;
+        }
+
+        var baseAsset = symbol[..^4];
+        return $"{baseAsset}/USDT";
     }
 
     private static string NormalizeDatasetSymbol(string symbol)
