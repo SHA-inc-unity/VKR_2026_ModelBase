@@ -15,8 +15,10 @@ registry `cgr.dev` может быть недоступен, а `docker compose 
 должен работать штатно. В build stage также всегда создаётся каталог `public`,
 чтобы сборка не падала на clean server checkout, где пустая папка не хранится
 в git. Для ускорения повторных rebuild на слабых серверах build stage теперь
-использует BuildKit cache mount для `.next/cache`, telemetry Next.js
-отключена, а production build пропускает ESLint через `next.config.js`
+использует именованные BuildKit cache mounts для `/root/.npm` и `.next/cache`,
+внутрь `next build` дополнительно включён `NODE_COMPILE_CACHE`, а `.dockerignore`
+держит вне build context документацию и proxy-конфиги, не нужные для standalone image.
+Telemetry Next.js отключена, а production build пропускает ESLint через `next.config.js`
 (`eslint.ignoreDuringBuilds = true`). TypeScript typecheck и сам `next build`
 сохраняются. Дополнительно install stage переведён в low-memory режим:
 `npm ci` запускается с отключёнными `audit/fund/progress`, с

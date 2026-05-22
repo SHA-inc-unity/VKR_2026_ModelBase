@@ -5,7 +5,7 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY package.json package-lock.json* ./
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,id=microservice_admin_npm_cache,target=/root/.npm,sharing=locked \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false \
     NPM_CONFIG_AUDIT=false \
@@ -16,7 +16,8 @@ RUN --mount=type=cache,target=/root/.npm \
 
 COPY . .
 RUN mkdir -p public
-RUN --mount=type=cache,target=/app/.next/cache \
+RUN --mount=type=cache,id=microservice_admin_next_cache,target=/app/.next/cache,sharing=locked \
+    NODE_COMPILE_CACHE=/app/.next/cache/node-compile-cache \
     npm run build
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────

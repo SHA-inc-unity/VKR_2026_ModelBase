@@ -12,6 +12,8 @@
 
 ### 2026-05-22
 
+- `microservice_admin/{Dockerfile,.dockerignore,README.md,STRUCTURE.md}`: добавлен ещё один слой кэширования для Node/Next build path admin-сервиса. В Dockerfile появились именованные cache mounts для npm и `.next/cache`, `next build` идёт с `NODE_COMPILE_CACHE`, а `.dockerignore` перестал включать в context docs/proxy файлы, не влияющие на standalone image. Проверено: cold `docker build -t microservice-admin-cache-check .` проходит, повторный build подхватывает cached `npm ci` и cached `next build`.
+
 - `microservice_admin/src/{app/page.tsx,lib/i18n.ts}`, `microservice_admin/{README.md,STRUCTURE.md}`: dashboard dataset-summary приведён к multi-exchange виду. Добавлен exchange dropdown по реально доступным биржам, coverage-chart сделан выше и теперь строится только по непустым таблицам выбранной биржи, а `Tables`/`Total Tables` больше не учитывают `0 rows`. Проверено через `docker compose build admin` и `docker compose build admin-online`.
 
 - `microservice_data/src/DataService.API/{Markets/KrakenApiClient.cs,Markets/KrakenRateLimiter.cs,Program.cs}`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: исправлен новый live-slice для Kraken после 4-slot ingest pool. Причина была в том, что scheduler честно запускал до 4 Kraken jobs, а сам Kraken public REST path не имел своего локального throttle и быстро отвечал `EGeneral:Too many requests`. Внутрь Kraken client добавлен process-local limiter + retry/backoff на Kraken throttle ошибки. После rebuild и живого Kafka validation (`cmd.data.dataset.jobs.start` для `120m/240m/720m/1d`) `120m` и `240m` уже ушли в `succeeded`, а `720m` и `1d` остались живыми `running` с heartbeat вместо мгновенного fail.

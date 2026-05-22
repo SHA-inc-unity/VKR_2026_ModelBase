@@ -8,3 +8,7 @@ node_modules
 *.log
 coverage
 .nyc_output
+README.md
+STRUCTURE.md
+docker-compose.yml
+nginx/
