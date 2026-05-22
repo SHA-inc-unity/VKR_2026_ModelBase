@@ -82,6 +82,7 @@ try
 
     // BybitApiClient via typed HttpClient
     builder.Services.AddSingleton<BybitRateLimiter>();
+    builder.Services.AddSingleton<BinanceRateLimiter>();
     builder.Services.AddSingleton<KrakenRateLimiter>();
     builder.Services.AddHttpClient<BybitApiClient>(client =>
     {

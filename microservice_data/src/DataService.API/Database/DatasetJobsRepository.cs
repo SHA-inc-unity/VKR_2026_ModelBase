@@ -48,7 +48,12 @@ public sealed class DatasetJobsRepository
             status            TEXT         NOT NULL,
             stage             TEXT         NULL,
             progress          SMALLINT     NOT NULL DEFAULT 0,
+            stage_progress    SMALLINT     NULL,
             detail            TEXT         NULL,
+            stage_total       BIGINT       NULL,
+            stage_completed   BIGINT       NULL,
+            stage_failed      BIGINT       NULL,
+            stage_skipped     BIGINT       NULL,
             total             BIGINT       NOT NULL DEFAULT 0,
             completed         BIGINT       NOT NULL DEFAULT 0,
             failed            BIGINT       NOT NULL DEFAULT 0,
@@ -71,6 +76,12 @@ public sealed class DatasetJobsRepository
         CREATE UNIQUE INDEX IF NOT EXISTS uq_dataset_jobs_active_params
             ON dataset_jobs (params_hash)
             WHERE status IN ('queued', 'running');
+
+        ALTER TABLE dataset_jobs ADD COLUMN IF NOT EXISTS stage_progress SMALLINT NULL;
+        ALTER TABLE dataset_jobs ADD COLUMN IF NOT EXISTS stage_total BIGINT NULL;
+        ALTER TABLE dataset_jobs ADD COLUMN IF NOT EXISTS stage_completed BIGINT NULL;
+        ALTER TABLE dataset_jobs ADD COLUMN IF NOT EXISTS stage_failed BIGINT NULL;
+        ALTER TABLE dataset_jobs ADD COLUMN IF NOT EXISTS stage_skipped BIGINT NULL;
 
         CREATE TABLE IF NOT EXISTS dataset_job_subtasks (
             subtask_id      UUID         PRIMARY KEY,
@@ -340,7 +351,12 @@ public sealed class DatasetJobsRepository
             Status:          (string)r["status"]!,
             Stage:           r["stage"]            as string,
             Progress:        Convert.ToInt16(r["progress"] ?? (short)0),
+            StageProgress:   r["stage_progress"] is null ? null : Convert.ToInt16(r["stage_progress"]),
             Detail:          r["detail"]           as string,
+            StageTotal:      r["stage_total"] is null ? null : Convert.ToInt64(r["stage_total"]),
+            StageCompleted:  r["stage_completed"] is null ? null : Convert.ToInt64(r["stage_completed"]),
+            StageFailed:     r["stage_failed"] is null ? null : Convert.ToInt64(r["stage_failed"]),
+            StageSkipped:    r["stage_skipped"] is null ? null : Convert.ToInt64(r["stage_skipped"]),
             Total:           Convert.ToInt64(r["total"]     ?? 0L),
             Completed:       Convert.ToInt64(r["completed"] ?? 0L),
             Failed:          Convert.ToInt64(r["failed"]    ?? 0L),

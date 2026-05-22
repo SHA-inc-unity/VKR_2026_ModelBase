@@ -127,10 +127,20 @@ export interface DatasetJobProgressEvent {
   job_id: string;
   type: DatasetJobType;
   status: DatasetJobStatus;
-  progress: number;        // 0..100
+  progress: number;        // overall 0..100
+  overall_progress?: number;
+  stage_progress?: number | null;
   stage?: string | null;
   detail?: string | null;
+  stage_total?: number | null;
+  stage_completed?: number | null;
+  stage_failed?: number | null;
+  stage_skipped?: number | null;
   target_table?: string | null;
+  total?: number | null;
+  completed?: number | null;
+  failed?: number | null;
+  skipped?: number | null;
   updated_at?: string;
 }
 
@@ -140,7 +150,19 @@ export interface DatasetJobCompletedEvent {
   status: DatasetJobStatus; // succeeded | failed | canceled | skipped
   target_table?: string | null;
   target_timeframe?: string | null;
+  stage?: string | null;
+  progress?: number;
+  overall_progress?: number;
+  stage_progress?: number | null;
+  detail?: string | null;
+  stage_total?: number | null;
+  stage_completed?: number | null;
+  stage_failed?: number | null;
+  stage_skipped?: number | null;
+  total?: number | null;
   completed?: number | null;  // rows written (ingest jobs)
+  failed?: number | null;
+  skipped?: number | null;
   error_code?: string | null;
   error_message?: string | null;
   finished_at?: string;

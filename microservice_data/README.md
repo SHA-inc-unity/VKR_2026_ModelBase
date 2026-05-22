@@ -53,7 +53,7 @@
 Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handler routes requests through an exchange-specific market client. Supported exchanges today:
 
 - `bybit` — full perpetual pipeline: klines + funding + open interest.
-- `binance` — full USDT-margined futures pipeline: klines + funding + open interest.
+- `binance` — full USDT-margined futures pipeline: klines + funding + open interest. Binance HTTP calls now go through a process-local limiter, respect `Retry-After` on `418/429`, and clip/align `openInterestHist` requests to the upstream latest-month retention window instead of retrying impossible historical `startTime` values forever.
 - `kraken` — OHLC-only pipeline via public spot OHLC; funding/open-interest stay empty, and the upstream Kraken API exposes only the most recent 720 base candles. The ingest handler clamps each Kraken request to the overlap with that reachable lookback; if the requested window is completely outside it, the job finishes as a no-op instead of poisoning the queue with repeated failures. Kraken HTTP calls use a shorter `30 s` per-call deadline, retry Kraken-side throttle errors (`EGeneral:Too many requests`, `EAPI:Rate limit exceeded`, `EService: Throttled`) and now go through a process-local limiter inside the client, so four Kraken jobs may coexist in the scheduler without all four spamming public REST in parallel. Symbol resolution uses narrow `GET /0/public/AssetPairs?pair=...` lookups one candidate at a time instead of fetching the whole pair catalog.
 
 The handler:
@@ -76,7 +76,10 @@ The handler:
        `/v5/market/funding/history` and `/v5/market/open-interest` flow.
     - **Binance** uses `/fapi/v1/klines`, `/fapi/v1/fundingRate` and
        `/futures/data/openInterestHist` with the same incremental windowing
-       strategy.
+       strategy, but now paces all Binance REST calls through a shared
+       limiter. `openInterestHist` windows are clipped to the latest month
+       and aligned to the selected interval because the upstream endpoint
+       rejects stale or misaligned `startTime` values with `400`.
     - **Kraken** uses `/0/public/OHLC`; pair resolution goes through
        filtered `/0/public/AssetPairs?pair=...` lookups one candidate at a
        time for the current symbol, so ingest never needs the full Kraken
@@ -347,12 +350,22 @@ ingest jobs *must* carry a non-null `target_table` so the per-table
 Admin clients only send `target_symbol` + `target_timeframe`, so when the
 incoming `cmd.data.dataset.jobs.start` payload omits `target_table` and
 `type == "ingest"`, the handler fills it in via
-`DatasetCore.MakeTableName(symbol, timeframe)` **before** computing
+`DatasetCore.MakeTableName(symbol, timeframe, exchange)` **before** computing
 `params_hash`. Without this fix all ALL-mode TFs would collapse onto a
 single global lock key (`external_io::*`) and run strictly sequentially —
 the symptom was UI-visible "jobs stuck in queued" because only one of
 seven ingests held the lock and the rest waited indefinitely from the
 user's perspective.
+
+**Dataset job progress contract** (`events.data.dataset.job.progress` /
+`events.data.dataset.job.completed`). `progress` remains the weighted
+pipeline-wide percentage and is mirrored as `overall_progress`. In
+addition, running jobs now persist and publish current-stage fields
+`stage_progress`, `stage_total`, `stage_completed`, `stage_failed` and
+`stage_skipped`; the same snapshot is echoed by `cmd.data.dataset.jobs.get`
+and `...jobs.list`. This lets admin render an honest current-stage bar for
+`fetch_klines` / `fetch_oi` page progress while still showing the overall
+pipeline percent separately.
 
 **Active-job dedup (single source of truth)**. Two callers must agree
 on the uniqueness rule for active jobs, otherwise inserts fail at runtime
@@ -390,7 +403,7 @@ timeout). It always returns one of:
 | `{ job_id, status, deduped, job }` | Success or dedup hit |
 | `{ error, code: "schema_not_ready" }` | DB unreachable at startup |
 | `{ error, code: "bad_request" }` | Missing/invalid `type` or arguments |
-| `{ error, code: "unsupported_exchange" }` | Ingest job requested exchange other than `bybit` |
+| `{ error, code: "unsupported_exchange" }` | Ingest job requested exchange other than `bybit`, `binance` or `kraken` |
 | `{ error, code: "invalid_state" }` | Unexpected `InvalidOperationException` |
 | `{ error, code: "db_unavailable" }` | Connection-level DB failure (`NpgsqlException`) |
 | `{ error, code: "pg_<SQLSTATE>" }` | Other Postgres failure |

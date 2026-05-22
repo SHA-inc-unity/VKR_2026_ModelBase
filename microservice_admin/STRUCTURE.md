@@ -33,13 +33,20 @@
   отразить «в очереди, планировщик ещё не подхватил». Если jobId уже
   в Map — no-op (избегаем гонки с SSE-`progress`, который может
   прилететь раньше).
+  Store теперь хранит не только общий `progress`, но и current-stage
+  snapshot (`stage_progress`, `stage_total`, `stage_completed`,
+  `stage_failed`, `stage_skipped`), который приходит из
+  `events.data.dataset.job.progress` и `jobs.list/get`.
 - `src/components/DatasetJobsPanel.tsx` — компактный список с progress-
   барами, status/stage, error_code/error_message и кнопками
   «Отменить» / «Скрыть». Компонент стилизован в штатный dark/card
   язык admin-панели: без светлого фона и инородных серых вставок,
   с мягкими muted-подложками, status-badge и progress-track в общей
-  теме. Для ingest `succeeded` + `completed=0` показывает нормальный
-  no-op текст `Новых строк не потребовалось`.
+  теме. Для dataset jobs теперь рисуются два независимых бара:
+  current stage и overall pipeline. Если backend не даёт честный
+  счётчик текущей стадии, stage-bar остаётся indeterminate/live вместо
+  подмены pipeline-процентом. Для ingest `succeeded` + `completed=0`
+  показывает нормальный no-op текст `Новых строк не потребовалось`.
 - `src/hooks/useDatasetJobsFeed.ts` — тонкая client-only синхронизация
   dataset jobs store: подписывает страницу на
   `EVT_DATA_DATASET_JOB_PROGRESS` / `...COMPLETED`, делает mount-time

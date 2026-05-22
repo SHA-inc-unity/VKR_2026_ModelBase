@@ -90,6 +90,9 @@ public sealed class IngestJobHandler : IDatasetJobHandler
                     100,
                     $"kraken window outside reachable history for {table}; requested {JobHandlerHelpers.FormatUtc(s)} .. {JobHandlerHelpers.FormatUtc(e)}; " +
                     $"available {KrakenApiClient.DescribeReachableLookback(stepMs)}",
+                    stageProgress: 100,
+                    stageTotal: 0,
+                    stageCompleted: 0,
                     total: 0,
                     completed: 0,
                     skipped: 1);
@@ -116,7 +119,15 @@ public sealed class IngestJobHandler : IDatasetJobHandler
 
         if (missing.Count == 0)
         {
-            await ctx.ReportAsync("done", 100, $"no missing rows in {table}", total: 0, completed: 0);
+            await ctx.ReportAsync(
+                "done",
+                100,
+                $"no missing rows in {table}",
+                stageProgress: 100,
+                stageTotal: 0,
+                stageCompleted: 0,
+                total: 0,
+                completed: 0);
             return;
         }
 
@@ -141,16 +152,25 @@ public sealed class IngestJobHandler : IDatasetJobHandler
             windowDetail is null
                 ? $"missing={missing.Count}, fetching market data"
                 : $"missing={missing.Count}, fetching market data; {windowDetail}",
+            stageProgress: 0,
             total: missing.Count);
 
         var klineT = market.FetchKlinesAsync(
             symbol.ToUpperInvariant(), interval, fetchStart, e, stepMs, maxParallel, ctx.CancellationToken,
             onPageDone: (done, total) =>
             {
-                if (total > 0 && done % 5 == 0)
+                if (total > 0 && (done == total || done % 5 == 0))
                 {
                     var pct = (int)Math.Min(40, 5 + (long)done * 35 / total);
-                    _ = ctx.ReportAsync("fetch_klines", pct, $"{done}/{total} pages", total: missing.Count);
+                    var stagePct = (int)Math.Min(100, (long)done * 100 / total);
+                    _ = ctx.ReportAsync(
+                        "fetch_klines",
+                        pct,
+                        $"{done}/{total} pages",
+                        stageProgress: stagePct,
+                        stageTotal: total,
+                        stageCompleted: done,
+                        total: missing.Count);
                 }
             });
         var fundingT = market.FetchFundingRatesAsync(
@@ -162,7 +182,15 @@ public sealed class IngestJobHandler : IDatasetJobHandler
                 if (total > 0 && (done == total || done % 5 == 0))
                 {
                     var pct = (int)Math.Min(50, 47 + (long)done * 3 / total);
-                    _ = ctx.ReportAsync("fetch_oi", pct, $"{done}/{total} pages", total: missing.Count);
+                    var stagePct = (int)Math.Min(100, (long)done * 100 / total);
+                    _ = ctx.ReportAsync(
+                        "fetch_oi",
+                        pct,
+                        $"{done}/{total} pages",
+                        stageProgress: stagePct,
+                        stageTotal: total,
+                        stageCompleted: done,
+                        total: missing.Count);
                 }
             });
 
@@ -217,14 +245,28 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         await ctx.ReportAsync("upsert", 70, $"writing {rows.Count} rows");
         var written = await _repo.BulkUpsertAsync(table, rows, ctx.CancellationToken);
         await ctx.EndStageAsync(stageUp, written);
-        await ctx.ReportAsync("upsert", 85, $"{written} rows written", completed: written);
+        await ctx.ReportAsync(
+            "upsert",
+            85,
+            $"{written} rows written",
+            stageProgress: 100,
+            stageTotal: rows.Count,
+            stageCompleted: written,
+            completed: written);
 
         // ── compute_features ───────────────────────────────────
         var stageFeat = await ctx.StartStageAsync("compute_features");
         await ctx.ReportAsync("compute_features", 90, "computing feature columns");
         var feat = await _repo.ComputeAndUpdateFeaturesAsync(table, ctx.CancellationToken);
         await ctx.EndStageAsync(stageFeat, feat);
-        await ctx.ReportAsync("done", 100, $"written={written}, features={feat}", completed: written);
+        await ctx.ReportAsync(
+            "done",
+            100,
+            $"written={written}, features={feat}",
+            stageProgress: 100,
+            stageTotal: feat,
+            stageCompleted: feat,
+            completed: written);
     }
 
     private static Dictionary<long, decimal> ComputeWilderRsi(IList<(long Ts, decimal Close)> closes, int period)

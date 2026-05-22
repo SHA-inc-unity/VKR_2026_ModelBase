@@ -51,6 +51,23 @@ function shortenMessage(value: string | null | undefined, max = 180): string {
   return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
 }
 
+function formatStageLabel(value: string | null | undefined): string | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+  return normalized.replace(/_/g, ' ');
+}
+
+function getStageSummary(job: DatasetJobView): string | null {
+  if (typeof job.stage_completed === 'number' && typeof job.stage_total === 'number' && job.stage_total > 0) {
+    const parts = [`${job.stage_completed.toLocaleString()}/${job.stage_total.toLocaleString()}`];
+    if ((job.stage_failed ?? 0) > 0) parts.push(`fail ${job.stage_failed?.toLocaleString()}`);
+    if ((job.stage_skipped ?? 0) > 0) parts.push(`skip ${job.stage_skipped?.toLocaleString()}`);
+    return parts.join(' · ');
+  }
+  if (typeof job.stage_progress === 'number') return `${job.stage_progress}%`;
+  return null;
+}
+
 function getJobNote(job: DatasetJobView): string | null {
   if (job.status === 'queued') return 'Ожидает планировщика';
   if (job.status === 'running') return job.detail ?? 'Job выполняется во владельце сервиса';
@@ -83,10 +100,15 @@ export default function DatasetJobsPanel(): JSX.Element | null {
       {jobs.map((j, index) => {
         const isRunning = j.status === 'running' || j.status === 'queued';
         const isError = j.status === 'failed';
-        const pct = Math.max(0, Math.min(100, j.progress ?? 0));
+        const overallPct = Math.max(0, Math.min(100, j.progress ?? 0));
+        const stagePct = typeof j.stage_progress === 'number'
+          ? Math.max(0, Math.min(100, j.stage_progress))
+          : (j.finished && j.status === 'succeeded' ? 100 : null);
         const badgeClass = STATUS_BADGE_CLASS[j.status] ?? STATUS_BADGE_CLASS.running;
         const barClass = STATUS_BAR_CLASS[j.status] ?? STATUS_BAR_CLASS.running;
         const note = getJobNote(j);
+        const stageLabel = formatStageLabel(j.stage) ?? (j.status === 'queued' ? 'scheduler queue' : 'active stage');
+        const stageSummary = getStageSummary(j);
         return (
           <div
             key={j.job_id}
@@ -104,19 +126,44 @@ export default function DatasetJobsPanel(): JSX.Element | null {
                   <span className={`rounded-full border px-2 py-0.5 font-medium ${badgeClass}`}>
                     {STATUS_LABEL[j.status] ?? j.status}
                   </span>
-                  {j.stage ? <span className="truncate">{j.stage}</span> : null}
-                  <span className="tabular-nums">{pct}%</span>
+                  <span className="truncate">{stageLabel}</span>
+                  <span className="tabular-nums">overall {overallPct}%</span>
                   <span className="font-mono">{j.job_id.slice(0, 8)}</span>
                 </div>
               </div>
               <div className="shrink-0 text-[11px] text-muted-foreground">#{index + 1}</div>
             </div>
 
-            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted/60">
-              <div
-                className={`h-full transition-[width] duration-200 ease-linear ${barClass}`}
-                style={{ width: `${pct}%` }}
-              />
+            <div className="mt-2 space-y-2">
+              <div>
+                <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                  <span className="truncate">Этап</span>
+                  <span className="shrink-0 tabular-nums">{stageSummary ?? 'live'}</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-muted/60">
+                  {stagePct === null ? (
+                    <div className={`h-full w-1/3 animate-pulse ${barClass}`} />
+                  ) : (
+                    <div
+                      className={`h-full transition-[width] duration-200 ease-linear ${barClass}`}
+                      style={{ width: `${stagePct}%` }}
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                  <span className="truncate">Общий прогресс</span>
+                  <span className="shrink-0 tabular-nums">{overallPct}%</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-muted/60">
+                  <div
+                    className={`h-full transition-[width] duration-200 ease-linear ${barClass} opacity-60`}
+                    style={{ width: `${overallPct}%` }}
+                  />
+                </div>
+              </div>
             </div>
 
             {note ? (

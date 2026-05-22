@@ -14,6 +14,18 @@ public sealed class JobContext
     private readonly DatasetJobsMutator _mut;
     private readonly DatasetJobsRepository _repo;
     private readonly KafkaProducer _producer;
+    private string? _currentStage;
+    private short _currentProgress;
+    private string? _currentDetail;
+    private short? _currentStageProgress;
+    private long? _currentStageTotal;
+    private long? _currentStageCompleted;
+    private long? _currentStageFailed;
+    private long? _currentStageSkipped;
+    private long _currentTotal;
+    private long _currentCompleted;
+    private long _currentFailed;
+    private long _currentSkipped;
 
     public JobContext(
         DatasetJobRecord job,
@@ -27,31 +39,84 @@ public sealed class JobContext
         _mut = mut;
         _repo = repo;
         _producer = producer;
+        _currentStage = job.Stage;
+        _currentProgress = job.Progress;
+        _currentDetail = job.Detail;
+        _currentStageProgress = job.StageProgress;
+        _currentStageTotal = job.StageTotal;
+        _currentStageCompleted = job.StageCompleted;
+        _currentStageFailed = job.StageFailed;
+        _currentStageSkipped = job.StageSkipped;
+        _currentTotal = job.Total;
+        _currentCompleted = job.Completed;
+        _currentFailed = job.Failed;
+        _currentSkipped = job.Skipped;
     }
 
     public Guid JobId => Job.JobId;
 
     public async Task ReportAsync(
         string? stage = null, int? progress = null, string? detail = null,
+        int? stageProgress = null,
+        long? stageTotal = null, long? stageCompleted = null, long? stageFailed = null, long? stageSkipped = null,
         long? total = null, long? completed = null, long? failed = null, long? skipped = null,
         CancellationToken? ct = null)
     {
         var token = ct ?? CancellationToken;
+        var nextStage = stage ?? _currentStage;
+        var stageChanged = stage is not null && !string.Equals(stage, _currentStage, StringComparison.Ordinal);
+        var nextProgress = (short)Math.Clamp(progress ?? _currentProgress, 0, 100);
+        var nextDetail = detail ?? (stageChanged ? null : _currentDetail);
+        var nextStageProgress = stageChanged
+            ? (stageProgress is null ? (short?)null : (short)Math.Clamp(stageProgress.Value, 0, 100))
+            : (stageProgress is null ? _currentStageProgress : (short)Math.Clamp(stageProgress.Value, 0, 100));
+        var nextStageTotal = stageChanged ? stageTotal : stageTotal ?? _currentStageTotal;
+        var nextStageCompleted = stageChanged ? stageCompleted : stageCompleted ?? _currentStageCompleted;
+        var nextStageFailed = stageChanged ? stageFailed : stageFailed ?? _currentStageFailed;
+        var nextStageSkipped = stageChanged ? stageSkipped : stageSkipped ?? _currentStageSkipped;
+        var nextTotal = total ?? _currentTotal;
+        var nextCompleted = completed ?? _currentCompleted;
+        var nextFailed = failed ?? _currentFailed;
+        var nextSkipped = skipped ?? _currentSkipped;
+
         await _mut.UpdateProgressAsync(
-            Job.JobId, stage, (short)Math.Clamp(progress ?? Job.Progress, 0, 100), detail,
-            total, completed, failed, skipped, token);
+            Job.JobId, nextStage, nextProgress, nextDetail,
+            nextStageProgress, nextStageTotal, nextStageCompleted, nextStageFailed, nextStageSkipped,
+            nextTotal, nextCompleted, nextFailed, nextSkipped, token);
         await _producer.PublishEventAsync(Topics.EvtDataDatasetJobProgress, new
         {
-            job_id       = Job.JobId,
-            type         = Job.Type,
-            status       = "running",       // always running while a handler reports
-            target_table = Job.TargetTable,
-            stage,
-            progress     = progress ?? Job.Progress,
-            detail,
-            total, completed, failed, skipped,
-            ts           = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            job_id            = Job.JobId,
+            type              = Job.Type,
+            status            = "running",       // always running while a handler reports
+            target_table      = Job.TargetTable,
+            stage             = nextStage,
+            progress          = nextProgress,
+            overall_progress  = nextProgress,
+            stage_progress    = nextStageProgress,
+            detail            = nextDetail,
+            stage_total       = nextStageTotal,
+            stage_completed   = nextStageCompleted,
+            stage_failed      = nextStageFailed,
+            stage_skipped     = nextStageSkipped,
+            total             = nextTotal,
+            completed         = nextCompleted,
+            failed            = nextFailed,
+            skipped           = nextSkipped,
+            ts                = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         }, token);
+
+        _currentStage = nextStage;
+        _currentProgress = nextProgress;
+        _currentDetail = nextDetail;
+        _currentStageProgress = nextStageProgress;
+        _currentStageTotal = nextStageTotal;
+        _currentStageCompleted = nextStageCompleted;
+        _currentStageFailed = nextStageFailed;
+        _currentStageSkipped = nextStageSkipped;
+        _currentTotal = nextTotal;
+        _currentCompleted = nextCompleted;
+        _currentFailed = nextFailed;
+        _currentSkipped = nextSkipped;
     }
 
     public async Task<bool> IsCancelRequestedAsync()

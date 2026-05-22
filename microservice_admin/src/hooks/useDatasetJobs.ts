@@ -31,13 +31,21 @@ export interface DatasetJobView {
   job_id: string;
   type: DatasetJobType;
   status: DatasetJobStatus;
-  progress: number;
+  progress: number;          // overall job progress
+  stage_progress?: number | null;
   stage?: string | null;
   detail?: string | null;
   target_table?: string | null;
+  stage_total?: number | null;
+  stage_completed?: number | null;
+  stage_failed?: number | null;
+  stage_skipped?: number | null;
+  total?: number | null;
   error_code?: string | null;
   error_message?: string | null;
   completed?: number;         // rows written (populated from completed event)
+  failed?: number | null;
+  skipped?: number | null;
   // Local fields
   finished: boolean;
   last_update_ms: number;
@@ -50,12 +58,21 @@ type DatasetJobWire = {
   type: DatasetJobType;
   status: DatasetJobStatus;
   progress?: number;
+  overall_progress?: number;
+  stage_progress?: number | null;
   stage?: string | null;
   detail?: string | null;
   target_table?: string | null;
+  stage_total?: number | null;
+  stage_completed?: number | null;
+  stage_failed?: number | null;
+  stage_skipped?: number | null;
+  total?: number | null;
   error_code?: string | null;
   error_message?: string | null;
   completed?: number | null;
+  failed?: number | null;
+  skipped?: number | null;
   updated_at_ms?: number | null;
   finished_at_ms?: number | null;
 };
@@ -89,6 +106,10 @@ const TERMINAL: ReadonlySet<DatasetJobStatus> = new Set([
 const SHORT_LIVED_TERMINAL: ReadonlySet<DatasetJobStatus> = new Set(['failed', 'canceled']);
 const LONG_LIVED_TERMINAL: ReadonlySet<DatasetJobStatus> = new Set(['succeeded', 'skipped']);
 const TERMINAL_HISTORY_ENDPOINT = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/api/queue/history`;
+
+function hasOwn<T extends object, K extends PropertyKey>(value: T, key: K): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
 
 function scheduleFinishedJobCleanup(jobId: string, status: DatasetJobStatus): void {
   const delayMs = SHORT_LIVED_TERMINAL.has(status)
@@ -148,21 +169,56 @@ function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
 
   const prev = _jobs.get(job.job_id);
   const finished = TERMINAL.has(job.status);
+  const overallProgress = typeof job.overall_progress === 'number'
+    ? job.overall_progress
+    : typeof job.progress === 'number'
+      ? job.progress
+      : job.status === 'succeeded'
+        ? 100
+        : (prev?.progress ?? 0);
+  const stageProgress = hasOwn(job, 'stage_progress')
+    ? (typeof job.stage_progress === 'number'
+      ? job.stage_progress
+      : job.status === 'succeeded'
+        ? 100
+        : null)
+    : (prev?.stage_progress ?? null);
+
   _jobs.set(job.job_id, {
     job_id: job.job_id,
     type: job.type,
     status: job.status,
-    progress: typeof job.progress === 'number'
-      ? job.progress
-      : job.status === 'succeeded'
-        ? 100
-        : (prev?.progress ?? 0),
-    stage: job.stage ?? prev?.stage ?? null,
-    detail: job.detail ?? prev?.detail ?? null,
-    target_table: job.target_table ?? prev?.target_table ?? null,
-    error_code: job.error_code ?? prev?.error_code ?? null,
-    error_message: job.error_message ?? prev?.error_message ?? null,
-    completed: typeof job.completed === 'number' ? job.completed : prev?.completed,
+    progress: overallProgress,
+    stage_progress: stageProgress,
+    stage: hasOwn(job, 'stage') ? (job.stage ?? null) : (prev?.stage ?? null),
+    detail: hasOwn(job, 'detail') ? (job.detail ?? null) : (prev?.detail ?? null),
+    target_table: hasOwn(job, 'target_table') ? (job.target_table ?? null) : (prev?.target_table ?? null),
+    stage_total: hasOwn(job, 'stage_total')
+      ? (typeof job.stage_total === 'number' ? job.stage_total : null)
+      : (prev?.stage_total ?? null),
+    stage_completed: hasOwn(job, 'stage_completed')
+      ? (typeof job.stage_completed === 'number' ? job.stage_completed : null)
+      : (prev?.stage_completed ?? null),
+    stage_failed: hasOwn(job, 'stage_failed')
+      ? (typeof job.stage_failed === 'number' ? job.stage_failed : null)
+      : (prev?.stage_failed ?? null),
+    stage_skipped: hasOwn(job, 'stage_skipped')
+      ? (typeof job.stage_skipped === 'number' ? job.stage_skipped : null)
+      : (prev?.stage_skipped ?? null),
+    total: hasOwn(job, 'total')
+      ? (typeof job.total === 'number' ? job.total : null)
+      : (prev?.total ?? null),
+    error_code: hasOwn(job, 'error_code') ? (job.error_code ?? null) : (prev?.error_code ?? null),
+    error_message: hasOwn(job, 'error_message') ? (job.error_message ?? null) : (prev?.error_message ?? null),
+    completed: hasOwn(job, 'completed')
+      ? (typeof job.completed === 'number' ? job.completed : undefined)
+      : prev?.completed,
+    failed: hasOwn(job, 'failed')
+      ? (typeof job.failed === 'number' ? job.failed : null)
+      : (prev?.failed ?? null),
+    skipped: hasOwn(job, 'skipped')
+      ? (typeof job.skipped === 'number' ? job.skipped : null)
+      : (prev?.skipped ?? null),
     finished,
     last_update_ms:
       typeof job.finished_at_ms === 'number' ? job.finished_at_ms :
@@ -209,9 +265,19 @@ export function applyJobProgress(e: DatasetJobProgressEvent): void {
     type: e.type,
     status: e.status,
     progress: e.progress,
+    overall_progress: e.overall_progress,
+    stage_progress: e.stage_progress,
     stage: e.stage,
     detail: e.detail,
+    stage_total: e.stage_total,
+    stage_completed: e.stage_completed,
+    stage_failed: e.stage_failed,
+    stage_skipped: e.stage_skipped,
     target_table: e.target_table,
+    total: e.total,
+    completed: e.completed,
+    failed: e.failed,
+    skipped: e.skipped,
   });
 }
 
@@ -221,10 +287,22 @@ export function applyJobCompleted(e: DatasetJobCompletedEvent): void {
     job_id: e.job_id,
     type: e.type,
     status: e.status,
+    progress: e.progress,
+    overall_progress: e.overall_progress,
+    stage_progress: e.stage_progress,
+    stage: e.stage,
+    detail: e.detail,
+    stage_total: e.stage_total,
+    stage_completed: e.stage_completed,
+    stage_failed: e.stage_failed,
+    stage_skipped: e.stage_skipped,
     target_table: e.target_table,
+    total: e.total,
     error_code: e.error_code,
     error_message: e.error_message,
     completed: e.completed,
+    failed: e.failed,
+    skipped: e.skipped,
     finished_at_ms: typeof e.finished_at === 'string' ? Date.parse(e.finished_at) : null,
   });
 }

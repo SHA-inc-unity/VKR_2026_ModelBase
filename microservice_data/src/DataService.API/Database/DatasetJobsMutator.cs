@@ -29,24 +29,33 @@ public sealed class DatasetJobsMutator
 
     public async Task UpdateProgressAsync(
         Guid jobId, string? stage, short progress, string? detail,
-        long? total = null, long? completed = null, long? failed = null, long? skipped = null,
+        short? stageProgress = null,
+        long? stageTotal = null, long? stageCompleted = null, long? stageFailed = null, long? stageSkipped = null,
+        long total = 0, long completed = 0, long failed = 0, long skipped = 0,
         CancellationToken ct = default)
     {
         const string sql = """
             UPDATE dataset_jobs SET
-                stage     = COALESCE(@Stage, stage),
-                progress  = @Progress,
-                detail    = @Detail,
-                total     = COALESCE(@Total,     total),
-                completed = COALESCE(@Completed, completed),
-                failed    = COALESCE(@Failed,    failed),
-                skipped   = COALESCE(@Skipped,   skipped),
+                stage           = @Stage,
+                progress        = @Progress,
+                stage_progress  = @StageProgress,
+                detail          = @Detail,
+                stage_total     = @StageTotal,
+                stage_completed = @StageCompleted,
+                stage_failed    = @StageFailed,
+                stage_skipped   = @StageSkipped,
+                total           = @Total,
+                completed       = @Completed,
+                failed          = @Failed,
+                skipped         = @Skipped,
                 updated_at= now()
             WHERE job_id=@JobId
             """;
         await using var conn = await _pg.OpenAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(sql, new {
             JobId = jobId, Stage = stage, Progress = progress, Detail = detail,
+            StageProgress = stageProgress,
+            StageTotal = stageTotal, StageCompleted = stageCompleted, StageFailed = stageFailed, StageSkipped = stageSkipped,
             Total = total, Completed = completed, Failed = failed, Skipped = skipped,
         }, cancellationToken: ct));
     }

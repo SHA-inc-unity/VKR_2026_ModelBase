@@ -8,16 +8,21 @@ namespace DataService.API.Markets;
 public sealed class BinanceApiClient : IMarketDataClient
 {
     private const string BaseUrl = "https://fapi.binance.com";
+    private static readonly TimeSpan OpenInterestRetention = TimeSpan.FromDays(31);
+    private const int KlineThrottleUnits = 10;
+    private const int AuxiliaryThrottleUnits = 3;
 
     private readonly HttpClient _http;
     private readonly ILogger<BinanceApiClient> _log;
+    private readonly BinanceRateLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, (long LaunchMs, long FundingMs)> _instrumentCache = new();
 
     public string Exchange => "binance";
 
-    public BinanceApiClient(HttpClient http, ILogger<BinanceApiClient> log)
+    public BinanceApiClient(HttpClient http, BinanceRateLimiter rateLimiter, ILogger<BinanceApiClient> log)
     {
         _http = http;
+        _rateLimiter = rateLimiter;
         _log = log;
     }
 
@@ -29,7 +34,7 @@ public sealed class BinanceApiClient : IMarketDataClient
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
         if (_instrumentCache.TryGetValue(normalizedSymbol, out var cached)) return cached;
 
-        using var doc = await GetJsonAsync($"{BaseUrl}/fapi/v1/exchangeInfo", ct);
+        using var doc = await GetJsonAsync($"{BaseUrl}/fapi/v1/exchangeInfo", AuxiliaryThrottleUnits, ct);
         if (doc.RootElement.TryGetProperty("symbols", out var symbols)
             && symbols.ValueKind == JsonValueKind.Array)
         {
@@ -86,7 +91,7 @@ public sealed class BinanceApiClient : IMarketDataClient
                 var url = $"{BaseUrl}/fapi/v1/klines"
                         + $"?symbol={Uri.EscapeDataString(symbol)}&interval={Uri.EscapeDataString(binanceInterval)}"
                         + $"&startTime={w.Start}&endTime={w.End}&limit=1500";
-                using var doc = await GetJsonAsync(url, ct);
+                using var doc = await GetJsonAsync(url, KlineThrottleUnits, ct);
                 var root = doc.RootElement;
                 var page = new List<(long, decimal, decimal, decimal, decimal, decimal, decimal)>(
                     root.ValueKind == JsonValueKind.Array ? root.GetArrayLength() : 0);
@@ -159,7 +164,7 @@ public sealed class BinanceApiClient : IMarketDataClient
             {
                 var url = $"{BaseUrl}/fapi/v1/fundingRate"
                         + $"?symbol={Uri.EscapeDataString(symbol)}&startTime={w.Start}&endTime={w.End}&limit=1000";
-                using var doc = await GetJsonAsync(url, ct);
+                using var doc = await GetJsonAsync(url, AuxiliaryThrottleUnits, ct);
                 var root = doc.RootElement;
                 var page = new List<(long, decimal)>(root.ValueKind == JsonValueKind.Array ? root.GetArrayLength() : 0);
                 if (root.ValueKind != JsonValueKind.Array) return page;
@@ -203,6 +208,28 @@ public sealed class BinanceApiClient : IMarketDataClient
         if (intervalMs <= 0) throw new ArgumentException("intervalMs must be positive", nameof(intervalMs));
 
         var period = ToBinanceOpenInterestPeriod(intervalLabel, intervalMs);
+        var (effectiveStartMs, effectiveEndMs, clipped) = ClampOpenInterestWindow(
+            startMs,
+            endMs,
+            intervalMs,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        if (effectiveEndMs < effectiveStartMs)
+        {
+            _log.LogInformation(
+                "Binance open interest outside latest-month retention for {Symbol}/{Period}; requested {Start}..{End}",
+                symbol, period, startMs, endMs);
+            return Array.Empty<(long, decimal)>();
+        }
+
+        if (clipped)
+        {
+            _log.LogInformation(
+                "Binance open interest clipped to latest-month aligned window for {Symbol}/{Period}: {Start}..{End} -> {EffectiveStart}..{EffectiveEnd}",
+                symbol, period, startMs, endMs, effectiveStartMs, effectiveEndMs);
+        }
+
+        startMs = effectiveStartMs;
+        endMs = effectiveEndMs;
         var windowSpan = 500L * intervalMs;
         var windows = new List<(long Start, long End)>();
         for (long windowStart = startMs; windowStart <= endMs; windowStart += windowSpan)
@@ -222,7 +249,7 @@ public sealed class BinanceApiClient : IMarketDataClient
                 var url = $"{BaseUrl}/futures/data/openInterestHist"
                         + $"?symbol={Uri.EscapeDataString(symbol)}&period={Uri.EscapeDataString(period)}"
                         + $"&startTime={w.Start}&endTime={w.End}&limit=500";
-                using var doc = await GetJsonAsync(url, ct);
+                using var doc = await GetJsonAsync(url, AuxiliaryThrottleUnits, ct);
                 var root = doc.RootElement;
                 var page = new List<(long, decimal)>(root.ValueKind == JsonValueKind.Array ? root.GetArrayLength() : 0);
                 if (root.ValueKind != JsonValueKind.Array) return page;
@@ -261,29 +288,56 @@ public sealed class BinanceApiClient : IMarketDataClient
             .ToList();
     }
 
-    private async Task<JsonDocument> GetJsonAsync(string url, CancellationToken ct)
+    private async Task<JsonDocument> GetJsonAsync(string url, int throttleUnits, CancellationToken ct)
     {
         Exception? last = null;
         for (int attempt = 0; attempt < DatasetConstants.MaxRetries; attempt++)
         {
             HttpResponseMessage? response = null;
+            IDisposable? lease = null;
             try
             {
+                lease = await _rateLimiter.AcquireAsync(throttleUnits, ct);
                 response = await _http.GetAsync(url, HttpCompletionOption.ResponseContentRead, ct);
-                if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
+                var body = await response.Content.ReadAsStringAsync(ct);
+                lease.Dispose();
+                lease = null;
+
+                var statusCode = (int)response.StatusCode;
+                if (statusCode == 418 || statusCode == 429)
                 {
-                    last = new HttpRequestException($"HTTP {(int)response.StatusCode}");
-                    var wait = TimeSpan.FromSeconds(Math.Pow(2, attempt) + Random.Shared.NextDouble());
-                    _log.LogWarning("Binance HTTP {Code} on GET {Url} (attempt {Attempt}/{Max}); wait {Wait:F1}s",
-                        (int)response.StatusCode, url, attempt + 1, DatasetConstants.MaxRetries, wait.TotalSeconds);
+                    last = new HttpRequestException($"HTTP {statusCode}");
+                    var wait = GetRetryDelay(response, attempt);
+                    _rateLimiter.Penalize(wait);
+                    _log.LogWarning(
+                        "Binance HTTP {Code} on GET {Url} (attempt {Attempt}/{Max}); retry after {Wait:F1}s; body={Body}",
+                        statusCode, url, attempt + 1, DatasetConstants.MaxRetries, wait.TotalSeconds, SummarizeBody(body));
                     response.Dispose();
                     response = null;
                     await Task.Delay(wait, ct);
                     continue;
                 }
 
-                response.EnsureSuccessStatusCode();
-                return JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                if (statusCode >= 500)
+                {
+                    last = new HttpRequestException($"HTTP {statusCode}");
+                    var wait = TimeSpan.FromSeconds(Math.Pow(2, attempt) + Random.Shared.NextDouble());
+                    _log.LogWarning(
+                        "Binance HTTP {Code} on GET {Url} (attempt {Attempt}/{Max}); wait {Wait:F1}s",
+                        statusCode, url, attempt + 1, DatasetConstants.MaxRetries, wait.TotalSeconds);
+                    response.Dispose();
+                    response = null;
+                    await Task.Delay(wait, ct);
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new InvalidOperationException(
+                        $"Binance rejected GET {url} with HTTP {statusCode}: {SummarizeBody(body)}");
+                }
+
+                return JsonDocument.Parse(body);
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
             {
@@ -299,6 +353,7 @@ public sealed class BinanceApiClient : IMarketDataClient
             }
             finally
             {
+                lease?.Dispose();
                 response?.Dispose();
             }
         }
@@ -314,6 +369,55 @@ public sealed class BinanceApiClient : IMarketDataClient
         IOException { InnerException: System.Net.Sockets.SocketException } => true,
         _ => false,
     };
+
+    private static (long EffectiveStartMs, long EffectiveEndMs, bool Clipped) ClampOpenInterestWindow(
+        long requestedStartMs,
+        long requestedEndMs,
+        long intervalMs,
+        long nowMs)
+    {
+        var availableStartMs = Math.Max(0L, nowMs - (long)OpenInterestRetention.TotalMilliseconds);
+        var effectiveStartMs = AlignUp(Math.Max(requestedStartMs, availableStartMs), intervalMs);
+        var effectiveEndMs = AlignDown(Math.Min(requestedEndMs, nowMs), intervalMs);
+        return (effectiveStartMs, effectiveEndMs,
+            effectiveStartMs != requestedStartMs || effectiveEndMs != requestedEndMs);
+    }
+
+    private static long AlignDown(long value, long stepMs)
+    {
+        if (stepMs <= 0) return value;
+        return value - value % stepMs;
+    }
+
+    private static long AlignUp(long value, long stepMs)
+    {
+        if (stepMs <= 0) return value;
+        var remainder = value % stepMs;
+        return remainder == 0 ? value : value + (stepMs - remainder);
+    }
+
+    private static TimeSpan GetRetryDelay(HttpResponseMessage response, int attempt)
+    {
+        if (response.Headers.TryGetValues("Retry-After", out var values))
+        {
+            foreach (var value in values)
+            {
+                if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds > 0)
+                {
+                    return TimeSpan.FromSeconds(seconds);
+                }
+            }
+        }
+
+        return TimeSpan.FromSeconds(Math.Pow(2, attempt) + Random.Shared.NextDouble());
+    }
+
+    private static string SummarizeBody(string body)
+    {
+        var normalized = string.IsNullOrWhiteSpace(body) ? string.Empty : body.Trim();
+        if (normalized.Length <= 240) return normalized;
+        return normalized[..240];
+    }
 
     private static decimal? TryDec(in JsonElement e)
     {

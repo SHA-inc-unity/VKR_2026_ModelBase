@@ -293,14 +293,27 @@ public sealed class DatasetJobRunner : BackgroundService
         string? errorCode, string? errorMessage, CancellationToken ct) =>
         _producer.PublishEventAsync(Topics.EvtDataDatasetJobCompleted, new
         {
-            job_id           = job.JobId,
-            type             = job.Type,
+            job_id            = job.JobId,
+            type              = job.Type,
             status,
-            target_table     = job.TargetTable,
-            target_timeframe = job.TargetTimeframe,
-            completed        = job.Completed,   // rows written — lets the UI show row counts
-            error_code       = errorCode,
-            error_message    = errorMessage,
-            ts               = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            target_table      = job.TargetTable,
+            target_timeframe  = job.TargetTimeframe,
+            stage             = job.Stage,
+            progress          = job.Progress,
+            overall_progress  = job.Progress,
+            stage_progress    = job.StageProgress,
+            detail            = job.Detail,
+            stage_total       = job.StageTotal,
+            stage_completed   = job.StageCompleted,
+            stage_failed      = job.StageFailed,
+            stage_skipped     = job.StageSkipped,
+            total             = job.Total,
+            completed         = job.Completed,
+            failed            = job.Failed,
+            skipped           = job.Skipped,
+            error_code        = errorCode,
+            error_message     = errorMessage,
+            finished_at       = job.FinishedAt?.ToUniversalTime().ToString("O"),
+            ts                = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         }, ct);
 }
