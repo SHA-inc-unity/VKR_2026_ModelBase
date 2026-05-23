@@ -1,0 +1,309 @@
+using GatewayService.API.DTOs.Requests;
+using GatewayService.API.DTOs.Responses;
+using GatewayService.API.Settings;
+using Microsoft.Extensions.Options;
+
+namespace GatewayService.API.Frontend;
+
+public sealed class FrontendContractState : IFrontendContractState
+{
+    private static readonly AvailableExchangeDto[] ExchangeCatalog =
+    [
+        new() { Id = "binance", Name = "Binance", Slug = "binance", IsActive = true },
+        new() { Id = "bybit", Name = "Bybit", Slug = "bybit", IsActive = true },
+        new() { Id = "kraken", Name = "Kraken", Slug = "kraken", IsActive = true },
+    ];
+
+    private readonly object _gate = new();
+    private readonly Dictionary<string, Dictionary<string, LinkedExchangeDto>> _linkedByUser =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Dictionary<string, PriceAlertDto>> _alertsByUser =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private ServiceTogglesDto _serviceToggles;
+
+    public FrontendContractState(IOptions<FeatureFlagsSettings> featureFlags)
+    {
+        var flags = featureFlags.Value;
+        _serviceToggles = new ServiceTogglesDto
+        {
+            News = flags.News,
+            Alerts = flags.Notifications,
+            PortfolioSync = flags.Portfolio,
+            MarketOverview = flags.Market,
+        };
+    }
+
+    public PortfolioSummaryDto GetDashboardPortfolioSummary(string userId)
+    {
+        var summary = GetPortfolioSummary(userId);
+        return new PortfolioSummaryDto
+        {
+            TotalValueUsd = summary.TotalValue,
+            PnlPercent24h = summary.TotalPnlPercent,
+            AssetCount = summary.AssetCount,
+        };
+    }
+
+    public PortfolioDetailedSummaryResponse GetPortfolioSummary(string userId)
+    {
+        lock (_gate)
+        {
+            var linked = GetLinkedUnsafe(userId);
+            var byExchange = linked
+                .Select(item => new PortfolioExchangeSummaryDto
+                {
+                    Exchange = item.Name,
+                    TotalValue = item.CachedBalance,
+                    Change24h = 0,
+                    IsSynced = false,
+                    LastSyncedAt = item.LinkedAt,
+                    Holdings = [],
+                })
+                .ToArray();
+
+            return new PortfolioDetailedSummaryResponse
+            {
+                TotalValue = byExchange.Sum(item => item.TotalValue),
+                TotalPnl = 0,
+                TotalPnlPercent = 0,
+                AssetCount = 0,
+                ExchangeCount = byExchange.Length,
+                ByAsset = [],
+                ByExchange = byExchange,
+            };
+        }
+    }
+
+    public IReadOnlyList<AvailableExchangeDto> GetAvailableExchanges(string userId)
+    {
+        lock (_gate)
+        {
+            var connected = GetLinkedUnsafe(userId)
+                .Select(item => item.Slug)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return ExchangeCatalog
+                .Select(item => item with { IsConnected = connected.Contains(item.Slug) })
+                .ToArray();
+        }
+    }
+
+    public IReadOnlyList<LinkedExchangeDto> GetLinkedExchanges(string userId)
+    {
+        lock (_gate)
+        {
+            return GetLinkedUnsafe(userId).ToArray();
+        }
+    }
+
+    public LinkedExchangeDto? LinkExchange(string userId, LinkExchangeRequest request)
+    {
+        var slug = NormalizeSlug(request.Slug);
+        var catalogEntry = ExchangeCatalog.FirstOrDefault(item => string.Equals(item.Slug, slug, StringComparison.OrdinalIgnoreCase));
+        if (catalogEntry is null)
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            var userLinks = GetOrCreate(_linkedByUser, userId);
+            var linked = new LinkedExchangeDto
+            {
+                Name = catalogEntry.Name,
+                Slug = catalogEntry.Slug,
+                MaskedKey = MaskKey(request.ApiKey),
+                CachedBalance = 0,
+                IsActive = true,
+                LinkedAt = DateTimeOffset.UtcNow,
+            };
+
+            userLinks[slug] = linked;
+            return linked;
+        }
+    }
+
+    public LinkedExchangeDto? UpdateExchange(string userId, string slug, UpdateExchangeLinkRequest request)
+    {
+        slug = NormalizeSlug(slug);
+        lock (_gate)
+        {
+            if (!_linkedByUser.TryGetValue(userId, out var userLinks)
+                || !userLinks.TryGetValue(slug, out var linked))
+            {
+                return null;
+            }
+
+            linked = linked with
+            {
+                MaskedKey = string.IsNullOrWhiteSpace(request.ApiKey) ? linked.MaskedKey : MaskKey(request.ApiKey),
+                IsActive = request.IsActive ?? linked.IsActive,
+            };
+
+            userLinks[slug] = linked;
+            return linked;
+        }
+    }
+
+    public bool DeleteExchange(string userId, string slug)
+    {
+        slug = NormalizeSlug(slug);
+        lock (_gate)
+        {
+            return _linkedByUser.TryGetValue(userId, out var userLinks)
+                && userLinks.Remove(slug);
+        }
+    }
+
+    public IReadOnlyList<PriceAlertDto> GetAlerts(string userId)
+    {
+        lock (_gate)
+        {
+            if (!_alertsByUser.TryGetValue(userId, out var alerts))
+            {
+                return [];
+            }
+
+            return alerts.Values
+                .OrderByDescending(item => item.CreatedAt)
+                .ToArray();
+        }
+    }
+
+    public PriceAlertDto CreateAlert(string userId, CreateAlertRequest request)
+    {
+        lock (_gate)
+        {
+            var alerts = GetOrCreate(_alertsByUser, userId);
+            var alert = new PriceAlertDto
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Symbol = request.Symbol.Trim().ToUpperInvariant(),
+                Condition = request.Condition.Trim().ToLowerInvariant(),
+                TargetPrice = request.TargetPrice,
+                IsEnabled = request.IsEnabled,
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
+
+            alerts[alert.Id] = alert;
+            return alert;
+        }
+    }
+
+    public PriceAlertDto? UpdateAlert(string userId, string id, UpdateAlertRequest request)
+    {
+        lock (_gate)
+        {
+            if (!_alertsByUser.TryGetValue(userId, out var alerts)
+                || !alerts.TryGetValue(id, out var alert))
+            {
+                return null;
+            }
+
+            alert = alert with
+            {
+                Symbol = string.IsNullOrWhiteSpace(request.Symbol) ? alert.Symbol : request.Symbol.Trim().ToUpperInvariant(),
+                Condition = string.IsNullOrWhiteSpace(request.Condition) ? alert.Condition : request.Condition.Trim().ToLowerInvariant(),
+                TargetPrice = request.TargetPrice ?? alert.TargetPrice,
+                IsEnabled = request.IsEnabled ?? alert.IsEnabled,
+            };
+
+            alerts[id] = alert;
+            return alert;
+        }
+    }
+
+    public bool DeleteAlert(string userId, string id)
+    {
+        lock (_gate)
+        {
+            return _alertsByUser.TryGetValue(userId, out var alerts)
+                && alerts.Remove(id);
+        }
+    }
+
+    public ServiceTogglesDto GetServiceToggles()
+    {
+        lock (_gate)
+        {
+            return _serviceToggles;
+        }
+    }
+
+    public ServiceTogglesDto UpdateServiceToggles(PatchServiceTogglesRequest request)
+    {
+        lock (_gate)
+        {
+            _serviceToggles = _serviceToggles with
+            {
+                News = request.News ?? _serviceToggles.News,
+                Alerts = request.Alerts ?? _serviceToggles.Alerts,
+                PortfolioSync = request.PortfolioSync ?? _serviceToggles.PortfolioSync,
+                MarketOverview = request.MarketOverview ?? _serviceToggles.MarketOverview,
+            };
+
+            return _serviceToggles;
+        }
+    }
+
+    public FrontendAdminSnapshot GetAdminSnapshot()
+    {
+        lock (_gate)
+        {
+            var userKeys = _linkedByUser.Keys
+                .Union(_alertsByUser.Keys, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return new FrontendAdminSnapshot(
+                UsersCount: userKeys.Length,
+                LinkedExchangesCount: _linkedByUser.Values.Sum(item => item.Count),
+                AlertsCount: _alertsByUser.Values.Sum(item => item.Count),
+                AvailableExchangesCount: ExchangeCatalog.Length,
+                ServiceToggles: _serviceToggles);
+        }
+    }
+
+    private static Dictionary<string, TValue> GetOrCreate<TValue>(
+        Dictionary<string, Dictionary<string, TValue>> source,
+        string userId)
+    {
+        if (!source.TryGetValue(userId, out var value))
+        {
+            value = new Dictionary<string, TValue>(StringComparer.OrdinalIgnoreCase);
+            source[userId] = value;
+        }
+
+        return value;
+    }
+
+    private List<LinkedExchangeDto> GetLinkedUnsafe(string userId)
+    {
+        if (!_linkedByUser.TryGetValue(userId, out var userLinks))
+        {
+            return [];
+        }
+
+        return userLinks.Values
+            .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string NormalizeSlug(string slug) => slug.Trim().ToLowerInvariant();
+
+    private static string MaskKey(string rawKey)
+    {
+        var value = rawKey.Trim();
+        if (value.Length <= 4)
+        {
+            return "****";
+        }
+
+        if (value.Length <= 8)
+        {
+            return $"{value[..2]}****{value[^2..]}";
+        }
+
+        return $"{value[..4]}****{value[^4..]}";
+    }
+}

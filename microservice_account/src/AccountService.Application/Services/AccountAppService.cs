@@ -80,7 +80,10 @@ public sealed class AccountAppService : IAccountService
         string? userAgent = null,
         CancellationToken ct = default)
     {
-        var user = await _userRepo.GetByEmailOrUsernameAsync(request.Email, ct);
+        var identifier = request.Identifier?.Trim();
+        var user = string.IsNullOrWhiteSpace(identifier)
+            ? null
+            : await _userRepo.GetByEmailOrUsernameAsync(identifier, ct);
 
         if (user is null || !_passwordService.Verify(request.Password, user.PasswordHash))
         {
@@ -255,6 +258,8 @@ public sealed class AccountAppService : IAccountService
             AccessTokenExpiresAt: DateTimeOffset.UtcNow.Add(_tokenService.AccessTokenExpiration),
             RefreshTokenExpiresAt: tokenRecord.ExpiresAt,
             Uid: user.Id,
+            Id: user.Id,
+            Email: user.Email,
             AccountType: ResolveAccountType(roles),
             Roles: roles,
             User: ToProfileResponse(user, roles)

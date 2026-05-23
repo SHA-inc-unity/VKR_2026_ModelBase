@@ -12,7 +12,7 @@ public sealed class NotificationsServiceClient : INotificationsServiceClient
 
     public Task<ServiceResult<IReadOnlyList<NotificationDto>>> GetForUserAsync(string userId, int limit = 50, CancellationToken ct = default)
     {
-        _logger.LogDebug("Notifications service is not yet available; returning stub failure");
-        return Task.FromResult(ServiceResult<IReadOnlyList<NotificationDto>>.Fail("Notifications service not yet implemented"));
+        _logger.LogDebug("Notifications service fallback is active; returning an empty gateway-local inbox for {UserId}", userId);
+        return Task.FromResult(ServiceResult<IReadOnlyList<NotificationDto>>.Ok(Array.Empty<NotificationDto>()));
     }
 }

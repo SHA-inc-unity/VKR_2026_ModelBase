@@ -1,4 +1,6 @@
+using GatewayService.API.Clients.Market;
 using GatewayService.API.DTOs;
+using GatewayService.API.DTOs.Responses;
 using GatewayService.API.Market;
 using GatewayService.API.Middleware;
 using Microsoft.AspNetCore.Mvc;
@@ -18,11 +20,16 @@ namespace GatewayService.API.Controllers;
 [Route("api/v1/market")]
 public sealed class MarketController : ControllerBase
 {
+    private readonly IMarketServiceClient _market;
     private readonly IMarketConfigService _marketConfig;
     private readonly IChartService        _chart;
 
-    public MarketController(IMarketConfigService marketConfig, IChartService chart)
+    public MarketController(
+        IMarketServiceClient market,
+        IMarketConfigService marketConfig,
+        IChartService chart)
     {
+        _market = market;
         _marketConfig = marketConfig;
         _chart        = chart;
     }
@@ -44,6 +51,58 @@ public sealed class MarketController : ControllerBase
         // Stale-while-revalidate: config changes at most every hour.
         Response.Headers["Cache-Control"] = "public, max-age=60, stale-while-revalidate=3540";
         return Ok(response);
+    }
+
+    [HttpGet("overview")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetOverview(CancellationToken ct)
+    {
+        var configTask = _marketConfig.GetConfigAsync(ct);
+        var overviewTask = _market.GetOverviewAsync(ct);
+        var trendingTask = _market.GetTrendingAsync(5, ct);
+
+        await Task.WhenAll(configTask, overviewTask, trendingTask);
+
+        var config = await configTask;
+        var degraded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var overviewResult = await overviewTask;
+        var overview = overviewResult.IsSuccess && overviewResult.Value is not null
+            ? overviewResult.Value
+            : null;
+        if (overview is null)
+        {
+            degraded.Add("marketOverview");
+        }
+
+        var trendingResult = await trendingTask;
+        var trendingAssets = trendingResult.IsSuccess && trendingResult.Value is not null
+            ? trendingResult.Value.Select(item => item.Symbol).Where(item => !string.IsNullOrWhiteSpace(item)).ToArray()
+            : config.Symbols.Take(5).ToArray();
+        if (!trendingResult.IsSuccess)
+        {
+            degraded.Add("trendingAssets");
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=120";
+        return Ok(new PublicMarketOverviewResponse
+        {
+            MarketOverview = new PublicMarketOverviewDto
+            {
+                TotalMarketCap = overview?.TotalMarketCapUsd ?? 0,
+                BtcDominance = overview?.BtcDominance ?? 0,
+                Volume24h = overview?.Volume24hUsd ?? 0,
+                ActiveAssets = config.Symbols.Count,
+                FearGreedValue = 0,
+                FearGreedLabel = "Neutral",
+            },
+            TrendingAssets = trendingAssets,
+            Meta = new FrontendResponseMetaDto
+            {
+                GeneratedAt = DateTimeOffset.UtcNow,
+                DegradedSections = degraded.ToArray(),
+            }
+        });
     }
 
     /// <summary>

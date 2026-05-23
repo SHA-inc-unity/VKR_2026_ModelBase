@@ -6,6 +6,8 @@ public sealed record AuthResponse(
     DateTimeOffset AccessTokenExpiresAt,
     DateTimeOffset RefreshTokenExpiresAt,
     Guid Uid,
+    Guid Id,
+    string Email,
     string AccountType,
     IReadOnlyList<string> Roles,
     UserProfileResponse User

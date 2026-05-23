@@ -62,14 +62,14 @@ microservice_account/
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | POST | `/api/account/register` | Register new user |
-| POST | `/api/account/login` | Login by email or username, receive tokens |
+| POST | `/api/account/login` | Login by `email` or `login` (username), receive tokens |
 | POST | `/api/account/refresh` | Refresh access token |
-| POST | `/api/account/logout` | Revoke refresh token |
 
 ### Protected (Bearer JWT)
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
+| POST | `/api/account/logout` | Revoke refresh token for the current authenticated user |
 | GET | `/api/account/me` | Current user profile |
 | PUT | `/api/account/profile` | Update username |
 | GET | `/api/account/settings` | Get user settings |
@@ -79,16 +79,40 @@ Auth responses return tokens plus identity metadata:
 
 ```json
 {
-  "uid": "9ab711df-2390-4364-841b-3269dc8f2c2a",
-  "accountType": "user",
-  "roles": ["user"],
   "accessToken": "...",
   "refreshToken": "...",
-  "user": { "id": "9ab711df-2390-4364-841b-3269dc8f2c2a" }
+  "accessTokenExpiresAt": "2026-05-23T12:15:00Z",
+  "refreshTokenExpiresAt": "2026-06-22T12:00:00Z",
+  "uid": "9ab711df-2390-4364-841b-3269dc8f2c2a",
+  "id": "9ab711df-2390-4364-841b-3269dc8f2c2a",
+  "email": "user@example.com",
+  "accountType": "user",
+  "roles": ["user"],
+  "user": {
+    "id": "9ab711df-2390-4364-841b-3269dc8f2c2a",
+    "email": "user@example.com",
+    "username": "trader01",
+    "status": "active",
+    "roles": ["user"],
+    "createdAt": "2026-05-01T12:00:00Z",
+    "updatedAt": "2026-05-01T12:00:00Z"
+  }
 }
 ```
 
-`uid` is public identity metadata. Backend services must derive the current user/admin from a validated JWT, not from a client-supplied UID.
+`uid` and `id` are public identity metadata aliases. Backend services must derive the current user/admin from a validated JWT, not from a client-supplied UID.
+
+`POST /api/account/login` accepts either of these minimal payloads:
+
+```json
+{ "email": "user@example.com", "password": "Password1" }
+```
+
+```json
+{ "login": "admin", "password": "admin" }
+```
+
+Gateway `POST /api/account/{register,login,refresh,logout}` routes proxy the same request/response shape when clients prefer a single gateway base URL.
 
 ### Internal (X-Internal-Api-Key header)
 

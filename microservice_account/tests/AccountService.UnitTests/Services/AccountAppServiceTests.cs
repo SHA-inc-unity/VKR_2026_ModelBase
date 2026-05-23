@@ -63,6 +63,8 @@ public sealed class AccountAppServiceTests
 
         result.AccessToken.Should().Be("access-token");
         result.RefreshToken.Should().Be("raw-token");
+        result.Id.Should().Be(result.Uid);
+        result.Email.Should().Be("test@test.com");
         result.User.Email.Should().Be("test@test.com");
     }
 
@@ -96,10 +98,12 @@ public sealed class AccountAppServiceTests
         _passwordService.Setup(p => p.Verify("admin", "hashed")).Returns(true);
         _roleRepo.Setup(r => r.GetUserRoleCodesAsync(user.Id, default)).ReturnsAsync(["admin"]);
 
-        var result = await _sut.LoginAsync(new LoginRequest("admin", "admin"));
+        var result = await _sut.LoginAsync(new LoginRequest(null, "admin", "admin"));
 
         result.AccessToken.Should().Be("access-token");
         result.RefreshToken.Should().Be("raw-token");
+        result.Id.Should().Be(result.Uid);
+        result.Email.Should().Be("admin@modelline.local");
         result.User.Username.Should().Be("admin");
         result.Roles.Should().Contain("admin");
     }
@@ -111,7 +115,7 @@ public sealed class AccountAppServiceTests
         _userRepo.Setup(r => r.GetByEmailOrUsernameAsync("test@test.com", default)).ReturnsAsync(user);
         _passwordService.Setup(p => p.Verify("wrongpass", "hashed")).Returns(false);
 
-        var request = new LoginRequest("test@test.com", "wrongpass");
+        var request = new LoginRequest("test@test.com", null, "wrongpass");
         var act = async () => await _sut.LoginAsync(request);
 
         await act.Should().ThrowAsync<InvalidCredentialsException>();
@@ -122,7 +126,7 @@ public sealed class AccountAppServiceTests
     {
         _userRepo.Setup(r => r.GetByEmailOrUsernameAsync(It.IsAny<string>(), default)).ReturnsAsync((User?)null);
 
-        var request = new LoginRequest("nouser@test.com", "pass");
+        var request = new LoginRequest("nouser@test.com", null, "pass");
         var act = async () => await _sut.LoginAsync(request);
 
         await act.Should().ThrowAsync<InvalidCredentialsException>();

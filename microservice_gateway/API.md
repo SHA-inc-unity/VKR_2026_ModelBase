@@ -21,7 +21,7 @@
 
 Что не входит в scope:
 
-- login / refresh / register контракты `microservice_account`;
+- внутренние детали реализации `microservice_account` вне gateway proxy; для `POST /api/account/{register,login,refresh,logout}` этот документ фиксирует только wire-compatible HTTP contract gateway;
 - внутренние Kafka-контракты между сервисами;
 - shape успешных downstream payload-ов за `/api/admin/*` глубже gateway-level HTTP semantics: gateway там прозрачно проксирует JSON владельца сервиса;
 - root-level deployment scripts;
@@ -45,12 +45,12 @@
 
 ## Integration Checklist
 
-1. Получить access token во внешнем auth-flow account-сервиса.
+1. Получить access token через `POST /api/account/login` на gateway или напрямую у account-сервиса.
 2. На старте приложения вызвать `GET /api/app/bootstrap`.
 3. Для market-экрана сначала вызвать `GET /api/v1/market/config`.
 4. Строить запросы `GET /api/v1/market/chart` только значениями из `/api/v1/market/config`.
 5. Для защищённых endpoint-ов передавать `Authorization: Bearer <accessToken>`.
-6. Не трактовать каждый `200` как «данные полные и готовы»: `dashboard`, `news`, `notifications`, `market/chart` поддерживают degraded/pending состояния внутри тела ответа.
+6. Не трактовать каждый `200` как «данные полные и готовы»: `dashboard`, `market/chart` и часть lightweight frontend routes могут возвращать fallback/in-memory payload, а не durable downstream truth.
 7. Если интеграция идёт из `microservice_admin`, использовать только `POST /api/admin/*` с `Authorization: Bearer <admin JWT>`; JWT должен быть выпущен Account Service для login-only пользователя с ролью `admin`. Успешный JSON gateway не нормализует, а возвращает как ответ владельца Kafka-команды.
 
 ---
@@ -143,6 +143,24 @@ Frontend должен различать эти сценарии.
 - `news` / `notifications`: `degraded = true`;
 - `market/chart`: `status = "partial"` или `status = "pending"`.
 
+### Gateway-local frontend state
+
+Часть mobile/BFF routes сейчас обслуживается самим gateway без отдельного durable owner-service:
+
+- `GET /api/portfolio/summary`;
+- `/api/exchanges/*`;
+- `/api/alerts/*`;
+- `/api/services/toggles`;
+- `GET /api/admin/{summary,users,services,statistics}`.
+
+Практические последствия:
+
+- данные живут в process-local памяти gateway;
+- state сбрасывается при restart контейнера;
+- при нескольких экземплярах gateway state не реплицируется между инстансами.
+
+Эти routes уже пригодны как стабильный frontend contract, но пока не являются shared persistent source of truth.
+
 ---
 
 ## Error Contract
@@ -221,12 +239,33 @@ UID в теле запроса не используется как источн
 | GET | `/health` | None | liveness probe |
 | GET | `/health/ready` | None | readiness probe (Kafka bootstrap included) |
 | GET | `/api/app/bootstrap` | Optional | старт приложения |
+| POST | `/api/account/register` | None | register через gateway auth proxy |
+| POST | `/api/account/login` | None | login через gateway auth proxy |
+| POST | `/api/account/refresh` | None | refresh через gateway auth proxy |
+| POST | `/api/account/logout` | Required | logout через gateway auth proxy |
 | GET | `/api/account/me` | Required | профиль текущего пользователя |
 | GET | `/api/dashboard` | Optional | главный экран с агрегированными данными; guest получает только public sections |
+| GET | `/api/v1/market/overview` | None | публичный home-screen overview |
 | GET | `/api/v1/market/config` | None | конфиг market UI |
 | GET | `/api/v1/market/chart` | None | свечной график |
+| GET | `/api/portfolio/summary` | Required | расширенная сводка портфеля |
+| GET | `/api/exchanges/available` | Required | каталог поддерживаемых бирж |
+| GET | `/api/exchanges/linked` | Required | связанные пользователем биржи |
+| POST | `/api/exchanges/link` | Required | создать/перепривязать linked exchange |
+| PATCH | `/api/exchanges/link/{slug}` | Required | обновить linked exchange |
+| DELETE | `/api/exchanges/link/{slug}` | Required | удалить linked exchange |
+| GET | `/api/alerts` | Required | список ценовых алертов |
+| POST | `/api/alerts` | Required | создать ценовой алерт |
+| PATCH | `/api/alerts/{id}` | Required | обновить ценовой алерт |
+| DELETE | `/api/alerts/{id}` | Required | удалить ценовой алерт |
+| GET | `/api/services/toggles` | Required | получить service toggles для settings UI |
+| PATCH | `/api/services/toggles` | Required | частично обновить service toggles |
 | GET | `/api/news` | None | лента новостей |
 | GET | `/api/notifications` | Required | уведомления пользователя |
+| GET | `/api/admin/summary` | Admin JWT | lightweight mobile-admin summary |
+| GET | `/api/admin/users` | Admin JWT | lightweight mobile-admin users view |
+| GET | `/api/admin/services` | Admin JWT | lightweight mobile-admin services view |
+| GET | `/api/admin/statistics` | Admin JWT | lightweight mobile-admin statistics |
 | POST | `/api/admin/health/*` | Admin JWT | backend facade для health-check команд admin |
 | POST | `/api/admin/dataset/*` | Admin JWT | backend facade для dataset/data-service команд |
 | POST | `/api/admin/market-watcher/*` | Admin JWT | backend facade для dedicated market watcher control-plane |
@@ -539,6 +578,73 @@ Authorization: Bearer <optional-access-token>
 
 ---
 
+## POST /api/account/{register,login,refresh,logout}
+
+### Account Auth Proxy: назначение
+
+Gateway публикует тот же auth-flow, что и `microservice_account`, но под своим public/mobile base URL.
+
+Это позволяет Flutter/Web клиенту работать только с gateway host и не держать отдельный account base URL.
+
+### Account Auth Proxy: routes
+
+| Method | Path | Auth | Назначение |
+| ------ | ---- | ---- | ---------- |
+| POST | `/api/account/register` | None | создать user-account |
+| POST | `/api/account/login` | None | login по `email` или `login` |
+| POST | `/api/account/refresh` | None | обновить access token по refresh token |
+| POST | `/api/account/logout` | Bearer JWT | отозвать refresh token и завершить сессию |
+
+### Account Auth Proxy: request notes
+
+- `register` принимает `{ email, username, password }`;
+- `login` принимает либо `{ email, password }`, либо `{ login, password }`;
+- `login` также пропускает optional `deviceId` и `deviceName`;
+- `refresh` и `logout` принимают `{ refreshToken }`.
+
+Пример login payload по username:
+
+```json
+{
+  "login": "admin",
+  "password": "admin",
+  "deviceName": "flutter-web"
+}
+```
+
+### Account Auth Proxy: success response example
+
+```json
+{
+  "accessToken": "...",
+  "refreshToken": "...",
+  "accessTokenExpiresAt": "2026-05-23T12:15:00Z",
+  "refreshTokenExpiresAt": "2026-06-22T12:00:00Z",
+  "uid": "9ab711df-2390-4364-841b-3269dc8f2c2a",
+  "id": "9ab711df-2390-4364-841b-3269dc8f2c2a",
+  "email": "user@example.com",
+  "accountType": "user",
+  "roles": ["user"],
+  "user": {
+    "id": "9ab711df-2390-4364-841b-3269dc8f2c2a",
+    "email": "user@example.com",
+    "username": "trader01",
+    "status": "active",
+    "roles": ["user"],
+    "createdAt": "2026-05-01T12:00:00Z",
+    "updatedAt": "2026-05-01T12:00:00Z"
+  }
+}
+```
+
+### Account Auth Proxy: error semantics
+
+- если Account Service reachable, gateway прозрачно возвращает downstream status code и JSON/body без переупаковки;
+- если proxy path сам не может достучаться до account-service, gateway возвращает structured `503 Service Unavailable`;
+- успешный `logout` через gateway возвращает `204 No Content`.
+
+---
+
 ## GET /api/account/me
 
 ### Account Me: назначение
@@ -675,12 +781,74 @@ GET /api/dashboard
 
 ### Dashboard: current implementation note
 
-На текущем этапе `portfolio`, `market` и `news` clients реализованы как stubs. Это значит, что frontend должен быть готов часто видеть degraded response даже при HTTP `200`. Для guest это не должно ломать экран: даже без токена `dashboard` должен возвращать доступные public sections, а не `401`.
+Текущая реализация уже не падает в degraded по умолчанию на каждой секции:
+
+- `marketOverview` и `trendingAssets` получают gateway-local fallback payload с нулевыми market metrics и трендовыми symbols из `/api/v1/market/config`;
+- `latestNews` сейчас возвращает пустую, но успешную ленту;
+- `portfolio` для аутентифицированного пользователя берётся из gateway-local frontend state и отражает только linked exchanges, созданные через `/api/exchanges/*`.
+
+Из-за этого `dashboard` чаще возвращает полноценный `200` без degraded sections, но данные части personal/settings surface остаются in-memory и сбрасываются после restart gateway.
 
 ### Dashboard: errors
 
 - отсутствие токена не считается ошибкой: это guest-mode;
 - `500` только при внутренней необработанной ошибке gateway.
+
+---
+
+## GET /api/v1/market/overview
+
+### Market Overview: назначение
+
+Публичный home-screen endpoint для краткого market summary без персональных данных.
+
+### Market Overview: how it works
+
+Gateway параллельно собирает:
+
+- symbols/config из `IMarketConfigService`;
+- market overview из `IMarketServiceClient`;
+- trending assets из `IMarketServiceClient`.
+
+Текущий fallback path intentionally стабилен:
+
+- `totalMarketCap`, `btcDominance`, `volume24h` пока приходят как `0`;
+- `fearGreedValue`/`fearGreedLabel` пока `0` / `Neutral`;
+- `trendingAssets` берутся из первых символов server-authoritative config.
+
+### Market Overview: request
+
+```http
+GET /api/v1/market/overview
+```
+
+Авторизация не требуется.
+
+### Market Overview: response example
+
+```json
+{
+  "marketOverview": {
+    "totalMarketCap": 0,
+    "btcDominance": 0,
+    "volume24h": 0,
+    "activeAssets": 3,
+    "fearGreedValue": 0,
+    "fearGreedLabel": "Neutral"
+  },
+  "trendingAssets": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  "meta": {
+    "generatedAt": "2026-05-23T12:00:00Z",
+    "degradedSections": []
+  }
+}
+```
+
+### Market Overview: frontend behavior
+
+- считать этот endpoint public source of truth для home screen overview;
+- быть готовым к placeholder metric values `0`/`Neutral`, пока у system нет richer market-summary downstream;
+- `meta.degradedSections` использовать только как warning, а не как hard-fail trigger.
 
 ---
 
@@ -926,6 +1094,84 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 
 ---
 
+## Gateway-local frontend contract routes
+
+### GET /api/portfolio/summary
+
+Возвращает расширенную сводку портфеля для authenticated user.
+
+Текущая реализация строится полностью внутри gateway по in-memory linked exchanges:
+
+- `totalValue` = сумма `cachedBalance` по linked exchanges;
+- `byAsset` пока пустой массив;
+- `byExchange` содержит по одной записи на linked exchange;
+- `isSynced` сейчас `false`, `change24h` пока `0`.
+
+Эти данные подходят для стабильного contract-shape, но не переживают restart gateway.
+
+### /api/exchanges/*
+
+| Method | Path | Поведение |
+| ------ | ---- | --------- |
+| GET | `/api/exchanges/available` | возвращает каталог `binance` / `bybit` / `kraken` с `isConnected` для текущего user |
+| GET | `/api/exchanges/linked` | возвращает linked exchanges текущего user |
+| POST | `/api/exchanges/link` | создаёт/перезаписывает linked exchange по `slug` |
+| PATCH | `/api/exchanges/link/{slug}` | обновляет `maskedKey` и/или `isActive` |
+| DELETE | `/api/exchanges/link/{slug}` | удаляет linked exchange, успешный ответ = `204 No Content` |
+
+Важные contract details:
+
+- request на создание принимает `{ slug, apiKey, apiSecret? }`;
+- ответ никогда не возвращает raw keys, только `maskedKey`;
+- `cachedBalance` сейчас gateway-local placeholder и по умолчанию `0`.
+
+### /api/alerts/*
+
+| Method | Path | Поведение |
+| ------ | ---- | --------- |
+| GET | `/api/alerts` | список алертов текущего user |
+| POST | `/api/alerts` | создаёт алерт |
+| PATCH | `/api/alerts/{id}` | частично обновляет алерт |
+| DELETE | `/api/alerts/{id}` | удаляет алерт, успешный ответ = `204 No Content` |
+
+Request shape для create:
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "condition": "above",
+  "targetPrice": 70000,
+  "isEnabled": true
+}
+```
+
+Runtime normalization:
+
+- `symbol` нормализуется в uppercase;
+- `condition` нормализуется в lowercase;
+- `id` генерируется gateway как строковый GUID без разделителей.
+
+### /api/services/toggles
+
+- `GET /api/services/toggles` возвращает `{ news, alerts, portfolioSync, marketOverview }`;
+- `PATCH /api/services/toggles` принимает partial body с любым подмножеством этих полей и возвращает обновлённый объект.
+
+Исходный state bootstrap-ится из `FeatureFlagsSettings`, дальше живёт только в memory текущего gateway instance.
+
+### GET /api/admin/{summary,users,services,statistics}
+
+Это lightweight mobile-admin surface под bearer JWT с ролью `admin`, отдельный от server-to-server facade `POST /api/admin/*`.
+
+Текущие ограничения:
+
+- `GET /api/admin/users` сейчас возвращает snapshot только вызывающего admin-user, а не полный user directory;
+- `GET /api/admin/services` строится из текущих service toggles;
+- `summary` и `statistics` считают linked exchanges/alerts/users только внутри in-memory gateway state.
+
+Использовать эти routes как mobile-facing contract можно уже сейчас, но не как cross-instance persistent admin truth.
+
+---
+
 ## GET /api/news
 
 ### News: назначение
@@ -959,7 +1205,7 @@ GET /api/news?limit=20
 {
   "items": [],
   "total": 0,
-  "degraded": true
+  "degraded": false
 }
 ```
 
@@ -973,7 +1219,7 @@ GET /api/news?limit=20
 
 ### News: current implementation note
 
-Текущий `NewsServiceClient` — stub. Поэтому frontend должен быть готов к `degraded = true` и пустому массиву даже при HTTP `200`.
+Текущий fallback path возвращает успешную пустую gateway-local ленту, поэтому типичный сценарий сейчас — `items = []`, `total = 0`, `degraded = false`. `degraded = true` остаётся только для реальной ошибки news client.
 
 ---
 
@@ -1009,7 +1255,7 @@ Authorization: Bearer <access-token>
 {
   "items": [],
   "unreadCount": 0,
-  "degraded": true
+  "degraded": false
 }
 ```
 
@@ -1034,7 +1280,7 @@ Authorization: Bearer <access-token>
 
 ### Notifications: current implementation note
 
-Текущий `NotificationsServiceClient` — stub. Поэтому `degraded = true` и пустой список — ожидаемый текущий сценарий.
+Текущий fallback path возвращает успешный пустой inbox для текущего user, поэтому обычный сценарий сейчас — `items = []`, `unreadCount = 0`, `degraded = false`. `degraded = true` остаётся только для реальной ошибки notifications client.
 
 ---
 

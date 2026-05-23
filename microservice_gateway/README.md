@@ -74,19 +74,26 @@ Flutter App
     ▼
 API Gateway  :7520 (host) -> :5020 (container)
     ├── GET /api/app/bootstrap    ← aggregates: Account (optional)
+    ├── POST /api/account/*       ← proxies:    Account Service (HTTP auth flow)
     ├── GET /api/account/me       ← proxies:    Account Service (via Kafka)
-  ├── GET /api/dashboard        ← aggregates: Guest → Market + News; User → Portfolio + Market + News
+    ├── GET /api/dashboard        ← aggregates: Guest → Market + News; User → Portfolio + Market + News
+    ├── GET /api/v1/market/overview ← public market overview (gateway-local fallback)
     ├── GET /api/v1/market/config ← Market config (symbols, timeframes, candle grids)
     ├── GET /api/v1/market/chart  ← OHLCV candles (Redis cached, Kafka ingest)
-    ├── GET /api/news             ← proxies:    News Service (stub)
-    └── GET /api/notifications    ← proxies:    Notifications Service (stub)
+    ├── GET /api/portfolio/summary ← gateway-local frontend contract state
+    ├── /api/exchanges/*, /api/alerts/*, /api/services/toggles
+    │                              ← gateway-local frontend contract state
+    ├── GET /api/news             ← gateway-local empty feed fallback
+    ├── GET /api/notifications    ← gateway-local empty inbox fallback
+    └── GET /api/admin/{summary,users,services,statistics}
+                                   ← lightweight mobile-admin surface (JWT admin)
     │
-    ├── Account Service        (Kafka: cmd.account.*)
+    ├── Account Service        (HTTP auth proxy + Kafka: cmd.account.*)
     ├── Market/Bybit           (HTTP: api.bybit.com, Redis cache, Kafka ingest)
-    ├── Portfolio Service      (stub — not yet implemented)
-    ├── News Service           (stub — not yet implemented)
-    └── Notifications          (stub — not yet implemented)
+    └── Frontend fallback state (in-memory, per gateway instance)
 ```
+
+Gateway now also exposes a lightweight frontend-contract layer for routes that do not yet have a dedicated owner service. These payloads are stable enough for mobile/web integration, but the state is process-local and resets on gateway restart.
 
 ---
 
@@ -95,12 +102,22 @@ API Gateway  :7520 (host) -> :5020 (container)
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | GET | `/api/app/bootstrap` | Optional | One-shot app init — user, feature flags, system status |
+| POST | `/api/account/register` | None | Register through the gateway auth proxy |
+| POST | `/api/account/login` | None | Login through the gateway auth proxy; accepts `email` or `login` |
+| POST | `/api/account/refresh` | None | Refresh tokens through the gateway auth proxy |
+| POST | `/api/account/logout` | Required | Logout through the gateway auth proxy |
 | GET | `/api/account/me` | Required | Current user profile |
 | GET | `/api/dashboard` | Optional | Aggregated main screen data; guest gets only public sections, user also gets personal sections |
+| GET | `/api/v1/market/overview` | None | Public market overview for the home screen |
 | GET | `/api/v1/market/config` | None | Symbols, timeframes, candle-count grids, defaults |
 | GET | `/api/v1/market/chart` | None | OHLCV candles — `?symbol=BTCUSDT&timeframe=5m&limit=200` |
+| GET | `/api/portfolio/summary` | Required | Detailed portfolio summary (gateway-local fallback state) |
+| GET/POST/PATCH/DELETE | `/api/exchanges/*` | Required | Available exchanges + linked exchanges CRUD |
+| GET/POST/PATCH/DELETE | `/api/alerts*` | Required | Price alerts CRUD |
+| GET/PATCH | `/api/services/toggles` | Required | Service toggles for settings UI |
 | GET | `/api/news` | None | Latest news items |
 | GET | `/api/notifications` | Required | User notifications |
+| GET | `/api/admin/{summary,users,services,statistics}` | Admin JWT | Lightweight mobile-admin surface |
 | GET | `/health` | None | Health check |
 | GET | `/health/ready` | None | Readiness check incl. Kafka bootstrap and reply inbox assignment; returns JSON diagnostics with per-check descriptions |
 | GET | `/swagger` | None (dev only) | Swagger UI |
@@ -125,8 +142,8 @@ Health flow:
 
 ## Authentication Flow
 
-1. Client calls `POST /api/account/login` on the Account Service (default host port `7510`) directly — or through the gateway `POST /api/account/login` if you add it.
-2. Account Service returns `{ accessToken, refreshToken }`.
+1. Client may call `POST /api/account/login` / `register` / `refresh` / `logout` on the gateway; these routes proxy the same JSON contract to Account Service.
+2. Account Service returns auth payload with tokens plus top-level `uid`, `id`, `email`, `accountType`, `roles`.
 3. Client passes `Authorization: Bearer <accessToken>` on all gateway requests.
 4. Gateway validates the JWT using the shared `SecretKey` (same as Account Service).
 5. Gateway extracts the `sub` / `nameid` claim from the already-validated JWT
@@ -160,6 +177,8 @@ The gateway **never returns 500 for downstream failures**. Instead:
 | `JWT_ISSUER` | No | `account-service` | JWT issuer claim; must match Account Service |
 | `JWT_AUDIENCE` | No | `exchange-app` | JWT audience claim; must match Account Service |
 | `KAFKA_BOOTSTRAP_SERVERS` | No | `redpanda:29092` | Kafka bootstrap (Redpanda) |
+| `ACCOUNT_SERVICE_URL` | No | `http://account-api:5000` | Base URL for gateway HTTP auth proxy routes |
+| `ACCOUNT_URL` | No | — | Legacy alias for `ACCOUNT_SERVICE_URL`; used if the primary variable is absent |
 | `Cors__AllowAnyOrigin` | No | `true` | Browser-facing CORS mode for gateway routes except `/api/admin/*`. `true` enables `AllowAnyOrigin`; set to `false` to use explicit origins from `Cors__AllowedOrigins__*`. |
 | `Cors__AllowedOrigins__0` ... | No | — | Explicit allowed origins when `Cors__AllowAnyOrigin=false`, e.g. `https://sha-trade.tech`, `https://www.sha-trade.tech`. |
 | `Cors__PreflightMaxAgeSeconds` | No | `600` | Browser preflight cache TTL for gateway CORS responses. |
@@ -261,10 +280,11 @@ API.md               — frontend-oriented HTTP contract reference
 src/
   GatewayService.API/
     Aggregators/         — BFF orchestration logic (Bootstrap, Dashboard)
-    Clients/             — Downstream clients (Account via Kafka; rest are stubs)
-    Controllers/         — Thin ASP.NET controllers
-    DTOs/                — Response contracts and ErrorResponse
+    Clients/             — Downstream clients (Account via Kafka + HTTP auth proxy, plus market/news/notifications/portfolio fallbacks)
+    Controllers/         — Thin ASP.NET controllers, including mobile BFF routes for account auth, portfolio, exchanges, alerts, toggles and mobile-admin summaries
+    DTOs/                — Response contracts, ErrorResponse and frontend contract request/response models
     Extensions/          — ServiceCollectionExtensions
+    Frontend/            — In-memory frontend contract state used by fallback mobile routes
     Kafka/               — KafkaSettings, Topics, KafkaRequestClient (request/reply)
     Market/              — Full market API: TimeframeMap, CandleCountGrid, MarketSettings,
                            ChartService, ChartRequestQueue (coalescing), MarketCacheService,
@@ -288,11 +308,13 @@ tests/
 ## QA Checklist
 
 - [ ] `GET /health` → 200
-- [ ] `GET /api/app/bootstrap` (no token) → 200, `user` is null, `degradedServices` is empty or has stub services
+- [ ] `GET /api/app/bootstrap` (no token) → 200, `user` is null, `degradedServices` is empty or contains only real downstream issues
 - [ ] `GET /api/app/bootstrap` (valid JWT) → 200, `user.email` populated
+- [ ] `POST /api/account/login` → 200, accepts `email` or `login`, returns top-level `uid`, `id`, `email`, `roles`
 - [ ] `GET /api/account/me` (no token) → 401 JSON with `status`, `title`, `timestamp`
 - [ ] `GET /api/dashboard` (no token) → 200 guest payload, `portfolio = null`, `meta.degradedSections` не содержит `portfolio`
-- [ ] `GET /api/news` → 200, `degraded: true` (stub), `items: []`
+- [ ] `GET /api/v1/market/overview` → 200 public payload with `marketOverview`, `trendingAssets`, `meta.generatedAt`
+- [ ] `GET /api/news` → 200, `degraded: false`, `items: []`
 - [ ] All responses contain `X-Correlation-Id` header
 - [ ] Swagger UI accessible at `/swagger` in Development
 

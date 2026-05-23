@@ -6,4 +6,5 @@ namespace GatewayService.API.Clients.Portfolio;
 public interface IPortfolioServiceClient
 {
     Task<ServiceResult<PortfolioSummaryDto>> GetSummaryAsync(string userId, CancellationToken ct = default);
+    Task<ServiceResult<PortfolioDetailedSummaryResponse>> GetDetailedSummaryAsync(string userId, CancellationToken ct = default);
 }

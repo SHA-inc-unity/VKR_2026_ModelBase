@@ -7,6 +7,7 @@ using GatewayService.API.Clients.Market;
 using GatewayService.API.Clients.News;
 using GatewayService.API.Clients.Notifications;
 using GatewayService.API.Clients.Portfolio;
+using GatewayService.API.Frontend;
 using GatewayService.API.Kafka;
 using GatewayService.API.Market;
 using GatewayService.API.Settings;
@@ -97,8 +98,14 @@ public static class ServiceCollectionExtensions
 
         // Account client — Kafka-backed (no HttpClient)
         services.AddScoped<IAccountServiceClient, AccountServiceClient>();
+        services.AddHttpClient<IAccountAuthProxyClient, AccountAuthProxyClient>(client =>
+            {
+                client.BaseAddress = BuildAccountServiceUri(configuration);
+                client.Timeout = TimeSpan.FromSeconds(15);
+            });
 
         // Stub clients — no HttpClient needed (no real HTTP calls yet)
+        services.AddSingleton<IFrontendContractState, FrontendContractState>();
         services.AddTransient<IPortfolioServiceClient, PortfolioServiceClient>();
         services.AddTransient<IMarketServiceClient, MarketServiceClient>();
         services.AddTransient<INewsServiceClient, NewsServiceClient>();
@@ -143,6 +150,26 @@ public static class ServiceCollectionExtensions
         services.AddControllers();
 
         return services;
+    }
+
+    private static Uri BuildAccountServiceUri(IConfiguration configuration)
+    {
+        var raw = configuration["ACCOUNT_SERVICE_URL"]
+            ?? configuration["ACCOUNT_URL"]
+            ?? "http://account-api:5000";
+
+        if (!raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            && !raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            raw = $"http://{raw}";
+        }
+
+        if (!raw.EndsWith('/'))
+        {
+            raw += "/";
+        }
+
+        return new Uri(raw, UriKind.Absolute);
     }
 
     public static IServiceCollection AddGatewaySwagger(this IServiceCollection services)

@@ -4,7 +4,7 @@
 
 Сервис аккаунтов и авторизации на .NET.
 
-Роли identity model: `guest`, `user`, `admin`. Public registration создаёт только `user`; login-only `admin` создаётся/promote-ится через bootstrap config, а при пустом `AdminBootstrap:*` сервис seed-ит дефолтного admin `admin/admin` (username/password, email `admin@modelline.local`). Startup migration на каждом запуске контейнера проверяет bootstrap-admin по username и при отсутствии создаёт/дочиняет эту запись. Если runtime пришёл к пустой application schema и в БД осталась только `__EFMigrationsHistory`, startup сначала восстанавливает core tables из текущей EF-модели и только потом продолжает bootstrap-admin flow. Login endpoint принимает email или username. Auth responses возвращают UID/accountType/roles, но UID не является auth proof.
+Роли identity model: `guest`, `user`, `admin`. Public registration создаёт только `user`; login-only `admin` создаётся/promote-ится через bootstrap config, а при пустом `AdminBootstrap:*` сервис seed-ит дефолтного admin `admin/admin` (username/password, email `admin@modelline.local`). Startup migration на каждом запуске контейнера проверяет bootstrap-admin по username и при отсутствии создаёт/дочиняет эту запись. Если runtime пришёл к пустой application schema и в БД осталась только `__EFMigrationsHistory`, startup сначала восстанавливает core tables из текущей EF-модели и только потом продолжает bootstrap-admin flow. Login endpoint принимает `email` или `login` (username), `logout` остаётся Bearer-protected, а auth responses возвращают top-level `uid`, `id`, `email`, `accountType`, `roles`; ни `uid`, ни `id` не являются auth proof.
 
 ## Что читать перед кодом
 

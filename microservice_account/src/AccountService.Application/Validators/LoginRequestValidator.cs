@@ -7,7 +7,7 @@ public sealed class LoginRequestValidator : AbstractValidator<LoginRequest>
 {
     public LoginRequestValidator()
     {
-        RuleFor(x => x.Email)
+        RuleFor(x => x.Identifier)
             .NotEmpty();
 
         RuleFor(x => x.Password)

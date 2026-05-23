@@ -38,9 +38,9 @@
 
 Слой use-case и прикладных сервисов.
 
-- `Services/` — account flow, password hashing, JWT/token management; `AccountAppService` возвращает UID/accountType/roles в auth response, публично регистрирует только роль `user` и принимает login по email или username
+- `Services/` — account flow, password hashing, JWT/token management; `AccountAppService` возвращает в auth response top-level `uid`, `id`, `email`, `accountType`, `roles`, публично регистрирует только роль `user` и принимает login по `email` или `login` (username)
 - `Interfaces/` — контракты репозиториев, сервисов и кеша
-- `DTOs/` — request/response модели
+- `DTOs/` — request/response модели; `LoginRequest` принимает alias-поля `email` и `login`, `AuthResponse` дублирует публичный идентификатор как `uid` и `id`
 - `Validators/` — FluentValidation-валидаторы
 - `Common/` — общие типы результата и ошибок
 
@@ -58,7 +58,7 @@
 HTTP и Kafka-входные точки.
 
 - `Program.cs` — bootstrap, DI, middleware pipeline
-- `Controllers/` — public и internal HTTP endpoints
+- `Controllers/` — public и protected HTTP endpoints; `login` принимает `email` или `login`, `logout` требует Bearer JWT, а `me/profile/settings` остаются user-scoped routes
 - `Extensions/` — регистрация сервисов и миграций; startup migration flow на каждом запуске контейнера проверяет наличие bootstrap-admin по username, может создать/promote login-only admin account через `AdminBootstrap:*`, а при полностью пустом bootstrap-конфиге поднимает дефолтного admin-пользователя `admin/admin`. Если runtime видит пустую application schema (есть только `__EFMigrationsHistory`), тот же flow теперь восстанавливает core tables из текущей EF-модели до bootstrap-seed; partial schema drift остаётся hard-fail
 - `Kafka/` — Kafka request/reply интеграция сервиса
 - `Middleware/` — global exception handling и cross-cutting concerns
