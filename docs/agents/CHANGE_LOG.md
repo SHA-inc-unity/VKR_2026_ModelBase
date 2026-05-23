@@ -4,7 +4,13 @@
 
 ## 2026-05
 
+### 2026-05-23
+
+- `microservice_data/src/DataService.API/{Settings/DataServiceSettings.cs,Jobs/MarketWatcherService.cs,appsettings.json}`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: по operator-request Kraken убран из default live watcher-а. Root cause текущего шума был не в stale UI, а в том, что default `MarketWatch.Exchanges` всё ещё включал `kraken`, поэтому после рестарта watcher стабильно выходил в `running + degraded` с `429 RateLimitRequest` и лишней ошибкой в status. Default/fallback live exchanges теперь `bybit` + `binance`; Kraken оставлен только как manual opt-in path. Проверка после rebuild/redeploy через `/api/admin/market-watcher/{status,rows}`: `status=running`, `message="Watching 34 symbols across binance, bybit"`, `exchanges=["bybit","binance"]`, `liveRows=34`, `lastError=null`, Kraken rows отсутствуют.
+
 ### 2026-05-22
+
+- `microservice_data/src/DataService.API/{Jobs/MarketWatcherService.cs,Jobs/MarketWatcherRuntimeState.cs}`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: закрыт следующий safety-slice после достижения `3 exchanges ~1s`. На runtime выяснилось, что occasional Kraken websocket startup `429` (`RateLimitRequest`) может выбить весь watcher, хотя Binance и Bybit уже живы. Startup semantics для watcher смягчены точечно: Kraken rate-limit после активных healthy venues теперь переводит watcher в `running` + degraded message вместо full failure, а stale Kraken rows сразу prune-ятся из in-memory/runtime DB state. Валидация после rebuild/redeploy через `/api/admin/market-watcher/{status,rows}`: `status=running`, `trackedSymbols=34`, `liveRows=34`, Kraken rows не остаются stale, fallback venues держат healthy lag (`binance avg ~361 ms`, `bybit avg ~752 ms`).
 
 - `microservice_data/src/DataService.API/{Jobs/MarketWatcherService.cs,Markets/KrakenApiClient.cs}`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: добит финальный runtime slice по требованию «3 биржи и lag около 1s или ниже». `MarketWatcherService` получил per-exchange startup retries с all-or-nothing semantics, Kraken переведён на managed `KrakenSpotSymbolOrderBook` path с synced top-of-book midpoint и коротким refresh-loop'ом для тихих пар. Финальная проверка через gateway admin endpoints дала steady-state `status=running`, `binance avgLagMs ~124`, `bybit ~323`, `kraken ~251`, общий `maxLagMs ~919`, то есть все три биржи одновременно снова укладываются в subsecond runtime budget.
 

@@ -180,6 +180,34 @@ public sealed class MarketWatcherRuntimeState
         }
     }
 
+    public void RemoveMissingLiveRows(IReadOnlyCollection<(string Exchange, string Symbol)> trackedSymbols)
+    {
+        lock (_gate)
+        {
+            if (trackedSymbols.Count == 0)
+            {
+                _rows.Clear();
+                _liveRows = 0;
+                return;
+            }
+
+            var allowed = trackedSymbols
+                .Select(item => BuildRowKey(item.Exchange, item.Symbol))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var staleKeys = _rows.Keys
+                .Where(key => !allowed.Contains(key))
+                .ToArray();
+
+            foreach (var key in staleKeys)
+            {
+                _rows.Remove(key);
+            }
+
+            _liveRows = _rows.Count;
+        }
+    }
+
     public MarketWatcherLiveRowsPage ReadLiveRows(
         string? exchange,
         string? search,

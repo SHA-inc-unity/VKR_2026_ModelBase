@@ -467,10 +467,10 @@ Realtime price sources remain websocket-first:
    whitelist only
 - Bybit V5 linear depth-1 orderbook streams via `Bybit.Net`; the watcher also
    uses best bid/ask midpoint instead of sparse last-trade ticker updates
-- Kraken managed spot order books via `KrakenExchange.Net`; the watcher uses
-   synced best bid/ask midpoint and republishes the current top-of-book on a
-   short runtime cadence so quieter Kraken pairs do not drift into multi-second
-   lag between best-offer changes
+- Kraken managed spot order books via `KrakenExchange.Net` remain available as
+   an explicit opt-in path, but Kraken is no longer part of the default live
+   `Exchanges[]` set because websocket startup rate limiting (`429` /
+   `RateLimitRequest`) was making the default runtime noisy and brittle
 
 Symbol discovery still comes from the in-repo REST clients, but the raw
 exchange universe is now filtered by `DataService:MarketWatch:Symbols`.
@@ -485,15 +485,18 @@ remains intentionally limited to the `*USDT` spot universe, but startup
 discovery no longer depends on a full Kraken `AssetPairs` catalog fetch.
 Instead, the watcher resolves only the configured whitelist pairs via narrow
 `pair=BASE/USDT` lookups and uses the canonical `BASE/USDT` alias for websocket
-subscriptions, so the third exchange does not disappear just because the full
-catalog is slow or because Kraken returns `XBTUSDT` metadata for `BTCUSDT`.
-Subscription startup is also retried per exchange and treated as all-or-nothing:
-if one exchange cannot come up after retries, the watcher tears down partial
-subscriptions and restarts instead of silently leaving one venue stale. After
-the latest runtime validation through the protected gateway admin endpoints,
-all three exchanges were live simultaneously with runtime lag below one second
-(`binance avg ~124 ms`, `bybit avg ~323 ms`, `kraken avg ~251 ms`, overall
-`maxLagMs ~919`).
+subscriptions, so manual Kraken re-enable does not depend on a full catalog
+fetch or Kraken metadata like `XBTUSDT` for `BTCUSDT`. Subscription startup is
+retried per exchange. Fatal startup still aborts the watcher when nothing comes
+up, while Kraken websocket `429` / `RateLimitRequest` stays on the safe
+degraded-startup path if Kraken is explicitly re-enabled alongside healthy
+Binance or Bybit subscriptions: the watcher remains `running`, surfaces the
+Kraken error in status/logs, and prunes stale Kraken rows instead of tearing
+down the healthy venues. The current default live configuration now runs only
+`binance` + `bybit`; the latest runtime validation through the protected gateway
+admin endpoints showed `status=running`, `exchanges=["bybit","binance"]`,
+`trackedSymbols=34`, `liveRows=34`, `lastError=null`, and low lag on the active
+venues (`binance avg ~158 ms`, `bybit avg ~150 ms`, overall `avgLagMs ~127`).
 
 Current candles are derived locally from the live price stream and are meant
 as a low-latency overlay. Authoritative historical candles still belong to
@@ -502,7 +505,7 @@ the ingest / repair / upsert paths.
 Main config lives under `DataService:MarketWatch`:
 
 - `Enabled`
-- `Exchanges[]`
+- `Exchanges[]` — default live set is `bybit`, `binance`; Kraken is opt-in only
 - `Symbols[]`
 - `Timeframes[]`
 - `FlushIntervalMs`

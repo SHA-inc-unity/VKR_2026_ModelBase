@@ -186,27 +186,54 @@ public sealed class MarketWatcherService : BackgroundService
             var row = symbolState.Apply(price, timestampUtc, timeframes);
             _state.UpsertLiveRow(row);
             Interlocked.Increment(ref tickCount);
-            Interlocked.Exchange(ref lastTickAtMs, timestampUtc.ToUnixTimeMilliseconds());
+            var tickAtMs = timestampUtc.ToUnixTimeMilliseconds();
+            Interlocked.Exchange(ref lastTickAtMs, tickAtMs);
         }
 
-        await using var subscriptions = await StartSubscriptionsAsync(universe, settings, OnPrice, stoppingToken);
+        var subscriptionStart = await StartSubscriptionsAsync(universe, settings, OnPrice, stoppingToken);
+        await using var subscriptions = subscriptionStart.Handle;
+
+        var activeExchanges = subscriptionStart.ActiveExchanges.Count > 0
+            ? subscriptionStart.ActiveExchanges
+            : universe.Keys.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray();
+        var activeExchangeSet = new HashSet<string>(activeExchanges, StringComparer.OrdinalIgnoreCase);
+        var activeTrackedSymbols = trackedSymbols
+            .Where(item => activeExchangeSet.Contains(item.Exchange))
+            .ToArray();
+        var activeSymbolCount = activeTrackedSymbols.Length;
+
+        if (activeTrackedSymbols.Length != trackedSymbols.Length)
+        {
+            _state.RemoveMissingLiveRows(activeTrackedSymbols);
+            await _repo.PruneLiveRowsAsync(activeTrackedSymbols, stoppingToken);
+        }
+
+        var runningMessage = subscriptionStart.Warnings.Count == 0
+            ? $"Watching {activeSymbolCount} symbols across {string.Join(", ", activeExchanges)}"
+            : $"Watching {activeSymbolCount} symbols across {string.Join(", ", activeExchanges)}; startup degraded: {string.Join("; ", subscriptionStart.Warnings)}";
+
+        if (subscriptionStart.Warnings.Count > 0)
+        {
+            _state.MarkDegraded(runningMessage, string.Join("; ", subscriptionStart.Warnings));
+        }
 
         var flushEvery = TimeSpan.FromMilliseconds(Math.Max(250, settings.FlushIntervalMs));
         var reportEvery = TimeSpan.FromSeconds(Math.Max(5, settings.ProgressIntervalSeconds));
         var nextReportAt = DateTimeOffset.UtcNow.Add(reportEvery);
 
         _state.MarkRunning(
-            $"Watching {totalSymbols} symbols across {string.Join(", ", universe.Keys)}",
-            totalSymbols,
+            runningMessage,
+            activeSymbolCount,
             0,
             0,
             0,
             null);
         _state.AppendLog("success", "watch.start", "Market watcher subscriptions active", new Dictionary<string, object?>
         {
-            ["totalSymbols"] = totalSymbols,
+            ["totalSymbols"] = activeSymbolCount,
             ["prunedRows"] = prunedRows,
-            ["exchanges"] = universe.Keys.ToArray(),
+            ["exchanges"] = activeExchanges.ToArray(),
+            ["startupWarnings"] = subscriptionStart.Warnings.ToArray(),
         });
 
         while (!stoppingToken.IsCancellationRequested)
@@ -236,8 +263,8 @@ public sealed class MarketWatcherService : BackgroundService
                 var ticksPerWindow = Interlocked.Exchange(ref tickCount, 0);
                 var latestTickAtMs = Interlocked.Read(ref lastTickAtMs);
                 _state.MarkRunning(
-                    $"Watching {totalSymbols} symbols",
-                    totalSymbols,
+                    runningMessage,
+                    activeSymbolCount,
                     state.Count,
                     ticksPerWindow,
                     pending.Count,
@@ -366,14 +393,16 @@ public sealed class MarketWatcherService : BackgroundService
         return Array.Empty<MarketWatchSymbol>();
     }
 
-    private async Task<IAsyncDisposable> StartSubscriptionsAsync(
+    private async Task<SubscriptionStartResult> StartSubscriptionsAsync(
         IReadOnlyDictionary<string, IReadOnlyList<MarketWatchSymbol>> universe,
         MarketWatchSettings settings,
         Action<string, string, decimal, DateTimeOffset> onPrice,
         CancellationToken ct)
     {
         var handles = new List<IAsyncDisposable>();
+        var activeExchanges = new List<string>();
         var failures = new List<string>();
+        var warnings = new List<string>();
 
         async Task TryStartAsync(
             string exchange,
@@ -385,6 +414,7 @@ public sealed class MarketWatcherService : BackgroundService
                 try
                 {
                     handles.Add(await factory());
+                    activeExchanges.Add(exchange);
                     _state.AppendLog("success", "subscribe.exchange", $"Subscriptions active for {exchange}", new Dictionary<string, object?>
                     {
                         ["exchange"] = exchange,
@@ -415,7 +445,22 @@ public sealed class MarketWatcherService : BackgroundService
             }
 
             var message = lastError?.Message ?? "unknown subscription start failure";
-            failures.Add($"{exchange}: {message}");
+            var failure = $"{exchange}: {message}";
+
+            if (handles.Count > 0 && IsNonFatalStartupFailure(exchange, lastError))
+            {
+                warnings.Add(failure);
+                _state.AppendLog("warning", "subscribe.degraded", $"Continuing market watcher without {exchange}", new Dictionary<string, object?>
+                {
+                    ["exchange"] = exchange,
+                    ["attempts"] = SubscriptionStartAttempts,
+                    ["error"] = message,
+                });
+                _log.LogWarning(lastError, "Market watcher continuing without {Exchange} after non-fatal startup failure", exchange);
+                return;
+            }
+
+            failures.Add(failure);
             _state.AppendLog("error", "subscribe.failed", $"Subscription failed for {exchange}", new Dictionary<string, object?>
             {
                 ["exchange"] = exchange,
@@ -455,7 +500,24 @@ public sealed class MarketWatcherService : BackgroundService
             throw new InvalidOperationException($"Some subscriptions failed: {string.Join("; ", failures)}");
         }
 
-        return new CompositeAsyncDisposable(handles);
+        return new SubscriptionStartResult(
+            new CompositeAsyncDisposable(handles),
+            activeExchanges.ToArray(),
+            warnings.ToArray());
+    }
+
+    private static bool IsNonFatalStartupFailure(string exchange, Exception? error)
+    {
+        if (!string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
+            || error is null)
+        {
+            return false;
+        }
+
+        var message = error.Message;
+        return message.Contains("RateLimitRequest", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("status code '429'", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("too many requests", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<IAsyncDisposable> StartBinanceAsync(
@@ -768,7 +830,7 @@ public sealed class MarketWatcherService : BackgroundService
 
         return requested is { Length: > 0 }
             ? new HashSet<string>(requested, StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(MarketDataClientFactory.SupportedExchanges, StringComparer.OrdinalIgnoreCase);
+            : new HashSet<string>(MarketWatchSettings.DefaultLiveExchanges, StringComparer.OrdinalIgnoreCase);
     }
 
     private static IReadOnlyList<MarketWatchSymbol> FilterConfiguredSymbols(
@@ -793,6 +855,11 @@ public sealed class MarketWatcherService : BackgroundService
         MarketWatchSymbolSnapshot Snapshot,
         SymbolLiveState State,
         long Version);
+
+    private sealed record SubscriptionStartResult(
+        IAsyncDisposable Handle,
+        IReadOnlyList<string> ActiveExchanges,
+        IReadOnlyList<string> Warnings);
 
     private sealed class SymbolLiveState
     {

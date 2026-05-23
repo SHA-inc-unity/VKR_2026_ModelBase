@@ -20,13 +20,15 @@ public sealed class DataServiceSettings
 
 public sealed class MarketWatchSettings
 {
+    public static readonly string[] DefaultLiveExchanges = ["bybit", "binance"];
+
     public bool Enabled { get; set; } = true;
     public int BootstrapIntervalSeconds { get; set; } = 15;
     public int FlushIntervalMs { get; set; } = 1000;
     public int ProgressIntervalSeconds { get; set; } = 10;
     public int BybitSymbolsPerSubscription { get; set; } = 50;
     public int KrakenSymbolsPerSubscription { get; set; } = 200;
-    public string[] Exchanges { get; set; } = ["bybit", "binance", "kraken"];
+    public string[] Exchanges { get; set; } = DefaultLiveExchanges.ToArray();
     public string[] Symbols { get; set; } = DatasetConstants.SupportedSymbols.ToArray();
     public string[] Timeframes { get; set; } = DatasetConstants.Timeframes.Keys.ToArray();
 }
