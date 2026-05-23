@@ -122,9 +122,10 @@ services:
             HW=$$(rpk -X brokers=redpanda:29092 topic describe -p "$$t" 2>/dev/null \
                   | awk 'NR>1 {print $$5}' | sort -n | tail -1)
             # We do not have a per-topic last-write timestamp without metrics,
-            # so heuristic: if HW > 0 the topic was used, but with our new
-            # design the stale topics are *empty* (the owner crashed before
-            # ever sending). Delete only when HW is empty/zero.
+            # so heuristic: healthy long-lived inbox owners bootstrap-produce
+            # one marker on startup, which moves HW > 0 even before the first
+            # real reply. The remaining HW=0 topics are expected to be stale
+            # crash leftovers that never made it past bootstrap.
             if [ -z "$$HW" ] || [ "$$HW" = "0" ] || [ "$$HW" = "-" ]; then
               rpk -X brokers=redpanda:29092 topic delete "$$t" 2>/dev/null \
                 && echo "[janitor] deleted empty stale topic: $$t" \

@@ -96,10 +96,10 @@ async def handle_isolation_forest(envelope) -> dict:
     if parquet is None or meta is None:
         return {"error": "no_session_loaded"}
 
-    # Read only the columns we need + timestamp_utc for the anomaly index.
-    # Bounded read: for large sessions only proportional row groups are
-    # read from disk, so peak I/O and memory scale with max_sample_rows.
-    needed = ["timestamp_utc", *columns]
+    # Read only the columns we need + a timestamp column for the anomaly
+    # index. Session readers normalize either timestamp_utc or timestamp_ms
+    # into a stable timestamp_ms output column.
+    needed = ["timestamp_ms", *columns]
     df = None
     sample = None
     try:
@@ -132,7 +132,7 @@ async def handle_isolation_forest(envelope) -> dict:
         labels = clf.fit_predict(X)
 
         anomaly_mask = labels == -1
-        anomaly_ts = sample.loc[anomaly_mask, "timestamp_utc"].astype("int64").tolist()
+        anomaly_ts = sample.loc[anomaly_mask, "timestamp_ms"].astype("int64").tolist()
 
         return {
             "summary": {

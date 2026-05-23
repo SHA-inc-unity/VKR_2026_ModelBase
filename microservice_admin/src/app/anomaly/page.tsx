@@ -481,6 +481,7 @@ export default function AnomalyPage() {
   // Mutex — prevents two long-running ops (analyze, apply, dbscan, load) from
   // racing each other and trampling shared session/anomaly state.
   const operationLockRef = useRef(false);
+  const analyzeRequestRef = useRef(0);
 
   // One-shot session probe on mount.
   useEffect(() => {
@@ -496,6 +497,7 @@ export default function AnomalyPage() {
       toast(text('operationInProgress'), 'error');
       return;
     }
+    const analyzeRequestId = ++analyzeRequestRef.current;
     operationLockRef.current = true;
     setLoadingAnalyze(true);
     setExpandedCol(null);
@@ -537,7 +539,7 @@ export default function AnomalyPage() {
       };
 
       const [statsRes, covRes, anomaliesRes, sessionRes] = await Promise.all([
-        kafkaCall<ColumnStatsResponse>(Topics.CMD_DATA_DATASET_COLUMN_STATS, { table }),
+        kafkaCall<ColumnStatsResponse>(Topics.CMD_DATA_DATASET_COLUMN_STATS, { table, count_only: true }),
         kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table }).catch(() => null),
         kafkaCall<DetectAnomaliesResponse>(
           Topics.CMD_DATA_DATASET_DETECT_ANOMALIES,
@@ -562,6 +564,21 @@ export default function AnomalyPage() {
         { stats: statsRes, coverage: covRes, anomalies: anomaliesRes },
         ANOMALY_CACHE_TTL,
       );
+
+      void kafkaCall<ColumnStatsResponse>(Topics.CMD_DATA_DATASET_COLUMN_STATS, { table })
+        .then(fullStats => {
+          if (fullStats.error) throw new Error(fullStats.error);
+          if (analyzeRequestRef.current !== analyzeRequestId) return;
+          setStats(fullStats);
+          void cacheWrite(
+            anomalyCacheKey(symbol, timeframe),
+            { stats: fullStats, coverage: covRes, anomalies: anomaliesRes },
+            ANOMALY_CACHE_TTL,
+          );
+        })
+        .catch(() => {
+          // Keep the fast count-only profile if the expensive full pass fails.
+        });
 
       // Background load into AnalyticService session if not already loaded.
       const alreadyLoaded =

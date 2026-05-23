@@ -32,13 +32,19 @@
   `float64 → float32` на Arrow-уровне (без промежуточных pandas-фреймов) и
   `pyarrow.ParquetWriter(snappy)` append per batch на диск.
   Лимит: `MAX_SESSION_ROWS=5_000_000`. Хранилище: env `MODELLINE_SESSION_DIR`
-  (default `/tmp/modelline_sessions`).
+  (default `/tmp/modelline_sessions`). Session helpers держат маленький
+  process-local read-cache по `(parquet_path, mtime, mode, columns, budget)` и
+  очищают его при `load/unload`, чтобы повторные anomaly-операции не читали
+  один и тот же Parquet slice с диска заново.
 - `cmd.analitic.dataset.unload` — очистка сессии (`unlink` Parquet + `gc.collect`).
 - `cmd.analitic.dataset.status` — состояние сессии (для admin badge).
 - `cmd.analitic.anomaly.dbscan` — multivariate DBSCAN на загруженной сессии
   (`StandardScaler` + `sklearn.cluster.DBSCAN`). Систематический сэмпл до
   `max_sample_rows`, читает только нужные колонки через
-  `pd.read_parquet(columns=…)`. Параметры: `eps=0.5`, `min_samples=5`,
+  `read_parquet_bounded(...)`. Session reader теперь нормализует timestamp
+  contract (`timestamp_utc` или `timestamp_ms`) в единый `timestamp_ms` output
+  column, поэтому handler не зависит от физического имени timestamp-поля в
+  сессионном Parquet. Параметры: `eps=0.5`, `min_samples=5`,
   `max_sample_rows=50_000`, `columns=[close_price, volume, turnover, open_interest]`.
   Ответ: `{ summary: {…}, anomaly_timestamps_ms: [...] }`.
 - `cmd.analitic.anomaly.isolation_forest` — Isolation Forest на загруженной
@@ -47,7 +53,10 @@
   Параметры: `contamination=0.01` (`[1e-4, 0.5]`), `n_estimators=100` (`[20, 500]`),
   `max_sample_rows=50_000`, `columns=[close_price, volume, turnover, open_interest]`.
   Систематический сэмплинг для preserving temporal order (одинаковая стратегия
-  что и в DBSCAN, чтобы UI мог сравнивать результаты двух методов). Ответ:
+  что и в DBSCAN, чтобы UI мог сравнивать результаты двух методов). Timestamp
+  в ответе тоже берётся из нормализованного `timestamp_ms`, поэтому handler
+  одинаково работает и на старом `timestamp_utc`, и на новом `timestamp_ms`
+  parquet schema. Ответ:
   `{ summary: { n_anomalies, contamination, n_estimators, … }, anomaly_timestamps_ms: [...] }`.
 - `cmd.analitic.dataset.distribution` — диагностика распределения log-доходностей
   (`backend/anomaly/distribution.py`). Считает skewness, excess kurtosis (Fisher),
@@ -55,7 +64,8 @@
   чанк-выборкой нарушало бы математику log-returns** (на стыках выпадал бы
   diff между несоседними строками), поэтому `read_parquet_contiguous` тянет
   целые row-group'ы из хвоста файла — выдаёт ≥ `target_rows` строк, всегда
-  смежных по `timestamp_utc`, без `shuffle`/`tail`/`stride`. Возвращает гистограмму
+  смежных по временной оси, без `shuffle`/`tail`/`stride`; повторные вызовы с
+  тем же `(columns, budget)` берутся из session read-cache. Возвращает гистограмму
   log-returns ±5σ + точки нормальной кривой N(μ,σ), отскейленные под expected
   counts, а также `verdict` — текстовый вывод ("Heavy tails detected" /
   "Distribution appears compatible with normal" / `Sample too small`). Используется

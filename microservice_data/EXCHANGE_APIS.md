@@ -48,9 +48,12 @@ budget API, особенно для Kraken.
 
 Watcher считает live-price по best bid/ask midpoint там, где биржа даёт более
 частые book/orderbook updates, чем last-trade ticker. В `market_watch_live`
-сохраняется last closed candle per timeframe плюс текущая live price row;
-исторические dataset tables при этом не мутируются. Это live overlay, а не
-замена ingest/repair/upsert как authoritative historical source.
+сохраняется last closed candle per timeframe плюс текущая live price row.
+Одновременно на каждом candle rollover watcher теперь зеркалит закрытую
+O/H/L/C свечу в canonical dataset table для этого `exchange + symbol + timeframe`,
+но не трогает volume/turnover/funding/OI/RSI и derived features. Это live
+bridge для свежести raw tables, а не замена ingest/repair/upsert как
+authoritative historical source.
 
 ## Kraken
 

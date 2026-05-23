@@ -23,6 +23,7 @@ public sealed class MarketWatcherService : BackgroundService
     private const int SubscriptionStartAttempts = 3;
 
     private readonly MarketWatchRepository _repo;
+    private readonly DatasetRepository _datasetRepo;
     private readonly MarketDataClientFactory _marketDataClientFactory;
     private readonly IOptions<DataServiceSettings> _options;
     private readonly MarketWatcherRuntimeState _state;
@@ -30,12 +31,14 @@ public sealed class MarketWatcherService : BackgroundService
 
     public MarketWatcherService(
         MarketWatchRepository repo,
+        DatasetRepository datasetRepo,
         MarketDataClientFactory marketDataClientFactory,
         IOptions<DataServiceSettings> options,
         MarketWatcherRuntimeState state,
         ILogger<MarketWatcherService> log)
     {
         _repo = repo;
+        _datasetRepo = datasetRepo;
         _marketDataClientFactory = marketDataClientFactory;
         _options = options;
         _state = state;
@@ -251,6 +254,7 @@ public sealed class MarketWatcherService : BackgroundService
             if (pending.Count > 0)
             {
                 await _repo.UpsertSnapshotsAsync(pending.Select(item => item.Snapshot).ToArray(), stoppingToken);
+                await PersistClosedCandlesAsync(pending, stoppingToken);
                 foreach (var item in pending)
                 {
                     item.State.MarkPersisted(item.Version);
@@ -781,6 +785,43 @@ public sealed class MarketWatcherService : BackgroundService
         return snapshots;
     }
 
+    private async Task PersistClosedCandlesAsync(
+        IReadOnlyList<PendingSnapshot> pending,
+        CancellationToken ct)
+    {
+        var closedCandles = pending
+            .SelectMany(item => item.ClosedCandles)
+            .ToArray();
+
+        if (closedCandles.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var group in closedCandles.GroupBy(
+            item => DatasetCore.MakeTableName(item.Symbol, item.Timeframe, item.Exchange),
+            StringComparer.OrdinalIgnoreCase))
+        {
+            var first = group.First();
+            await _datasetRepo.CreateTableIfNotExistsAsync(group.Key, ct);
+            await _datasetRepo.BulkUpsertLiveCandlesAsync(
+                group.Key,
+                first.Symbol,
+                first.Exchange,
+                first.Timeframe,
+                group
+                    .OrderBy(item => item.Candle.BucketStartMs)
+                    .Select(item => new DatasetRepository.LiveCandleRow(
+                        item.Candle.BucketStartMs,
+                        item.Candle.Open,
+                        item.Candle.High,
+                        item.Candle.Low,
+                        item.Candle.Close))
+                    .ToArray(),
+                ct);
+        }
+    }
+
     private static Dictionary<string, long> NormalizeTimeframes(IEnumerable<string>? configured)
     {
         var requested = configured?
@@ -854,7 +895,14 @@ public sealed class MarketWatcherService : BackgroundService
     private sealed record PendingSnapshot(
         MarketWatchSymbolSnapshot Snapshot,
         SymbolLiveState State,
-        long Version);
+        long Version,
+        IReadOnlyList<ClosedDatasetCandle> ClosedCandles);
+
+    private sealed record ClosedDatasetCandle(
+        string Exchange,
+        string Symbol,
+        string Timeframe,
+        MarketWatchCandleSnapshot Candle);
 
     private sealed record SubscriptionStartResult(
         IAsyncDisposable Handle,
@@ -866,10 +914,11 @@ public sealed class MarketWatcherService : BackgroundService
         private readonly object _gate = new();
         private readonly Dictionary<string, MarketWatchCandleSnapshot> _activeCandles = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, MarketWatchCandleSnapshot> _closedCandles = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, MarketWatchCandleSnapshot> _pendingClosedCandles = new(StringComparer.OrdinalIgnoreCase);
         private readonly string _exchange;
         private readonly string _symbol;
         private readonly string? _realtimeSymbol;
-        private long _version;
+        private long _persistVersion;
         private bool _dirty;
         private decimal _lastPrice;
         private DateTimeOffset _lastPriceTimestampUtc;
@@ -909,6 +958,7 @@ public sealed class MarketWatcherService : BackgroundService
                     if (candle.BucketStartMs != bucketStartMs)
                     {
                         _closedCandles[timeframe.Key] = candle;
+                        _pendingClosedCandles[timeframe.Key] = candle;
                         _activeCandles[timeframe.Key] = new MarketWatchCandleSnapshot(
                             BucketStartMs: bucketStartMs,
                             Open: price,
@@ -929,8 +979,11 @@ public sealed class MarketWatcherService : BackgroundService
                     };
                 }
 
-                _dirty = isFirstTick || closedCandlesUpdated;
-                _version++;
+                if (isFirstTick || closedCandlesUpdated)
+                {
+                    _dirty = true;
+                    _persistVersion++;
+                }
 
                 return new MarketWatcherLiveRowSnapshot(
                     Exchange: _exchange,
@@ -953,6 +1006,13 @@ public sealed class MarketWatcherService : BackgroundService
                 }
 
                 var candlesCopy = new Dictionary<string, MarketWatchCandleSnapshot>(_closedCandles, StringComparer.OrdinalIgnoreCase);
+                var pendingClosedCopy = _pendingClosedCandles
+                    .Select(item => new ClosedDatasetCandle(
+                        _exchange,
+                        _symbol,
+                        item.Key,
+                        item.Value))
+                    .ToArray();
                 return new PendingSnapshot(
                     new MarketWatchSymbolSnapshot(
                         Exchange: _exchange,
@@ -962,7 +1022,8 @@ public sealed class MarketWatcherService : BackgroundService
                         LastPriceTimestampUtc: _lastPriceTimestampUtc,
                         CandlesJson: JsonSerializer.Serialize(candlesCopy, JsonOptions)),
                     this,
-                    _version);
+                    _persistVersion,
+                    pendingClosedCopy);
             }
         }
 
@@ -970,9 +1031,10 @@ public sealed class MarketWatcherService : BackgroundService
         {
             lock (_gate)
             {
-                if (_version == persistedVersion)
+                if (_persistVersion == persistedVersion)
                 {
                     _dirty = false;
+                    _pendingClosedCandles.Clear();
                 }
             }
         }

@@ -523,6 +523,19 @@ public sealed partial class DatasetRepository
         decimal? Turnover);
 
     /// <summary>
+    /// One closed live candle produced by <c>MarketWatcherService</c>.
+    ///
+    /// The live watcher only has authoritative OHLC prices. Volume,
+    /// turnover and derived columns must stay untouched on conflict.
+    /// </summary>
+    public sealed record LiveCandleRow(
+        long    TimestampMs,
+        decimal Open,
+        decimal High,
+        decimal Low,
+        decimal Close);
+
+    /// <summary>
     /// Insert/update the six raw OHLCV columns (open_price, high_price,
     /// low_price, close_price, volume, turnover) keyed by
     /// <c>timestamp_utc</c>. Non-OHLCV columns (funding_rate,
@@ -628,6 +641,92 @@ public sealed partial class DatasetRepository
 
             total += await cmd.ExecuteNonQueryAsync(ct);
         }
+        return total;
+    }
+
+    /// <summary>
+    /// Insert or update only OHLC prices for live closed candles. Existing
+    /// volume, turnover and derived columns are preserved on conflict.
+    /// </summary>
+    public async Task<long> BulkUpsertLiveCandlesAsync(
+        string tableName,
+        string symbol,
+        string exchange,
+        string timeframe,
+        IReadOnlyList<LiveCandleRow> rows,
+        CancellationToken ct = default)
+    {
+        if (rows.Count == 0) return 0;
+        var tbl = Safe(tableName);
+        var batchSize = DataService.API.Dataset.DatasetConstants.UpsertBatchSize;
+
+        await using var conn = await _pg.OpenAsync(ct);
+        long total = 0;
+
+        for (int offset = 0; offset < rows.Count; offset += batchSize)
+        {
+            var slice = rows.Skip(offset).Take(batchSize).ToArray();
+            var n = slice.Length;
+
+            var ts = new DateTime[n];
+            var openP = new decimal[n];
+            var highP = new decimal[n];
+            var lowP = new decimal[n];
+            var closeP = new decimal[n];
+
+            for (int i = 0; i < n; i++)
+            {
+                var row = slice[i];
+                ts[i] = ToUtc(row.TimestampMs);
+                openP[i] = row.Open;
+                highP[i] = row.High;
+                lowP[i] = row.Low;
+                closeP[i] = row.Close;
+            }
+
+            var sql = $@"
+                INSERT INTO ""{tbl}"" (
+                    timestamp_utc, symbol, exchange, timeframe,
+                    open_price, high_price, low_price, close_price
+                )
+                SELECT
+                    payload.ts,
+                    @symbol,
+                    @exchange,
+                    @timeframe,
+                    payload.open_price,
+                    payload.high_price,
+                    payload.low_price,
+                    payload.close_price
+                FROM UNNEST(
+                    @ts::timestamptz[],
+                    @openP::numeric[],
+                    @highP::numeric[],
+                    @lowP::numeric[],
+                    @closeP::numeric[]
+                ) AS payload(ts, open_price, high_price, low_price, close_price)
+                ON CONFLICT (timestamp_utc) DO UPDATE SET
+                    symbol = EXCLUDED.symbol,
+                    exchange = EXCLUDED.exchange,
+                    timeframe = EXCLUDED.timeframe,
+                    open_price = EXCLUDED.open_price,
+                    high_price = EXCLUDED.high_price,
+                    low_price = EXCLUDED.low_price,
+                    close_price = EXCLUDED.close_price;";
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.Add(new NpgsqlParameter("symbol", NpgsqlDbType.Varchar) { Value = symbol });
+            cmd.Parameters.Add(new NpgsqlParameter("exchange", NpgsqlDbType.Varchar) { Value = exchange });
+            cmd.Parameters.Add(new NpgsqlParameter("timeframe", NpgsqlDbType.Varchar) { Value = timeframe });
+            cmd.Parameters.Add(new NpgsqlParameter("ts", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { Value = ts });
+            cmd.Parameters.Add(new NpgsqlParameter("openP", NpgsqlDbType.Array | NpgsqlDbType.Numeric) { Value = openP });
+            cmd.Parameters.Add(new NpgsqlParameter("highP", NpgsqlDbType.Array | NpgsqlDbType.Numeric) { Value = highP });
+            cmd.Parameters.Add(new NpgsqlParameter("lowP", NpgsqlDbType.Array | NpgsqlDbType.Numeric) { Value = lowP });
+            cmd.Parameters.Add(new NpgsqlParameter("closeP", NpgsqlDbType.Array | NpgsqlDbType.Numeric) { Value = closeP });
+
+            total += await cmd.ExecuteNonQueryAsync(ct);
+        }
+
         return total;
     }
 

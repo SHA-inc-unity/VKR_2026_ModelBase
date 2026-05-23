@@ -371,12 +371,15 @@ public sealed class KafkaRequestClient : IKafkaRequestClient, IKafkaRequestClien
 
     private async Task<bool> PrepareReplyInboxAsync(CancellationToken ct)
     {
-        if (await EnsureReplyInboxTopicAsync(ct))
+        if (!await EnsureReplyInboxTopicAsync(ct))
         {
-            return true;
+            return await TryBootstrapReplyInboxViaProduceAsync(ct);
         }
 
-        return await TryBootstrapReplyInboxViaProduceAsync(ct);
+        // Seed one marker record immediately so an idle but healthy inbox no
+        // longer looks like an empty orphan to the periodic janitor sweep.
+        await TryBootstrapReplyInboxViaProduceAsync(ct);
+        return true;
     }
 
     private async Task<bool> EnsureReplyInboxTopicAsync(CancellationToken ct)

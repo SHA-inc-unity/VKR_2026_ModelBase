@@ -17,6 +17,11 @@ producer publish в сам `reply.gateway.{instanceId}` и продолжает 
 пока topic/assignment не поднимутся. Это убирает ложное состояние
 `reply inbox ready`, при котором admin facade успевал отправить request, но
 симметрично зависал на timeout по всем Kafka-backed admin route-ам.
+Даже когда `CreateTopicsAsync` проходит штатно, gateway теперь сразу пишет
+в новый inbox bootstrap-marker. Это двигает HighWatermark выше `0` ещё до
+первого реального reply и не даёт `redpanda-janitor` принять живой, но пока
+idle `reply.gateway.*` topic за пустой orphan и удалить его с последующим
+`partitions revoked -> 503` на admin facade.
 Readiness для Kafka вынесена в отдельный `GET /health/ready`: он проверяет
 не только metadata lookup по `Kafka:BootstrapServers`, но и фактическую
 готовность request/reply path — у gateway должен быть назначен consumer на

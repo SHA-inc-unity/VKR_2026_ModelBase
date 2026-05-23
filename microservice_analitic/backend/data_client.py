@@ -223,10 +223,10 @@ async def _handle_dbscan(envelope) -> dict:
     if parquet is None or meta is None:
         return {"error": "no_session_loaded"}
 
-    # Read only the columns we need + timestamp_utc for the anomaly index.
-    # Use bounded read: for large sessions only a proportional subset of row
-    # groups is read from disk, limiting peak I/O and memory to ~max_sample_rows.
-    needed = ["timestamp_utc", *columns]
+    # Read only the columns we need + a timestamp column for the anomaly
+    # index. Session readers normalize either timestamp_utc or timestamp_ms
+    # into a stable timestamp_ms output column.
+    needed = ["timestamp_ms", *columns]
     df = None
     sample = None
     try:
@@ -253,7 +253,7 @@ async def _handle_dbscan(envelope) -> dict:
         labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(X)
 
         anomaly_mask = labels == -1
-        anomaly_ts = sample.loc[anomaly_mask, "timestamp_utc"].astype("int64").tolist()
+        anomaly_ts = sample.loc[anomaly_mask, "timestamp_ms"].astype("int64").tolist()
         n_clusters = int(len({l for l in labels if l != -1}))
 
         return {
