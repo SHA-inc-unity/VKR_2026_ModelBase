@@ -105,7 +105,14 @@ public sealed class MarketSettings
     /// Acts as a retry-cooldown to prevent tight retry storms immediately after an error.
     /// After this period the lock expires and the next request will trigger a fresh ingest.
     /// </summary>
-    public int IngestErrorCooldownSeconds { get; init; } = 30;
+    /// <remarks>
+    /// Lowered from 30 s to 5 s — at 30 s a single transient network glitch
+    /// to Bybit/Binance left every chart request on the affected
+    /// symbol/timeframe returning 503 SERVICE_BUSY for half a minute. 5 s is
+    /// still enough to absorb a back-to-back retry storm but won't visibly
+    /// blank the chart on a sporadic error.
+    /// </remarks>
+    public int IngestErrorCooldownSeconds { get; init; } = 5;
 
     // ── Chart request queue / concurrency control ─────────────────────────
 

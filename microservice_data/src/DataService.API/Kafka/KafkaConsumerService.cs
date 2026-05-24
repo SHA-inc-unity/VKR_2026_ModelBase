@@ -28,6 +28,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly MarketDataClientFactory    _markets;
     private readonly MinioClaimCheckService     _minio;
     private readonly Jobs.JobDispatchChannel    _jobDispatch;
+    private readonly Jobs.JobCompletionTracker  _jobCompletion;
     // Browser-facing origin для presigned URL'ов, которые получает admin
     // и в итоге показывает в браузере (CSV/ZIP экспорт, anomaly report).
     // По умолчанию — внешний вход infra-nginx на host-порте 8501; путь
@@ -47,10 +48,17 @@ public sealed partial class KafkaConsumerService : BackgroundService
     // PostgreSQL pool.
     //
     // Tuning rationale (Npgsql default pool size = 100):
-    //   - heavy slots (4) × ~10 fan-out connections per anomaly run ≈ 40
+    //   - heavy slots × ~5-10 fan-out connections per heavy run ≈ 40-80
     //   - light handlers re-use the remaining pool for coverage/list/etc.
+    //
+    // Previously heavy was 4 — a single in-flight admin export plus two
+    // detect-anomalies runs would saturate the slot and force chart-related
+    // legacy ingests to queue behind them. Raising to 8 keeps the pool budget
+    // safe (8 × 10 = 80 < 100) while letting admin exports run concurrently
+    // with chart-path legacy ingests. The job-based chart-ingest path
+    // (cmd.data.dataset.jobs.start) is NOT in HeavyTopics and is unaffected.
     private readonly SemaphoreSlim _concurrency      = new(32, 32);
-    private readonly SemaphoreSlim _heavyConcurrency = new(4,  4);
+    private readonly SemaphoreSlim _heavyConcurrency = new(8,  8);
 
     // Topics that fan out into multiple parallel SQL queries or stream large
     // payloads. They share the heavy-ops semaphore.
@@ -89,6 +97,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         MarketDataClientFactory markets,
         MinioClaimCheckService minio,
         Jobs.JobDispatchChannel jobDispatch,
+        Jobs.JobCompletionTracker jobCompletion,
         ILogger<KafkaConsumerService> log)
     {
         _producer                = producer;
@@ -99,6 +108,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         _markets                 = markets;
         _minio                   = minio;
         _jobDispatch             = jobDispatch;
+        _jobCompletion           = jobCompletion;
         _browserDownloadBaseUrl  = opts.Value.Minio.PublicDownloadBaseUrl;
         _internalDownloadBaseUrl = opts.Value.Minio.Endpoint;
         _log                     = log;

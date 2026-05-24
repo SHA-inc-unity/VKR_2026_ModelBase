@@ -8,11 +8,15 @@ namespace GatewayService.API.Market;
 /// <inheritdoc />
 public sealed class DataServiceClient : IDataServiceClient
 {
-    // Data-service is now push-driven (JobDispatchChannel) so a queued ingest
-    // typically completes in well under 500 ms for hot tables. Poll at 50 ms
-    // so the gateway returns the freshly-ingested rows immediately instead
-    // of holding the request open for half a second per cycle.
-    private static readonly TimeSpan IngestJobPollDelay = TimeSpan.FromMilliseconds(50);
+    // Data-service supports a server-side long-poll on cmd.data.dataset.jobs.get
+    // via the wait_terminal_ms payload field — see HandleJobsGetAsync.
+    // We use a 1500 ms server-side wait + 200 ms client-side back-off, which
+    // means a typical chart-ingest run (~300-800 ms with skip_features) finishes
+    // in a single Kafka roundtrip instead of the previous ~10-20 roundtrips
+    // (50 ms client poll). Falls back to short-poll cleanly if the data-service
+    // is older and ignores the field.
+    private static readonly TimeSpan IngestJobPollDelay = TimeSpan.FromMilliseconds(200);
+    private const int JobsGetServerWaitMs = 1500;
 
     private readonly IKafkaRequestClient _kafka;
     private readonly MarketSettings      _settings;
@@ -230,6 +234,14 @@ public sealed class DataServiceClient : IDataServiceClient
                         timeframe = bybitInterval,
                         start_ms = startMs,
                         end_ms = endMs,
+                        // Chart endpoint only consumes raw OHLCV columns
+                        // (see ChartProjectionColumns). Telling the
+                        // IngestJobHandler to skip the expensive
+                        // ComputeAndUpdateFeaturesSinceAsync window-aggregation
+                        // makes cold-table chart requests 2-10x faster.
+                        // The full feature pipeline still runs for non-chart
+                        // ingests (admin UI, scheduled jobs, market_watcher).
+                        skip_features = true,
                     },
                 },
                 requestTimeout,
@@ -357,9 +369,14 @@ public sealed class DataServiceClient : IDataServiceClient
             JsonElement jobReply;
             try
             {
+                // Bound the server-side wait by our remaining budget so we
+                // do not block longer than the caller is willing to wait.
+                var serverWaitMs = Math.Min(
+                    JobsGetServerWaitMs,
+                    Math.Max(0, (int)remaining.TotalMilliseconds - 250));
                 jobReply = await _kafka.RequestAsync(
                     DataTopics.CmdDataDatasetJobsGet,
-                    new { job_id = jobId },
+                    new { job_id = jobId, wait_terminal_ms = serverWaitMs },
                     effectiveTimeout,
                     ct);
             }

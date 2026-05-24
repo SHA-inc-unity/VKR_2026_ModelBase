@@ -73,6 +73,14 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         var startMs   = p.L("start_ms")  ?? throw new ArgumentException("start_ms required");
         var endMs     = p.L("end_ms")    ?? throw new ArgumentException("end_ms required");
 
+        // skip_features=true (gateway-chart path) — caller only needs raw
+        // OHLCV in the requested window. We still upsert OHLCV+RSI+funding+OI,
+        // but skip the heavy ComputeAndUpdateFeaturesSinceAsync window-aggregation
+        // step that is responsible for most of the latency for chart-ingest.
+        // The feature columns will be recomputed by the next "full" ingest of
+        // the same table (admin / scheduled job).
+        var skipFeatures = p.B("skip_features", def: false);
+
         var (key, interval, stepMs) = DatasetCore.NormalizeTimeframe(timeframe);
         var (s, e) = DatasetCore.NormalizeWindow(startMs, endMs, stepMs);
         var table = DatasetCore.MakeTableName(symbol, key, exchange);
@@ -281,28 +289,47 @@ public sealed class IngestJobHandler : IDatasetJobHandler
             completed: written);
 
         // ── compute_features ───────────────────────────────────
-        var stageFeat = await ctx.StartStageAsync("compute_features");
+        // skip_features=true is the chart-ingest fast-path: we return as soon as
+        // raw OHLCV is upserted, leaving the expensive feature-window UPDATE for
+        // the next non-chart ingest of this table. This trades a stale 40-column
+        // feature row for a 2-10x latency win on cold-table chart requests.
         var updateFromMs = rows.Count > 0
             ? rows.Min(static row => row.TimestampMs)
             : (long?)null;
-        await ctx.ReportAsync(
-            "compute_features",
-            90,
-            updateFromMs is long sinceMs
-                ? $"computing feature columns from {sinceMs}"
-                : "skipping feature recompute; no new rows were materialized");
-        var feat = updateFromMs is long updateFrom
-            ? await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesSinceAsync(table, updateFrom, token))
-            : 0L;
-        await ctx.EndStageAsync(stageFeat, feat);
-        await ctx.ReportAsync(
-            "done",
-            100,
-            $"written={written}, features={feat}",
-            stageProgress: 100,
-            stageTotal: feat,
-            stageCompleted: feat,
-            completed: written);
+        long feat = 0L;
+        if (skipFeatures)
+        {
+            await ctx.ReportAsync(
+                "done",
+                100,
+                $"written={written}, features=skipped (skip_features=true)",
+                stageProgress: 100,
+                stageTotal: rows.Count,
+                stageCompleted: written,
+                completed: written);
+        }
+        else
+        {
+            var stageFeat = await ctx.StartStageAsync("compute_features");
+            await ctx.ReportAsync(
+                "compute_features",
+                90,
+                updateFromMs is long sinceMs
+                    ? $"computing feature columns from {sinceMs}"
+                    : "skipping feature recompute; no new rows were materialized");
+            feat = updateFromMs is long updateFrom
+                ? await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesSinceAsync(table, updateFrom, token))
+                : 0L;
+            await ctx.EndStageAsync(stageFeat, feat);
+            await ctx.ReportAsync(
+                "done",
+                100,
+                $"written={written}, features={feat}",
+                stageProgress: 100,
+                stageTotal: feat,
+                stageCompleted: feat,
+                completed: written);
+        }
     }
 
     private static Dictionary<long, decimal> ComputeWilderRsi(IList<(long Ts, decimal Close)> closes, int period)

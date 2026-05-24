@@ -178,6 +178,22 @@ public sealed partial class KafkaConsumerService
         if (!Guid.TryParse(jobIdStr, out var jobId))
             return new { error = "missing or invalid job_id" };
 
+        // Optional server-side long-poll. If the caller passes
+        // wait_terminal_ms > 0, we block here (up to that budget) waiting
+        // for the job to reach a terminal state, instead of forcing the
+        // caller to spin on jobs.get every 50 ms. Caps the wait at 5 s so a
+        // misbehaving caller cannot pin a Kafka consumer slot indefinitely.
+        var waitMs = TryGetInt64(payload, "wait_terminal_ms") ?? 0L;
+        if (waitMs > 0)
+        {
+            var capped = (int)Math.Min(5000, Math.Max(0, waitMs));
+            var current = await _jobsRepo.GetByIdAsync(jobId, ct);
+            if (current is not null && !DatasetJobStatus.IsTerminal(current.Status))
+            {
+                await _jobCompletion.WaitAsync(jobId, TimeSpan.FromMilliseconds(capped), ct);
+            }
+        }
+
         var job = await _jobsRepo.GetByIdAsync(jobId, ct);
         if (job is null)
             return new { error = "job not found", job_id = jobId };

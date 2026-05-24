@@ -73,6 +73,7 @@ try
     builder.Services.AddSingleton<MarketWatcherRuntimeState>();
     builder.Services.AddSingleton<JobLockManager>();
     builder.Services.AddSingleton<JobDispatchChannel>();
+    builder.Services.AddSingleton<JobCompletionTracker>();
     builder.Services.AddSingleton<IDatasetJobHandler, IngestJobHandler>();
     builder.Services.AddSingleton<IDatasetJobHandler, ComputeFeaturesJobHandler>();
     builder.Services.AddSingleton<IDatasetJobHandler, DetectAnomaliesJobHandler>();

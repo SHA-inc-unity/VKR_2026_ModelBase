@@ -33,6 +33,13 @@ public sealed class DatasetJobRunner : BackgroundService
 {
     private static readonly string[] IngestExchanges = ["bybit", "binance", "kraken"];
     private const int IngestSlotsPerExchange = 4;
+    // Heavy timeframes (1m/3m) used to be limited to ONE concurrent ingest per
+    // exchange. With the chart-ingest fast-path (skip_features) the per-job
+    // wall-clock dropped from 5-10s to <1s, so we can safely admit more
+    // parallel heavy-tf requests without exhausting the per-exchange API
+    // budget. Three lets up to three users open a 1m chart on the same
+    // exchange simultaneously instead of serializing them.
+    private const int HeavyIngestSlotsPerExchange = 3;
 
     // Per-type concurrency caps. Tuned to keep the Postgres pool (size 100)
     // and Bybit rate-limit budget reasonable. Single-instance deployment
@@ -60,6 +67,7 @@ public sealed class DatasetJobRunner : BackgroundService
     private readonly JobLockManager _locks;
     private readonly KafkaProducer _producer;
     private readonly JobDispatchChannel _dispatch;
+    private readonly JobCompletionTracker _completion;
     private readonly ILogger<DatasetJobRunner> _log;
 
     // Jobs we couldn't dispatch on first pull (slot saturated, lock taken,
@@ -74,6 +82,7 @@ public sealed class DatasetJobRunner : BackgroundService
         JobLockManager locks,
         KafkaProducer producer,
         JobDispatchChannel dispatch,
+        JobCompletionTracker completion,
         ILogger<DatasetJobRunner> log)
     {
         _repo = repo;
@@ -81,11 +90,12 @@ public sealed class DatasetJobRunner : BackgroundService
         _locks = locks;
         _producer = producer;
         _dispatch = dispatch;
+        _completion = completion;
         _log = log;
         _handlers = handlers.ToDictionary(h => h.Type, StringComparer.OrdinalIgnoreCase);
         _slots = Caps.ToDictionary(kv => kv.Key, kv => new SemaphoreSlim(kv.Value, kv.Value), StringComparer.OrdinalIgnoreCase);
         _ingestSlotsByExchange = BuildExchangeSlots(IngestSlotsPerExchange);
-        _heavyIngestSlotsByExchange = BuildExchangeSlots(1);
+        _heavyIngestSlotsByExchange = BuildExchangeSlots(HeavyIngestSlotsPerExchange);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stopping)
@@ -147,12 +157,20 @@ public sealed class DatasetJobRunner : BackgroundService
         }
     }
 
+    // Previously this scan ran every 2 s, which meant that a hint dropped
+    // because of a saturated slot could wait up to 2 s before being retried
+    // even though the slot freed almost immediately. We now poll at 250 ms —
+    // the SELECT (PickQueuedAsync) is cheap and the latency win is significant
+    // for chart-ingest where the per-job wall-clock is under a second in the
+    // skip_features fast-path.
+    private const int SafetyNetPollIntervalMs = 250;
+
     /// <summary>
-    /// Slow (2 s) DB scan as a backstop for missed channel signals — e.g.
-    /// jobs queued while every per-type semaphore was saturated and we had
-    /// to drop the hint, or jobs created by an external process that bypassed
-    /// the channel publisher. Republishes any queued rows we don't already
-    /// know about into the dispatch channel.
+    /// Backstop DB scan for missed channel signals — e.g. jobs queued while
+    /// every per-type semaphore was saturated and we had to drop the hint,
+    /// or jobs created by an external process that bypassed the channel
+    /// publisher. Republishes any queued rows we don't already know about
+    /// into the dispatch channel.
     /// </summary>
     private async Task SafetyNetPollLoopAsync(CancellationToken stopping)
     {
@@ -160,7 +178,7 @@ public sealed class DatasetJobRunner : BackgroundService
         {
             try
             {
-                await Task.Delay(2000, stopping);
+                await Task.Delay(SafetyNetPollIntervalMs, stopping);
                 var queued = await _mut.PickQueuedAsync(50, stopping);
                 foreach (var job in queued)
                 {
@@ -172,7 +190,7 @@ public sealed class DatasetJobRunner : BackgroundService
             catch (Exception ex)
             {
                 _log.LogError(ex, "DatasetJobRunner safety-net poll error");
-                try { await Task.Delay(2000, stopping); } catch { break; }
+                try { await Task.Delay(SafetyNetPollIntervalMs, stopping); } catch { break; }
             }
         }
     }
@@ -301,6 +319,11 @@ public sealed class DatasetJobRunner : BackgroundService
         {
             heartbeatCts.Cancel();
             try { await heartbeat; } catch { /* heartbeat exit is best-effort */ }
+            // Wake up any cmd.data.dataset.jobs.get waiter that is server-side
+            // long-polling for this job. The DB row is already in a terminal
+            // state by this point (FinishAsync ran in the try/catch above),
+            // so the waiter will read a consistent record.
+            _completion.Signal(job.JobId);
             _locks.Release(job.TargetTable, job.ConflictClass);
             heavySlot?.Release();
             exchangeSlot?.Release();
