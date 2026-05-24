@@ -84,7 +84,9 @@ API Gateway  :7520 (host) -> :5020 (container)
     ├── GET /api/dashboard        ← aggregates: Guest → Market + News; User → Portfolio + Market + News
   ├── GET /api/v1/market/overview ← snapshot-backed public market overview
   ├── GET /api/v1/market/tickers  ← list-ready market snapshot cards
+  ├── GET /api/v1/market/trending, /api/v1/market/top-movers ← backend-owned home feeds
   ├── POST /api/v1/market/quotes/batch ← lightweight quote refresh by symbol set
+  ├── GET /api/v1/market/convert ← frontend-friendly convert alias (`from/to/sourceLabel`)
   ├── GET /api/v1/market/converter/quote ← asset conversion quote from snapshot prices
     ├── GET /api/v1/market/config ← Market config (symbols, timeframes, candle grids)
     ├── GET /api/v1/market/chart  ← OHLCV candles (Redis cached, Kafka ingest)
@@ -117,8 +119,11 @@ Gateway now also exposes a lightweight frontend-contract layer for routes that d
 | GET | `/api/account/me` | Required | Current user profile |
 | GET | `/api/dashboard` | Optional | Aggregated main screen data; guest gets only public sections, user also gets personal sections |
 | GET | `/api/v1/market/overview` | None | Public market overview for the home screen |
-| GET | `/api/v1/market/tickers` | None | Searchable, sortable, paginated market snapshot list |
+| GET | `/api/v1/market/tickers` | None | Searchable, sortable, paginated market snapshot list with optional `collection` and `snapshotId` |
+| GET | `/api/v1/market/trending` | None | Dedicated backend feed for home Trending cards |
+| GET | `/api/v1/market/top-movers` | None | Dedicated backend feed for home Top movers cards |
 | POST | `/api/v1/market/quotes/batch` | None | Lightweight quote refresh for a symbol set |
+| GET | `/api/v1/market/convert` | None | Frontend-compatible converter alias using `from/to/sourceLabel` |
 | GET | `/api/v1/market/converter/quote` | None | Asset conversion quote derived from snapshot prices |
 | GET | `/api/v1/market/config` | None | Symbols, timeframes, candle-count grids, defaults |
 | GET | `/api/v1/market/chart` | None | OHLCV candles — `?symbol=BTCUSDT&timeframe=5m&limit=200` |
@@ -127,7 +132,7 @@ Gateway now also exposes a lightweight frontend-contract layer for routes that d
 | GET/POST/PATCH/DELETE | `/api/alerts*` | Required | Price alerts CRUD |
 | GET/PATCH | `/api/services/toggles` | Required | Service toggles for settings UI |
 | GET | `/api/news` | None | Latest news items |
-| GET | `/api/news/home` | None | Compact home-screen news feed (`limit=3`) |
+| GET | `/api/news/home` | None | Compact home-screen news feed with optional `limit` and `tag` |
 | GET | `/api/notifications` | Required | User notifications |
 | GET | `/api/admin/{summary,users,services,statistics}` | Admin JWT | Lightweight mobile-admin surface |
 | GET | `/health` | None | Health check |
@@ -333,8 +338,10 @@ tests/
 - [ ] `GET /api/v1/market/overview` → 200 public payload with snapshot-derived metrics, `meta.generatedAt`, `meta.updatedAt`
 - [ ] `GET /api/v1/market/tickers?page=1&pageSize=25` → 200, `items`, `total`, `meta.updatedAt`
 - [ ] `POST /api/v1/market/quotes/batch` → 200, returns `items` and `missingSymbols`
-- [ ] `GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1` → 200 quote payload
-- [ ] `GET /api/news` / `GET /api/news/home` → 200, newest-first items, `degraded` reflects only real news client failure
+- [ ] `GET /api/v1/market/trending?limit=5` and `GET /api/v1/market/top-movers?limit=5` → 200 feed payloads with same ticker card shape
+- [ ] `GET /api/v1/market/convert?from=BTC&to=USDT&amount=1` → 200 quote payload with `sourceLabel`
+- [ ] `GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1` → 200 legacy-compatible quote payload
+- [ ] `GET /api/news` / `GET /api/news/home?limit=3&tag=market` → 200, newest-first items, `degraded` reflects only real news client failure
 - [ ] All responses contain `X-Correlation-Id` header
 - [ ] Swagger UI accessible at `/swagger` in Development
 

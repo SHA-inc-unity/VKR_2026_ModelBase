@@ -68,8 +68,32 @@ public sealed class MarketServiceClient : IMarketServiceClient
         var config = await _marketConfig.GetConfigAsync(ct);
         var snapshot = await LoadSnapshotAsync(ct);
         var (fearGreedValue, fearGreedLabel, fearGreedDegraded) = ComputeFearGreed(snapshot.Items);
+        var totalMarketCap = snapshot.TotalMarketCapProxy > 0
+            ? DecimalRound(snapshot.TotalMarketCapProxy)
+            : (decimal?)null;
+        var totalVolume24h = snapshot.TotalVolume24hUsd > 0
+            ? DecimalRound(snapshot.TotalVolume24hUsd)
+            : (decimal?)null;
+        var btcDominance = totalMarketCap is > 0 && snapshot.BtcMarketCapProxy > 0
+            ? DecimalRound(snapshot.BtcMarketCapProxy / snapshot.TotalMarketCapProxy * 100m)
+            : (decimal?)null;
 
         var degradedFields = new HashSet<string>(snapshot.DegradedFields, StringComparer.OrdinalIgnoreCase);
+        if (totalMarketCap is null)
+        {
+            degradedFields.Add("totalMarketCap");
+        }
+
+        if (totalVolume24h is null)
+        {
+            degradedFields.Add("volume24h");
+        }
+
+        if (btcDominance is null)
+        {
+            degradedFields.Add("btcDominance");
+        }
+
         if (fearGreedDegraded)
         {
             degradedFields.Add("fearGreed");
@@ -79,14 +103,12 @@ public sealed class MarketServiceClient : IMarketServiceClient
         {
             MarketOverview = new PublicMarketOverviewDto
             {
-                TotalMarketCap = DecimalRound(snapshot.TotalMarketCapProxy),
-                BtcDominance = snapshot.TotalMarketCapProxy > 0
-                    ? DecimalRound(snapshot.BtcMarketCapProxy / snapshot.TotalMarketCapProxy * 100m)
-                    : 0,
-                Volume24h = DecimalRound(snapshot.TotalVolume24hUsd),
+                TotalMarketCap = totalMarketCap,
+                BtcDominance = btcDominance,
+                Volume24h = totalVolume24h,
                 ActiveAssets = config.Symbols.Count,
-                FearGreedValue = fearGreedValue,
-                FearGreedLabel = fearGreedLabel,
+                FearGreedValue = fearGreedDegraded ? null : fearGreedValue,
+                FearGreedLabel = fearGreedDegraded ? null : fearGreedLabel,
             },
             TrendingAssets = snapshot.Items
                 .OrderByDescending(item => item.TrendingScore)
@@ -111,14 +133,14 @@ public sealed class MarketServiceClient : IMarketServiceClient
         string? sortBy = null,
         string? sortDir = null,
         IReadOnlyList<string>? symbols = null,
+        string? collection = null,
         CancellationToken ct = default)
     {
         var snapshot = await LoadSnapshotAsync(ct);
+        var normalizedCollection = NormalizeCollection(collection);
 
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 100);
-        sortBy = NormalizeSortBy(sortBy);
-        sortDir = NormalizeSortDir(sortDir);
 
         IEnumerable<SnapshotTicker> filtered = snapshot.Items;
 
@@ -141,6 +163,11 @@ public sealed class MarketServiceClient : IMarketServiceClient
                 || item.QuoteAsset.Contains(term, StringComparison.OrdinalIgnoreCase));
         }
 
+        filtered = ApplyCollection(filtered, normalizedCollection);
+
+        sortBy = ResolveSortBy(sortBy, normalizedCollection);
+        sortDir = ResolveSortDir(sortDir, sortBy);
+
         var ordered = OrderTickers(filtered, sortBy, sortDir).ToArray();
         var total = ordered.Length;
         var pageItems = ordered
@@ -151,6 +178,8 @@ public sealed class MarketServiceClient : IMarketServiceClient
 
         return ServiceResult<MarketTickersResponse>.Ok(new MarketTickersResponse
         {
+            SnapshotId = BuildSnapshotId(snapshot.UpdatedAt),
+            Collection = normalizedCollection,
             Items = pageItems,
             Total = total,
             Page = page,
@@ -207,6 +236,7 @@ public sealed class MarketServiceClient : IMarketServiceClient
 
         return ServiceResult<MarketBatchQuotesResponse>.Ok(new MarketBatchQuotesResponse
         {
+            SnapshotId = BuildSnapshotId(snapshot.UpdatedAt),
             Items = items,
             MissingSymbols = missing,
             Meta = new FrontendResponseMetaDto
@@ -438,19 +468,51 @@ public sealed class MarketServiceClient : IMarketServiceClient
         return items.FirstOrDefault(item => string.Equals(item.Symbol, symbol, StringComparison.OrdinalIgnoreCase))?.Price;
     }
 
-    private static string NormalizeSortBy(string? sortBy)
+    private static IEnumerable<SnapshotTicker> ApplyCollection(IEnumerable<SnapshotTicker> source, string collection)
+    {
+        return collection switch
+        {
+            "trending" => source.Where(item => item.IsTrending || item.TrendingScore > 0),
+            "top-movers" => source.Where(item => item.Change24h != 0),
+            _ => source,
+        };
+    }
+
+    private static string NormalizeCollection(string? collection)
+    {
+        return collection?.Trim().ToLowerInvariant() switch
+        {
+            "trending" => "trending",
+            "top-movers" => "top-movers",
+            _ => "market"
+        };
+    }
+
+    private static string ResolveSortBy(string? sortBy, string collection)
     {
         var value = sortBy?.Trim().ToLowerInvariant();
         return value switch
         {
             "symbol" or "displayname" or "price" or "change24h" or "volume24h" or "marketcap" or "high24h" or "low24h" or "rank" or "updatedat" => value,
-            _ => "rank"
+            "trending" => "trending",
+            "top-movers" or "topmovers" => "top-movers",
+            _ => collection switch
+            {
+                "trending" => "trending",
+                "top-movers" => "top-movers",
+                _ => "rank"
+            }
         };
     }
 
-    private static string NormalizeSortDir(string? sortDir)
+    private static string ResolveSortDir(string? sortDir, string sortBy)
     {
-        return string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "asc" : "desc";
+        if (!string.IsNullOrWhiteSpace(sortDir))
+        {
+            return string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "asc" : "desc";
+        }
+
+        return string.Equals(sortBy, "rank", StringComparison.OrdinalIgnoreCase) ? "asc" : "desc";
     }
 
     private static IOrderedEnumerable<SnapshotTicker> OrderTickers(IEnumerable<SnapshotTicker> source, string sortBy, string sortDir)
@@ -470,6 +532,10 @@ public sealed class MarketServiceClient : IMarketServiceClient
             ("volume24h", true) => source.OrderByDescending(item => item.Volume24h),
             ("marketcap", false) => source.OrderBy(item => item.MarketCapProxy),
             ("marketcap", true) => source.OrderByDescending(item => item.MarketCapProxy),
+            ("trending", false) => source.OrderBy(item => item.TrendingScore).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
+            ("trending", true) => source.OrderByDescending(item => item.TrendingScore).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
+            ("top-movers", false) => source.OrderBy(item => Math.Abs(item.Change24h)).ThenBy(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
+            ("top-movers", true) => source.OrderByDescending(item => Math.Abs(item.Change24h)).ThenByDescending(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
             ("high24h", false) => source.OrderBy(item => item.High24h),
             ("high24h", true) => source.OrderByDescending(item => item.High24h),
             ("low24h", false) => source.OrderBy(item => item.Low24h),
@@ -479,6 +545,11 @@ public sealed class MarketServiceClient : IMarketServiceClient
             ("rank", false) => source.OrderBy(item => item.Rank),
             _ => source.OrderByDescending(item => item.Rank),
         };
+    }
+
+    private static string BuildSnapshotId(DateTimeOffset updatedAt)
+    {
+        return updatedAt.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);
     }
 
     private static MarketTickerItemDto ToTickerItemDto(SnapshotTicker item)

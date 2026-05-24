@@ -112,6 +112,7 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.TryGetProperty("snapshotId", out _).Should().BeTrue();
         body.GetProperty("items").GetArrayLength().Should().Be(2);
 
         var first = body.GetProperty("items")[0];
@@ -122,6 +123,42 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
         first.TryGetProperty("volume24h", out _).Should().BeTrue();
         first.TryGetProperty("marketCap", out _).Should().BeTrue();
         first.TryGetProperty("exchangeCount", out _).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Tickers_collection_top_movers_returns_collection_marker()
+    {
+        var response = await _client.GetAsync("/api/v1/market/tickers?collection=top-movers&pageSize=2");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("collection").GetString().Should().Be("top-movers");
+        body.GetProperty("items")[0].GetProperty("symbol").GetString().Should().Be("BTCUSDT");
+    }
+
+    [Fact]
+    public async Task Trending_endpoint_returns_same_ticker_contract()
+    {
+        var response = await _client.GetAsync("/api/v1/market/trending?limit=1");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("collection").GetString().Should().Be("trending");
+        body.GetProperty("items").GetArrayLength().Should().Be(1);
+        body.GetProperty("items")[0].TryGetProperty("displayName", out _).Should().BeTrue();
+        body.GetProperty("items")[0].TryGetProperty("logoUrl", out _).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Top_movers_endpoint_returns_pre_ranked_feed()
+    {
+        var response = await _client.GetAsync("/api/v1/market/top-movers?limit=2");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("collection").GetString().Should().Be("top-movers");
+        body.GetProperty("items").GetArrayLength().Should().Be(2);
+        body.GetProperty("items")[0].GetProperty("symbol").GetString().Should().Be("BTCUSDT");
     }
 
     [Fact]
@@ -147,6 +184,7 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.TryGetProperty("snapshotId", out _).Should().BeTrue();
         body.GetProperty("items").GetArrayLength().Should().Be(2);
         body.GetProperty("missingSymbols").GetArrayLength().Should().Be(0);
     }
@@ -163,6 +201,19 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
         body.GetProperty("rate").GetDecimal().Should().BeGreaterThan(0);
         body.GetProperty("convertedAmount").GetDecimal().Should().BeGreaterThan(0);
         body.GetProperty("source").GetString().Should().NotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public async Task Convert_endpoint_supports_frontend_contract_alias()
+    {
+        var response = await _client.GetAsync("/api/v1/market/convert?from=BTC&to=ETH&amount=2");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("from").GetString().Should().Be("BTC");
+        body.GetProperty("to").GetString().Should().Be("ETH");
+        body.GetProperty("sourceLabel").GetString().Should().NotBeNullOrEmpty();
+        body.GetProperty("updatedAt").GetString().Should().NotBeNullOrEmpty();
     }
 
     // ── GET /api/v1/market/chart ──────────────────────────────────────────

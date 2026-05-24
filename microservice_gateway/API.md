@@ -73,8 +73,11 @@
 | `GET /api/v1/market/config` | `Cache-Control: public, max-age=60, stale-while-revalidate=3540` |
 | `GET /api/v1/market/overview` | `Cache-Control: public, max-age=30, stale-while-revalidate=120` |
 | `GET /api/v1/market/tickers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
+| `GET /api/v1/market/trending` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
+| `GET /api/v1/market/top-movers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `POST /api/v1/market/quotes/batch` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/v1/market/converter/quote` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
+| `GET /api/v1/market/convert` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/news` and `GET /api/news/home` | `Cache-Control: public, max-age=30, stale-while-revalidate=300` |
 
 ETag/If-None-Match semantics для этих routes пока не реализованы. Frontend и edge cache должны опираться именно на `Cache-Control` и timestamps в payload.
@@ -261,8 +264,11 @@ UID в теле запроса не используется как источн
 | GET | `/api/dashboard` | Optional | главный экран с агрегированными данными; guest получает только public sections |
 | GET | `/api/v1/market/overview` | None | публичный home-screen overview |
 | GET | `/api/v1/market/tickers` | None | searchable/sortable/paginated market snapshot list |
+| GET | `/api/v1/market/trending` | None | curated backend feed для home trending cards |
+| GET | `/api/v1/market/top-movers` | None | pre-ranked backend feed по 24h move |
 | POST | `/api/v1/market/quotes/batch` | None | batch quote refresh по списку symbol-ов |
 | GET | `/api/v1/market/converter/quote` | None | quote для asset-to-asset conversion |
+| GET | `/api/v1/market/convert` | None | frontend-compatible converter alias (`from/to/sourceLabel`) |
 | GET | `/api/v1/market/config` | None | конфиг market UI |
 | GET | `/api/v1/market/chart` | None | свечной график |
 | GET | `/api/portfolio/summary` | Required | расширенная сводка портфеля |
@@ -841,6 +847,8 @@ Gateway читает cached snapshot из `IMarketServiceClient`, который
 - `fearGreedValue` / `fearGreedLabel` — gateway-level heuristic по breadth и average 24h change, а не внешний индекс;
 - `trendingAssets` ранжируются по gateway-derived `TrendingScore`, который учитывает magnitude 24h change и liquidity proxy.
 
+Если snapshot не может вычислить конкретную метрику, gateway теперь не подставляет transport-stable `0` только ради shape-consistency. Вместо этого числовое поле может быть `null`, а причина отражается в `meta.degradedFields`.
+
 ### Market Overview: request
 
 ```http
@@ -877,6 +885,7 @@ GET /api/v1/market/overview
 - воспринимать market numbers как snapshot-derived proxies, а не как canonical multi-exchange market-cap feed;
 - использовать `meta.updatedAt` как timestamp последнего snapshot refresh, а `meta.generatedAt` как время ответа gateway;
 - `meta.degradedFields` и `meta.degradedSections` использовать как warning, а не как hard-fail trigger;
+- если snapshot деградировал, поля вроде `totalMarketCap`, `volume24h`, `btcDominance`, `fearGreedValue`, `fearGreedLabel` могут быть `null` вместо placeholder-нуля;
 - frontend cache должен учитывать route-level freshness policy `max-age=30, stale-while-revalidate=120`.
 
 ---
@@ -890,7 +899,7 @@ List-screen endpoint для market watch / asset directory / search results.
 ### Market Tickers: request
 
 ```http
-GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDir=desc&symbols=BTCUSDT,ETHUSDT
+GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDir=desc&symbols=BTCUSDT,ETHUSDT&collection=market
 ```
 
 Авторизация не требуется.
@@ -902,14 +911,17 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 | `page` | number | `1` | minimum `1` |
 | `pageSize` | number | `25` | clamp `1..100` |
 | `search` | string | `null` | match по `symbol`, `displayName`, `baseAsset`, `quoteAsset` |
-| `sortBy` | string | `rank` | one of `symbol`, `displayName`, `price`, `change24h`, `volume24h`, `marketCap`, `high24h`, `low24h`, `rank`, `updatedAt` |
-| `sortDir` | string | `desc` | `asc` or `desc` |
+| `sortBy` | string | collection-dependent | one of `symbol`, `displayName`, `price`, `change24h`, `volume24h`, `marketCap`, `high24h`, `low24h`, `rank`, `updatedAt`; special default feed sorts are `trending` and `top-movers` |
+| `sortDir` | string | collection-dependent | `asc` or `desc`; для обычного `rank` default = `asc`, для feed-style сортировок default = `desc` |
 | `symbols` | string | `null` | comma-separated whitelist of symbols |
+| `collection` | string | `market` | one of `market`, `trending`, `top-movers` |
 
 ### Market Tickers: response example
 
 ```json
 {
+  "snapshotId": "1748058300000",
+  "collection": "market",
   "items": [
     {
       "symbol": "BTCUSDT",
@@ -949,7 +961,41 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 - использовать для list/table/grid screens вместо многократных `chart` запросов;
 - `marketCap` остаётся proxy-derived полем и может быть `null`, если snapshot не смог вычислить proxy;
 - `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными;
+- `snapshotId` — cheap polling marker: если он не изменился между запросами, клиент может считать, что это тот же server snapshot;
+- `collection=trending` и `collection=top-movers` дают тот же item contract, что и обычный market list, но с backend-owned feed ordering;
 - route рассчитан на короткий public cache: `max-age=15, stale-while-revalidate=45`.
+
+---
+
+## GET /api/v1/market/trending
+
+### Trending Feed: назначение
+
+Dedicated backend feed для home-screen trending cards.
+
+### Trending Feed: request
+
+```http
+GET /api/v1/market/trending?limit=5
+```
+
+Авторизация не требуется. Endpoint возвращает тот же wrapper и тот же `MarketTickerItemDto`, что и `GET /api/v1/market/tickers`, но выставляет `collection = "trending"` и по умолчанию ранжирует items по gateway-derived `TrendingScore`.
+
+---
+
+## GET /api/v1/market/top-movers
+
+### Top Movers: назначение
+
+Dedicated backend feed для home-screen top movers.
+
+### Top Movers: request
+
+```http
+GET /api/v1/market/top-movers?limit=5
+```
+
+Авторизация не требуется. Endpoint возвращает тот же wrapper и тот же `MarketTickerItemDto`, что и `GET /api/v1/market/tickers`, но выставляет `collection = "top-movers"` и по умолчанию ранжирует items по absolute 24h move.
 
 ---
 
@@ -974,6 +1020,7 @@ Content-Type: application/json
 
 ```json
 {
+  "snapshotId": "1748058300000",
   "items": [
     {
       "symbol": "BTCUSDT",
@@ -999,6 +1046,7 @@ Content-Type: application/json
 
 - `missingSymbols` не считается hard-error: это signal, что symbol отсутствует в текущем snapshot universe;
 - endpoint не требует page/sort/search и подходит для widget-level polling;
+- `snapshotId` можно использовать как cheap freshness marker между короткими polling-циклами;
 - route рассчитан на самый короткий public cache среди market snapshot endpoints: `max-age=10, stale-while-revalidate=20`.
 
 ---
@@ -1040,6 +1088,36 @@ GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1
 
 - `source` сейчас отражает production snapshot source и в live path равен `bybit-linear-tickers`;
 - route использует тот же короткий freshness window, что и batch quotes: `max-age=10, stale-while-revalidate=20`.
+
+---
+
+## GET /api/v1/market/convert
+
+### Convert Alias: назначение
+
+Frontend-compatible alias для converter screen, когда клиент ожидает query params `from` / `to` и поле `sourceLabel`.
+
+### Convert Alias: request
+
+```http
+GET /api/v1/market/convert?from=BTC&to=USDT&amount=1
+```
+
+### Convert Alias: response example
+
+```json
+{
+  "from": "BTC",
+  "to": "USDT",
+  "amount": 1,
+  "rate": 106500,
+  "convertedAmount": 106500,
+  "sourceLabel": "bybit-linear-tickers",
+  "updatedAt": "2026-05-24T03:45:00Z"
+}
+```
+
+`GET /api/v1/market/converter/quote` остаётся совместимым legacy route для существующих клиентов, но новый frontend contract должен считать primary path именно `/api/v1/market/convert`.
 
 ---
 
@@ -1424,7 +1502,7 @@ GET /api/news?limit=20
 
 ### News: current implementation note
 
-`GET /api/news` и `GET /api/news/home` используют один и тот же sorted response builder. `GET /api/news/home` — это просто compact variant с фиксированным `limit = 3` для home screen. Каждый `NewsItemDto` может дополнительно нести `url`, `imageUrl` и `tags`. Пустая лента остаётся нормальным `200`-сценарием, а `degraded = true` выставляется только при реальной ошибке news client.
+`GET /api/news` и `GET /api/news/home` используют один и тот же sorted response builder. `GET /api/news/home` — compact variant для home screen, но он больше не жёстко пришит к `limit = 3`: клиент может передать свой `limit`, а также optional `tag`, чтобы получить server-side newest-first teaser feed. Каждый `NewsItemDto` может дополнительно нести `url`, `imageUrl` и `tags`. Пустая лента остаётся нормальным `200`-сценарием, а `degraded = true` выставляется только при реальной ошибке news client.
 
 Frontend cache note:
 
@@ -1441,10 +1519,10 @@ Compact home-screen variant news feed.
 ### News Home: request
 
 ```http
-GET /api/news/home
+GET /api/news/home?limit=3&tag=market
 ```
 
-Авторизация не требуется. Endpoint всегда использует `limit = 3` и тот же response shape, что и `GET /api/news`.
+Авторизация не требуется. Query semantics совпадают с `GET /api/news`: доступны `limit` и optional `tag`, а response shape остаётся тем же.
 
 ---
 

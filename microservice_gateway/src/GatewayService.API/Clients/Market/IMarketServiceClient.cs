@@ -15,6 +15,7 @@ public interface IMarketServiceClient
         string? sortBy = null,
         string? sortDir = null,
         IReadOnlyList<string>? symbols = null,
+        string? collection = null,
         CancellationToken ct = default);
     Task<ServiceResult<MarketBatchQuotesResponse>> GetQuotesAsync(IReadOnlyList<string> symbols, CancellationToken ct = default);
     Task<ServiceResult<MarketConverterQuoteResponse>> GetConverterQuoteAsync(string fromAsset, string toAsset, decimal amount, CancellationToken ct = default);

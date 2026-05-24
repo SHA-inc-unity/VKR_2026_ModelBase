@@ -1,254 +1,273 @@
 # API Requests For Frontend
 
-Этот файл фиксирует, какие backend/API функции реально нужны Flutter-клиенту по текущему коду в `lib/`.
+This document describes the backend contracts the current Flutter frontend is now prepared to consume in production. The frontend has been updated to prefer database-backed market snapshots, dedicated home feeds, backend-provided asset icons, and a live converter flow. The remaining work is to make the gateway expose stable production-ready endpoints for those surfaces.
 
-Цель:
+## P0. Required For Current Frontend Behavior
 
-- не терять требования между фронтом и backend;
-- разделить уже существующие routes и missing routes;
-- явно показать, где frontend сейчас живёт на proxy/fallback логике, а где backend endpoint отсутствует полностью.
-
-## Приоритет P0
-
-### 1. Public market overview for home screen
-
-Проблема:
-
-- главный экран исторически ждал `GET /api/dashboard`;
-- новый gateway-contract сделал `/api/dashboard` protected;
-- без bearer token пользователь не видел даже overview statistics;
-- сейчас во Flutter включён frontend fallback/proxy по публичным market candles, но это именно fallback, а не полноценный backend contract.
-
-Нужен один из вариантов:
-
-1. `GET /api/v1/market/overview`
-2. или guest/optional-auth support для `GET /api/dashboard` хотя бы по `marketOverview` и `trendingAssets`
-
-Минимально нужный response shape:
-
-```json
-{
-  "marketOverview": {
-    "totalMarketCap": 0,
-    "btcDominance": 0,
-    "volume24h": 0,
-    "activeAssets": 0,
-    "fearGreedValue": 0,
-    "fearGreedLabel": "Neutral"
-  },
-  "trendingAssets": ["BTCUSDT", "ETHUSDT"],
-  "meta": {
-    "generatedAt": "2026-05-23T00:00:00Z",
-    "degradedSections": []
-  }
-}
-```
-
-Почему это нужно:
-
-- home screen должен показывать настоящие market stats, а не только proxy по chart candles;
-- fear/greed и total market cap не должны вычисляться на клиенте эвристикой;
-- один server-side overview endpoint уменьшит fan-out запросов с клиента.
-
-### 2. Account auth contract usable by Flutter client
-
-Проблема:
-
-- `AuthBloc` сейчас stub-овый;
-- login/register во Flutter не интегрированы с live backend;
-- часть live account-service инстансов ещё работает на старом email-only login contract.
-
-Нужны endpoints:
-
-1. `POST /api/account/login`
-2. `POST /api/account/register`
-3. `POST /api/account/refresh`
-4. `POST /api/account/logout`
-5. `GET /api/account/me`
-
-Минимальные требования:
-
-- login должен принимать `login` или `email` + `password`, а не только email;
-- успешный login/register должен возвращать access token, refresh token, `accountType`, `roles`, `email`, `id`;
-- refresh/logout должны быть пригодны для mobile/web session flow;
-- `GET /api/account/me` уже используется и должен оставаться стабильным.
-
-## Приоритет P1
-
-### 3. Dedicated portfolio API
-
-Сейчас `PortfolioRepository` читает portfolio из `GET /api/dashboard`, но экран портфеля ожидает более богатую структуру.
-
-Предпочтительный route:
-
-- `GET /api/portfolio/summary`
-
-Ожидаемый response shape:
-
-```json
-{
-  "totalValue": 0,
-  "totalPnl": 0,
-  "totalPnlPercent": 0,
-  "assetCount": 0,
-  "exchangeCount": 0,
-  "byAsset": [
-    {
-      "symbol": "BTC",
-      "totalAmount": 0,
-      "totalValue": 0,
-      "change24h": 0,
-      "exchangeBreakdown": [
-        {
-          "exchange": "Binance",
-          "amount": 0,
-          "value": 0
-        }
-      ]
-    }
-  ],
-  "byExchange": [
-    {
-      "exchange": "Binance",
-      "totalValue": 0,
-      "change24h": 0,
-      "isSynced": true,
-      "lastSyncedAt": "2026-05-23T00:00:00Z",
-      "holdings": [
-        {
-          "symbol": "BTC",
-          "amount": 0,
-          "value": 0,
-          "change24h": 0
-        }
-      ]
-    }
-  ]
-}
-```
+### 1. Database-sorted market snapshot endpoint
 
-Почему это нужно:
+Current frontend expectation:
 
-- экран `/portfolio` уже умеет рендерить grouped-by-asset и grouped-by-exchange;
-- держать всю эту нагрузку внутри общего `/api/dashboard` неудобно и хуже для partial refresh.
+- `GET /api/v1/market/tickers`
+- The response must come pre-sorted from the database, not assembled on the client from chart fan-out.
+- Supported query params:
+  - `page`
+  - `pageSize`
+  - `search`
+  - `sortBy`
+  - `sortDir`
+  - optional `symbols=BTCUSDT,ETHUSDT,...`
+  - optional `collection=market|trending|top-movers`
 
-### 4. My Exchanges CRUD
+Required item fields:
 
-Экран `/my-exchanges` уже есть, но backend contract отсутствует.
+- `symbol`
+- `displayName`
+- `baseAsset`
+- `quoteAsset`
+- `price`
+- `change24h`
+- `volume24h`
+- `marketCap`
+- `high24h`
+- `low24h`
+- `rank`
+- `logoUrl`
+- `exchangeCount`
+- `updatedAt`
 
-Нужны routes:
+Why this matters:
 
-1. `GET /api/exchanges/available`
-2. `GET /api/exchanges/linked`
-3. `POST /api/exchanges/link`
-4. `PATCH /api/exchanges/link/{slug}`
-5. `DELETE /api/exchanges/link/{slug}`
+- The markets page must load already sorted from backend storage.
+- The frontend should not fetch hundreds of chart payloads just to render a sortable list.
+- The same snapshot contract is also now used for converter options, asset metadata, and home cards.
 
-Ожидаемые поля:
+### 2. Dedicated backend feeds for home trending and top movers
 
-- available exchange: `id`, `name`, `slug`, `logoUrl`, `isActive`, `isConnected`
-- linked exchange: `name`, `maskedKey`, `cachedBalance`, `linkedAt`
+Current frontend expectation:
 
-Важно:
+- `GET /api/v1/market/trending?limit=5`
+- `GET /api/v1/market/top-movers?limit=5`
 
-- raw API keys не должны возвращаться обратно во frontend;
-- нужен masked display value;
-- `cachedBalance` полезен для UX на списке linked exchanges.
+Required behavior:
 
-### 5. Alerts CRUD instead of read-only notifications only
+- `trending` must be an explicitly curated backend feed, not a UI-side fallback from overview.
+- `top-movers` must be pre-ranked server-side by current 24h move, ideally by absolute move unless product decides otherwise.
+- Both endpoints should return the same item contract as `GET /api/v1/market/tickers`.
 
-Сейчас экран `/alerts` знает только, что существует `GET /api/notifications`, но этого недостаточно.
+Why this matters:
 
-Нужны routes:
+- The home screen now loads `Trending` and `Top movers` separately from backend-ready repository methods.
+- These sections should stop depending on overview symbols or chart polling fallbacks.
 
-1. `GET /api/alerts`
-2. `POST /api/alerts`
-3. `PATCH /api/alerts/{id}`
-4. `DELETE /api/alerts/{id}`
-5. `GET /api/notifications` оставить для delivery history / inbox
+### 3. Stable asset metadata for icons and detail screens
 
-Минимальный alert payload:
+Current frontend expectation:
 
-```json
-{
-  "id": "uuid-or-int",
-  "symbol": "BTCUSDT",
-  "condition": "above",
-  "targetPrice": 70000,
-  "isEnabled": true,
-  "createdAt": "2026-05-23T00:00:00Z"
-}
-```
+- `logoUrl`, `displayName`, and `marketCap` must be available from the same market snapshot family.
+- The frontend now looks up single-asset metadata via `GET /api/v1/market/tickers?symbols=...` when it needs icons and capitalization outside the market list.
 
-## Приоритет P2
+Required behavior:
 
-### 6. Settings service toggles
+- `logoUrl` should be backend-owned and stable for:
+  - market list items
+  - trending items
+  - top movers
+  - single-symbol metadata lookups
+- `displayName` should be human-readable and not require frontend symbol heuristics.
+- `marketCap` must be real numeric data or `null`, never a placeholder string.
 
-В `SettingsScreen` сейчас заглушка: service toggles endpoint не описан.
+Why this matters:
 
-Нужен route:
+- Currency icons should load from backend data.
+- Asset detail should stop showing broken market-cap placeholders.
 
-- `GET /api/services/toggles`
-- опционально `PATCH /api/services/toggles`
+### 4. Real capitalization and overview metrics
 
-Минимальный response:
+Current frontend expectation:
 
-```json
-{
-  "news": true,
-  "alerts": true,
-  "portfolioSync": true,
-  "marketOverview": true
-}
-```
+- `GET /api/v1/market/overview`
 
-### 7. Admin panel summary surface
+Required fields:
 
-`/admin` экран существует, но backend contract для него во Flutter-приложении не описан.
+- `totalMarketCap`
+- `volume24h`
+- `btcDominance`
+- `fearGreedValue`
+- `fearGreedLabel`
+- `activeAssets`
+- `generatedAt` or `updatedAt`
+- optional `degradedSections`
 
-Нужны минимум:
+Required behavior:
 
-1. `GET /api/admin/summary`
-2. `GET /api/admin/users`
-3. `GET /api/admin/services`
-4. `GET /api/admin/statistics`
+- Return real aggregated values in production.
+- If some metrics are unavailable, return `null` plus explicit degradation metadata.
+- Do not return UI-breaking placeholder values like `0` for everything or textual placeholders such as `404 API`.
 
-Замечание:
+Why this matters:
 
-- это именно frontend admin needs для `crypt` app;
-- не путать с существующим `microservice_admin` backend facade `/api/admin/*` для отдельной admin-панели ModelBase.
+- Home overview and asset detail currently rely on these values to present capitalization and market health.
 
-## Уже используемые и рабочие routes
+### 5. News feed contract for both home and full news screen
 
-Эти routes уже реально используются Flutter-клиентом:
+Current frontend expectation:
 
-1. `GET /api/app/bootstrap`
-2. `GET /api/account/me`
-3. `GET /api/dashboard` — protected
-4. `GET /api/v1/market/config`
-5. `GET /api/v1/market/chart`
-6. `GET /api/news`
-7. `GET /api/notifications`
+- `GET /api/news`
+- Optional dedicated teaser route: `GET /api/news/home?limit=3`
 
-## Важные contract notes
+Required query support:
 
-### Market chart/config
+- `limit`
+- optional `tag`
+- optional pagination or cursor field if the feed grows
 
-Frontend сильно опирается на пару:
+Required item fields:
 
-1. `GET /api/v1/market/config`
-2. `GET /api/v1/market/chart`
+- `id`
+- `title`
+- `summary`
+- `source`
+- `publishedAt`
+- `url`
+- optional `imageUrl`
+- optional `tags`
 
-Требования к стабильности:
+Required behavior:
 
-- default symbol/timeframe из config не должны возвращать пустые candles без ясной причины;
-- `chart` должен продолжать возвращать предсказуемые `status`, `meta.available`, `meta.coverage`;
-- symbol names между config и chart должны быть согласованы без ручных alias-хаков на фронте.
+- Results must be newest-first and stable.
+- Home teaser and full news screen must read from backend, not from a client-side mock.
+- If `dashboard.latestNews` remains available as a fallback, the dedicated news feed should still be treated as the primary contract.
 
-### Dashboard degradation
+Why this matters:
 
-Если backend временно не может вернуть часть sections, для фронта лучше soft-degraded `200` с явным `meta.degradedSections`, чем hard `404`/`500` без структуры.
+- The news screen and home news section have been prepared to render real backend stories, but they need a reliable feed contract.
 
-### Public vs protected split
+### 6. Converter quote endpoint
 
-Если route защищён, желательно иметь один явный public аналог для home/guest experience, а не заставлять Flutter вычислять proxy-метрики на клиенте.
+Current frontend expectation:
+
+- `GET /api/v1/market/convert`
+
+Required query params:
+
+- `from`
+- `to`
+- `amount`
+
+Required response fields:
+
+- `from`
+- `to`
+- `amount`
+- `rate`
+- `convertedAmount`
+- `sourceLabel`
+- `updatedAt`
+
+Why this matters:
+
+- The converter screen is no longer a placeholder on the frontend side.
+- The current temporary client-side conversion should be replaced by a backend-owned quote contract.
+
+### 7. Cheap 5-second market refresh contract
+
+Current frontend expectation:
+
+- The markets screen now performs a 5-second visual price pulse on the client.
+- It still needs cheap backend snapshots to rebase those values regularly.
+
+Required backend behavior:
+
+- `GET /api/v1/market/tickers` should be cheap enough to poll frequently.
+- Each item should carry `updatedAt`.
+- The payload should ideally also include a top-level `snapshotId` or `sequence` so the frontend can detect real server updates.
+- Expose sensible `Cache-Control` and/or `ETag` semantics for public market snapshot routes.
+
+Why this matters:
+
+- The frontend should not use chart endpoints as a pseudo-realtime list transport.
+
+## P1. Protected And Auth-sensitive Routes
+
+### 8. Stable auth envelope for alerts
+
+Current frontend expectation:
+
+- Guest users no longer see alerts entry points in the UI.
+- Direct route hits and stale sessions can still happen.
+
+Required behavior:
+
+- `/api/alerts/*` should always return one stable JSON error envelope on auth failure.
+- Expected fields:
+  - `status`
+  - `title`
+  - `detail`
+  - optional `code`
+
+Why this matters:
+
+- Even though alerts are hidden for guests, direct navigation and token expiry still need predictable backend behavior.
+
+## P2. Compatibility Notes
+
+### 9. Keep old chart and overview routes valid while new snapshot endpoints land
+
+Current frontend expectation:
+
+- The frontend still contains compatibility fallbacks for:
+  - `GET /api/v1/market/config`
+  - `GET /api/v1/market/chart`
+  - `GET /api/v1/market/overview`
+
+Required behavior:
+
+- Keep those routes stable while the richer snapshot and home-feed endpoints are being added.
+- Once `tickers`, `trending`, `top-movers`, `convert`, and stable `news` are live, the remaining chart fan-out code can be removed from the frontend.
+
+Why this matters:
+
+- This lets backend and frontend migrate incrementally without another placeholder cycle on production screens.
+
+## P1. Protected And Auth-sensitive Routes
+
+### 8. Stable auth envelope for alerts
+
+Current frontend expectation:
+
+- Guest users no longer see alerts entry points in the UI.
+- Direct route hits and stale sessions can still happen.
+
+Required behavior:
+
+- `/api/alerts/*` should always return one stable JSON error envelope on auth failure.
+- Expected fields:
+  - `status`
+  - `title`
+  - `detail`
+  - optional `code`
+
+Why this matters:
+
+- Even though alerts are hidden for guests, direct navigation and token expiry still need predictable backend behavior.
+
+## P2. Compatibility Notes
+
+### 9. Keep old chart and overview routes valid while new snapshot endpoints land
+
+Current frontend expectation:
+
+- The frontend still contains compatibility fallbacks for:
+  - `GET /api/v1/market/config`
+  - `GET /api/v1/market/chart`
+  - `GET /api/v1/market/overview`
+
+Required behavior:
+
+- Keep those routes stable while the richer snapshot and home-feed endpoints are being added.
+- Once `tickers`, `trending`, `top-movers`, `convert`, and stable `news` are live, the remaining chart fan-out code can be removed from the frontend.
+
+Why this matters:
+
+- This lets backend and frontend migrate incrementally without another placeholder cycle on production screens.

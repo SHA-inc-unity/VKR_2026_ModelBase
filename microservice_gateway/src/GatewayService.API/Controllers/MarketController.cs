@@ -79,16 +79,61 @@ public sealed class MarketController : ControllerBase
         [FromQuery] string? sortBy = null,
         [FromQuery] string? sortDir = null,
         [FromQuery] string? symbols = null,
+        [FromQuery] string? collection = null,
         CancellationToken ct = default)
     {
         var filteredSymbols = string.IsNullOrWhiteSpace(symbols)
             ? Array.Empty<string>()
             : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        var result = await _market.GetTickersAsync(page, pageSize, search, sortBy, sortDir, filteredSymbols, ct);
+        var result = await _market.GetTickersAsync(page, pageSize, search, sortBy, sortDir, filteredSymbols, collection, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid tickers request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(result.Value);
+    }
+
+    [HttpGet("trending")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetTrending(
+        [FromQuery] int limit = 5,
+        [FromQuery] string? symbols = null,
+        CancellationToken ct = default)
+    {
+        var filteredSymbols = string.IsNullOrWhiteSpace(symbols)
+            ? Array.Empty<string>()
+            : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "trending", ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid trending request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(result.Value);
+    }
+
+    [HttpGet("top-movers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetTopMovers(
+        [FromQuery] int limit = 5,
+        [FromQuery] string? symbols = null,
+        CancellationToken ct = default)
+    {
+        var filteredSymbols = string.IsNullOrWhiteSpace(symbols)
+            ? Array.Empty<string>()
+            : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "top-movers", ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid top movers request", HttpContext.GetCorrelationId()));
         }
 
         Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
@@ -127,6 +172,41 @@ public sealed class MarketController : ControllerBase
 
         Response.Headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=20";
         return Ok(result.Value);
+    }
+
+    [HttpGet("convert")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> Convert(
+        [FromQuery(Name = "from")] string? from,
+        [FromQuery(Name = "to")] string? to,
+        [FromQuery] decimal amount = 1,
+        CancellationToken ct = default)
+    {
+        var fromAsset = string.IsNullOrWhiteSpace(from)
+            ? Request.Query["fromAsset"].ToString()
+            : from;
+        var toAsset = string.IsNullOrWhiteSpace(to)
+            ? Request.Query["toAsset"].ToString()
+            : to;
+
+        var result = await _market.GetConverterQuoteAsync(fromAsset, toAsset, amount, ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid convert request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=20";
+        return Ok(new MarketConvertResponse
+        {
+            From = result.Value.FromAsset,
+            To = result.Value.ToAsset,
+            Amount = result.Value.Amount,
+            Rate = result.Value.Rate,
+            ConvertedAmount = result.Value.ConvertedAmount,
+            SourceLabel = result.Value.Source,
+            UpdatedAt = result.Value.UpdatedAt,
+        });
     }
 
     /// <summary>

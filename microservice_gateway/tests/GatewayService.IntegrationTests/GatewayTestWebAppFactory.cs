@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using System.Globalization;
 
 namespace GatewayService.IntegrationTests;
 
@@ -280,8 +281,15 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
         }));
     }
 
-    public Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(int page = 1, int pageSize = 25, string? search = null, string? sortBy = null, string? sortDir = null, IReadOnlyList<string>? symbols = null, CancellationToken ct = default)
+    public Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(int page = 1, int pageSize = 25, string? search = null, string? sortBy = null, string? sortDir = null, IReadOnlyList<string>? symbols = null, string? collection = null, CancellationToken ct = default)
     {
+        var normalizedCollection = collection?.Trim().ToLowerInvariant() switch
+        {
+            "trending" => "trending",
+            "top-movers" => "top-movers",
+            _ => "market"
+        };
+
         IEnumerable<MarketTickerItemDto> items = Items;
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -294,9 +302,18 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
             items = items.Where(item => filter.Contains(item.Symbol));
         }
 
+        items = normalizedCollection switch
+        {
+            "trending" => items.Where(item => item.IsTrending).OrderByDescending(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
+            "top-movers" => items.OrderByDescending(item => Math.Abs(item.Change24h)).ThenByDescending(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
+            _ => items.OrderBy(item => item.Rank)
+        };
+
         var pageItems = items.Take(pageSize).ToArray();
         return Task.FromResult(ServiceResult<MarketTickersResponse>.Ok(new MarketTickersResponse
         {
+            SnapshotId = UpdatedAt.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
+            Collection = normalizedCollection,
             Items = pageItems,
             Total = pageItems.Length,
             Page = page,
@@ -328,6 +345,7 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
 
         return Task.FromResult(ServiceResult<MarketBatchQuotesResponse>.Ok(new MarketBatchQuotesResponse
         {
+            SnapshotId = UpdatedAt.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
             Items = items,
             MissingSymbols = [],
             Meta = new FrontendResponseMetaDto

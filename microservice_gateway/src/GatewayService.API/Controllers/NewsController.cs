@@ -20,34 +20,40 @@ public sealed class NewsController : ControllerBase
     /// <param name="limit">Max number of items to return (default 20, max 100).</param>
     [HttpGet]
     [AllowAnonymous]
-    public async Task<IActionResult> GetList([FromQuery] int limit = 20, CancellationToken ct = default)
+    public async Task<IActionResult> GetList([FromQuery] int limit = 20, [FromQuery] string? tag = null, CancellationToken ct = default)
     {
-        var response = await BuildResponseAsync(limit, ct);
+        var response = await BuildResponseAsync(limit, tag, ct);
         Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=300";
         return Ok(response);
     }
 
     [HttpGet("home")]
     [AllowAnonymous]
-    public async Task<IActionResult> GetHome(CancellationToken ct = default)
+    public async Task<IActionResult> GetHome([FromQuery] int limit = 3, [FromQuery] string? tag = null, CancellationToken ct = default)
     {
-        var response = await BuildResponseAsync(limit: 3, ct);
+        var response = await BuildResponseAsync(limit, tag, ct);
         Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=300";
         return Ok(response);
     }
 
-    private async Task<NewsListResponse> BuildResponseAsync(int limit, CancellationToken ct)
+    private async Task<NewsListResponse> BuildResponseAsync(int limit, string? tag, CancellationToken ct)
     {
         limit = Math.Clamp(limit, 1, 100);
+        var normalizedTag = string.IsNullOrWhiteSpace(tag) ? null : tag.Trim();
         var result = await _news.GetLatestAsync(limit, ct);
-        var items = result.IsSuccess
-            ? (result.Value ?? []).OrderByDescending(item => item.PublishedAt).Take(limit).ToArray()
-            : Array.Empty<NewsItemDto>();
+        IEnumerable<NewsItemDto> items = result.IsSuccess ? result.Value ?? [] : [];
+
+        if (!string.IsNullOrWhiteSpace(normalizedTag))
+        {
+            items = items.Where(item => item.Tags.Contains(normalizedTag, StringComparer.OrdinalIgnoreCase));
+        }
+
+        var materializedItems = items.OrderByDescending(item => item.PublishedAt).Take(limit).ToArray();
 
         var response = new NewsListResponse
         {
-            Items = items,
-            Total = items.Length,
+            Items = materializedItems,
+            Total = materializedItems.Length,
             Degraded = !result.IsSuccess
         };
 

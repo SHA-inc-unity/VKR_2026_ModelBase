@@ -6,7 +6,7 @@ Mobile BFF gateway для внешних HTTP-запросов.
 
 `/api/admin/*` — server-to-server admin facade, защищённый Account Service JWT с ролью `admin`; legacy static-key auth не используется.
 Фасад теперь включает и dedicated `market-watcher/*` routes для split-mode страницы `microservice_admin` `/market-watcher`.
-Отдельно gateway держит lightweight frontend-contract surface для mobile/web: auth passthrough `POST /api/account/{register,login,refresh,logout}`, public `GET /api/v1/market/{overview,tickers,converter/quote,config,chart}`, `POST /api/v1/market/quotes/batch`, `GET /api/news/home`, personal `GET /api/portfolio/summary`, `/api/exchanges/*`, `/api/alerts/*`, `/api/services/toggles` и `GET /api/admin/{summary,users,services,statistics}`. Personal fallback state больше не strictly process-local: он хранится через `IDistributedCache` и становится shared/durable при настроенном Redis. При изменении routes, error envelopes или persistence semantics Markdown нужно синхронизировать особенно внимательно.
+Отдельно gateway держит lightweight frontend-contract surface для mobile/web: auth passthrough `POST /api/account/{register,login,refresh,logout}`, public `GET /api/v1/market/{overview,tickers,trending,top-movers,convert,converter/quote,config,chart}`, `POST /api/v1/market/quotes/batch`, `GET /api/news/home`, personal `GET /api/portfolio/summary`, `/api/exchanges/*`, `/api/alerts/*`, `/api/services/toggles` и `GET /api/admin/{summary,users,services,statistics}`. Personal fallback state больше не strictly process-local: он хранится через `IDistributedCache` и становится shared/durable при настроенном Redis. При изменении routes, error envelopes или persistence semantics Markdown нужно синхронизировать особенно внимательно.
 
 ## Что читать перед кодом
 

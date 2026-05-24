@@ -9,12 +9,12 @@ public sealed record PublicMarketOverviewResponse
 
 public sealed record PublicMarketOverviewDto
 {
-    public decimal TotalMarketCap { get; init; }
-    public decimal BtcDominance { get; init; }
-    public decimal Volume24h { get; init; }
+    public decimal? TotalMarketCap { get; init; }
+    public decimal? BtcDominance { get; init; }
+    public decimal? Volume24h { get; init; }
     public int ActiveAssets { get; init; }
-    public int FearGreedValue { get; init; }
-    public string FearGreedLabel { get; init; } = "Neutral";
+    public int? FearGreedValue { get; init; }
+    public string? FearGreedLabel { get; init; }
 }
 
 public sealed record FrontendResponseMetaDto
