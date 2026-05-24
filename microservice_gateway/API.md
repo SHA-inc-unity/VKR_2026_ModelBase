@@ -820,7 +820,7 @@ GET /api/dashboard
 
 Текущая реализация уже не падает в degraded по умолчанию на каждой секции:
 
-- `marketOverview` и `trendingAssets` получают snapshot-derived payload из gateway market snapshot layer;
+- `marketOverview` получает canonical global payload из внешних market feeds, а `trendingAssets` остаются snapshot-derived из gateway market snapshot layer;
 - `latestNews` использует тот же sorted fallback path, что и `/api/news` / `/api/news/home`;
 - `portfolio` для аутентифицированного пользователя берётся из gateway-owned frontend state и отражает только linked exchanges, созданные через `/api/exchanges/*`.
 
