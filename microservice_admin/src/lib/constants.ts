@@ -56,8 +56,16 @@ export function formatDateFromMs(ms: number | null | undefined): string | undefi
  */
 export function getCoveragePct(
   table: string,
-  cv: { rows?: number | null; min_ts_ms?: number | null; max_ts_ms?: number | null } | null | undefined,
+  cv: {
+    rows?: number | null;
+    min_ts_ms?: number | null;
+    max_ts_ms?: number | null;
+    coverage_pct?: number | null;
+    rows_known?: boolean | null;
+  } | null | undefined,
 ): number | null {
+  if (typeof cv?.coverage_pct === 'number') return cv.coverage_pct;
+  if (cv?.rows_known === false) return null;
   if (!cv?.rows || !cv.min_ts_ms || !cv.max_ts_ms) return null;
   const tf = table.split('_').pop();
   const stepMs = tf ? TF_STEP_MS[tf] : undefined;

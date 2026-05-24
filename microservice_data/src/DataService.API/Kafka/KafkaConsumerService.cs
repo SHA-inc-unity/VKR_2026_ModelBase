@@ -359,19 +359,18 @@ public sealed partial class KafkaConsumerService : BackgroundService
     {
         var names = await _repo.ListTablesAsync(ct);
 
-        // Fetch coverage for every table in parallel; each item always has
-        // the shape front-end expects (table_name, rows, coverage_pct, date_from, date_to),
-        // even when the table is empty or coverage is unavailable.
+        // Cheap path: fetch only table bounds for every table in parallel.
+        // Exact COUNT(*) coverage is reserved for explicit on-demand coverage checks.
         var tasks = names.Select(async name =>
         {
             try
             {
-                var cov = await _repo.GetCoverageIfExistsAsync(name, ct);
-                return BuildTableInfo(name, cov);
+                var bounds = await _repo.GetBoundsIfExistsAsync(name, ct);
+                return BuildTableBoundsInfo(name, bounds);
             }
             catch
             {
-                return BuildTableInfo(name, null);
+                return BuildTableBoundsInfo(name, null);
             }
         });
         var tables = await Task.WhenAll(tasks);
@@ -502,6 +501,41 @@ public sealed partial class KafkaConsumerService : BackgroundService
             coverage_pct = pct,
             date_from    = FormatDate(cov.Value.MinTsMs),
             date_to      = FormatDate(cov.Value.MaxTsMs),
+        };
+    }
+
+    private static object BuildTableBoundsInfo(
+        string tableName,
+        (long MinTsMs, long MaxTsMs)? bounds)
+    {
+        if (bounds is null)
+        {
+            return new
+            {
+                table_name   = tableName,
+                rows         = 0L,
+                rows_known   = false,
+                coverage_pct = (double?)null,
+                date_from    = (string?)null,
+                date_to      = (string?)null,
+            };
+        }
+
+        long approxRows = 0L;
+        var stepMs = TryGetStepMsFromTableName(tableName);
+        if (stepMs is long step && bounds.Value.MaxTsMs >= bounds.Value.MinTsMs)
+        {
+            approxRows = Math.Max(1L, (bounds.Value.MaxTsMs - bounds.Value.MinTsMs) / step + 1);
+        }
+
+        return new
+        {
+            table_name   = tableName,
+            rows         = approxRows,
+            rows_known   = false,
+            coverage_pct = (double?)null,
+            date_from    = FormatDate(bounds.Value.MinTsMs),
+            date_to      = FormatDate(bounds.Value.MaxTsMs),
         };
     }
 
@@ -1295,11 +1329,21 @@ public sealed partial class KafkaConsumerService : BackgroundService
 
             long featuresUpdated = 0;
             string? featuresError = null;
+            var updateFromMs = rows.Count > 0
+                ? rows.Min(static row => row.TimestampMs)
+                : (long?)null;
             try
             {
-                featuresUpdated = await _repo.ComputeAndUpdateFeaturesAsync(table, ct);
+                if (updateFromMs is long updateFrom)
+                {
+                    featuresUpdated = await _repo.ComputeAndUpdateFeaturesSinceAsync(table, updateFrom, ct);
+                }
                 await PublishIngestProgressAsync(correlationId, featStage, featLabel,
-                    "done", 100, $"{featuresUpdated} строк обновлено", ct);
+                    "done", 100,
+                    updateFromMs is long sinceMs
+                        ? $"{featuresUpdated} строк обновлено с {sinceMs}"
+                        : "Новые строки не материализованы; пересчёт не потребовался",
+                    ct);
             }
             catch (Exception fex)
             {
@@ -1769,11 +1813,20 @@ public sealed partial class KafkaConsumerService : BackgroundService
     {
         var table = TryGetString(payload, "table");
         if (string.IsNullOrWhiteSpace(table)) return new { error = "missing field: table" };
+        var updateFromMs = TryGetInt64(payload, "update_from_ms");
 
         try
         {
-            var rowsUpdated = await _repo.ComputeAndUpdateFeaturesAsync(table, ct);
-            return new { status = "ok", table, rows_updated = rowsUpdated };
+            var rowsUpdated = updateFromMs is long updateFrom
+                ? await _repo.ComputeAndUpdateFeaturesSinceAsync(table, updateFrom, ct)
+                : await _repo.ComputeAndUpdateFeaturesAsync(table, ct);
+            return new
+            {
+                status = "ok",
+                table,
+                rows_updated = rowsUpdated,
+                update_from_ms = updateFromMs,
+            };
         }
         catch (ArgumentException ex)
         {

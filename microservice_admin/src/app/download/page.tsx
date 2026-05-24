@@ -98,7 +98,8 @@ function loadParams(): DatasetPageParams | null {
 interface DataTableInfo {
   table_name: string;
   rows: number;
-  coverage_pct: number;
+  rows_known?: boolean;
+  coverage_pct?: number | null;
   date_from?: string;
   date_to?: string;
 }
@@ -106,17 +107,24 @@ interface DataTableInfo {
 interface CoverageResult {
   table_name: string;
   rows: number;
-  expected: number;
-  coverage_pct: number;
-  gaps: number;
+  rows_known?: boolean;
+  expected: number | null;
+  coverage_pct?: number | null;
+  gaps: number | null;
 }
 
 interface AllCoverageItem {
   tf: string;
   rows: number;
-  coverage_pct: number;
+  rows_known?: boolean;
+  coverage_pct?: number | null;
   date_from?: string;
   date_to?: string;
+}
+
+function formatRows(rows: number | undefined, rowsKnown?: boolean): string {
+  if (!rows || rows <= 0) return '—';
+  return rowsKnown === false ? `~${rows.toLocaleString()}` : rows.toLocaleString();
 }
 
 // 'pending'  — local placeholder before kafkaCall returns (or before queue insert)
@@ -883,17 +891,18 @@ export default function DatasetPage() {
               const table = makeTableName(symbol, tf, exchange);
               const cv = await kafkaCall<TableCoverage>(
                 Topics.CMD_DATA_DATASET_COVERAGE,
-                { table },
+                { table, include_rows: false },
               );
               return {
                 tf,
                 rows:         cv?.rows ?? 0,
-                coverage_pct: getCoveragePct(table, cv) ?? 0,
+                rows_known:   cv?.rows_known ?? false,
+                coverage_pct: getCoveragePct(table, cv),
                 date_from:    formatDateFromMs(cv?.min_ts_ms),
                 date_to:      formatDateFromMs(cv?.max_ts_ms),
               } satisfies AllCoverageItem;
             } catch {
-              return { tf, rows: 0, coverage_pct: 0 } satisfies AllCoverageItem;
+              return { tf, rows: 0, rows_known: false, coverage_pct: null } satisfies AllCoverageItem;
             }
           }),
         );
@@ -901,24 +910,17 @@ export default function DatasetPage() {
         void cacheWrite(allCoverageCacheKey(symbol, exchange), results, CACHE_COVERAGE_TTL);
       } else {
         const table   = makeTableName(symbol, timeframe, exchange);
-        const startMs = new Date(dateFrom).getTime();
-        const endMs   = new Date(dateTo + 'T23:59:59').getTime();
         const cv = await kafkaCall<TableCoverage>(
           Topics.CMD_DATA_DATASET_COVERAGE,
-          { table },
+          { table, include_rows: false },
         );
-        const stepMs = TF_STEP_MS[timeframe];
-        const expected = stepMs && endMs > startMs
-          ? Math.max(0, Math.floor((endMs - startMs) / stepMs) + 1)
-          : 0;
-        const rows = cv?.rows ?? 0;
-        const coveragePct = getCoveragePct(table, cv) ?? 0;
         const result: CoverageResult = {
           table_name:   table,
-          rows,
-          expected,
-          coverage_pct: coveragePct,
-          gaps: Math.max(0, expected - rows),
+          rows:         cv?.rows ?? 0,
+          rows_known:   cv?.rows_known ?? false,
+          expected:     null,
+          coverage_pct: getCoveragePct(table, cv),
+          gaps:         null,
         };
         setCoverage(result);
         void cacheWrite(coverageCacheKey(symbol, timeframe, exchange), result, CACHE_COVERAGE_TTL);
@@ -1075,7 +1077,8 @@ export default function DatasetPage() {
     setLoadingList(true);
     const t0 = Date.now();
     try {
-      // Backend enriches every entry with rows / coverage_pct / date_from / date_to
+      // Backend enriches every entry with bounds metadata in a single round-trip.
+      // Exact counts stay on the explicit coverage path only.
       // in a single round-trip. Legacy string[] is still tolerated here so a
       // rolling deploy where DataService is older than Admin doesn't break the
       // page; that fallback should be removed once both services are in lockstep.
@@ -1083,6 +1086,7 @@ export default function DatasetPage() {
         tables: Array<string | {
           table_name: string;
           rows?: number;
+          rows_known?: boolean;
           coverage_pct?: number;
           date_from?: string | null;
           date_to?: string | null;
@@ -1093,13 +1097,14 @@ export default function DatasetPage() {
       );
 
       const raw = res.tables ?? [];
-      const enriched = raw.filter((x): x is { table_name: string; rows?: number; coverage_pct?: number; date_from?: string | null; date_to?: string | null } => typeof x !== 'string');
+      const enriched = raw.filter((x): x is { table_name: string; rows?: number; rows_known?: boolean; coverage_pct?: number; date_from?: string | null; date_to?: string | null } => typeof x !== 'string');
       const legacyNames = raw.filter((x): x is string => typeof x === 'string');
 
       const fromEnriched: DataTableInfo[] = enriched.map(t => ({
         table_name:   t.table_name,
         rows:         t.rows ?? 0,
-        coverage_pct: t.coverage_pct ?? 0,
+        rows_known:   t.rows_known ?? true,
+        coverage_pct: t.coverage_pct ?? null,
         date_from:    t.date_from ?? undefined,
         date_to:      t.date_to ?? undefined,
       }));
@@ -1112,17 +1117,18 @@ export default function DatasetPage() {
           try {
             const cv = await kafkaCall<TableCoverage>(
               Topics.CMD_DATA_DATASET_COVERAGE,
-              { table: name },
+              { table: name, include_rows: false },
             );
             return {
               table_name:   name,
               rows:         cv?.rows ?? 0,
-              coverage_pct: getCoveragePct(name, cv) ?? 0,
+              rows_known:   cv?.rows_known ?? false,
+              coverage_pct: getCoveragePct(name, cv),
               date_from:    formatDateFromMs(cv?.min_ts_ms),
               date_to:      formatDateFromMs(cv?.max_ts_ms),
             };
           } catch {
-            return { table_name: name, rows: 0, coverage_pct: 0 };
+            return { table_name: name, rows: 0, rows_known: false, coverage_pct: null };
           }
         }),
       );
@@ -1151,6 +1157,8 @@ export default function DatasetPage() {
     setLoadingCov(true);
     const t0 = Date.now();
     try {
+      const startMs = new Date(dateFrom).getTime();
+      const endMs   = new Date(`${dateTo}T23:59:59`).getTime();
       if (timeframe === 'ALL') {
         setCoverage(null);
         const results = await Promise.all(
@@ -1159,17 +1167,18 @@ export default function DatasetPage() {
               const table = makeTableName(symbol, tf, exchange);
               const cv = await kafkaCall<TableCoverage>(
                 Topics.CMD_DATA_DATASET_COVERAGE,
-                { table },
+                { table, timeframe: tf, start_ms: startMs, end_ms: endMs },
               );
               return {
                 tf,
-                rows:         cv?.rows ?? 0,
-                coverage_pct: getCoveragePct(table, cv) ?? 0,
+                rows:         cv?.rows_in_range ?? cv?.rows ?? 0,
+                rows_known:   cv?.rows_known ?? true,
+                coverage_pct: getCoveragePct(table, cv),
                 date_from:    formatDateFromMs(cv?.min_ts_ms),
                 date_to:      formatDateFromMs(cv?.max_ts_ms),
               } satisfies AllCoverageItem;
             } catch {
-              return { tf, rows: 0, coverage_pct: 0 } satisfies AllCoverageItem;
+              return { tf, rows: 0, rows_known: true, coverage_pct: null } satisfies AllCoverageItem;
             }
           }),
         );
@@ -1179,32 +1188,31 @@ export default function DatasetPage() {
       } else {
         setAllCoverages(null);
         const table   = makeTableName(symbol, timeframe, exchange);
-        const startMs = new Date(dateFrom).getTime();
-        const endMs   = new Date(dateTo + 'T23:59:59').getTime();
 
         const cv = await kafkaCall<TableCoverage>(
           Topics.CMD_DATA_DATASET_COVERAGE,
-          { table },
+          { table, timeframe, start_ms: startMs, end_ms: endMs },
         );
 
         const stepMs = TF_STEP_MS[timeframe];
-        const expected = stepMs && endMs > startMs
+        const expected = cv?.expected ?? (stepMs && endMs > startMs
           ? Math.max(0, Math.floor((endMs - startMs) / stepMs) + 1)
-          : 0;
-        const rows = cv?.rows ?? 0;
-        const coveragePct = getCoveragePct(table, cv) ?? 0;
-        const gaps = Math.max(0, expected - rows);
+          : 0);
+        const rows = cv?.rows_in_range ?? cv?.rows ?? 0;
+        const coveragePct = getCoveragePct(table, cv);
+        const gaps = cv?.gaps ?? Math.max(0, expected - rows);
 
         const result: CoverageResult = {
           table_name:   table,
           rows,
+          rows_known:   cv?.rows_known ?? true,
           expected,
           coverage_pct: coveragePct,
           gaps,
         };
         setCoverage(result);
         void cacheWrite(coverageCacheKey(symbol, timeframe, exchange), result, CACHE_COVERAGE_TTL);
-        addEntry({ action: 'Check', params: { symbol, timeframe, exchange, dateFrom, dateTo }, result: `${coveragePct.toFixed(1)}% coverage`, durationMs: Date.now() - t0 });
+        addEntry({ action: 'Check', params: { symbol, timeframe, exchange, dateFrom, dateTo }, result: coveragePct != null ? `${coveragePct.toFixed(1)}% coverage` : 'Coverage metadata loaded', durationMs: Date.now() - t0 });
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -2058,18 +2066,22 @@ export default function DatasetPage() {
                   {allCoverages.map(row => (
                     <TableRow key={row.tf}>
                       <TableCell className="font-mono text-xs">{row.tf}</TableCell>
-                      <TableCell className="text-xs text-right">{row.rows.toLocaleString()}</TableCell>
+                      <TableCell className="text-xs text-right">{formatRows(row.rows, row.rows_known)}</TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-2">
-                          <Progress value={row.coverage_pct ?? 0} className="h-1.5 flex-1" />
-                          <span className={cn(
-                            'text-xs w-10 text-right tabular-nums',
-                            (row.coverage_pct ?? 0) >= 95 ? 'text-success' :
-                            (row.coverage_pct ?? 0) >= 70 ? 'text-warning' : 'text-destructive',
-                          )}>
-                            {(row.coverage_pct ?? 0).toFixed(1)}%
-                          </span>
-                        </div>
+                        {row.coverage_pct == null ? (
+                          <span className="text-xs text-muted-foreground">On demand</span>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Progress value={row.coverage_pct} className="h-1.5 flex-1" />
+                            <span className={cn(
+                              'text-xs w-10 text-right tabular-nums',
+                              row.coverage_pct >= 95 ? 'text-success' :
+                              row.coverage_pct >= 70 ? 'text-warning' : 'text-destructive',
+                            )}>
+                              {row.coverage_pct.toFixed(1)}%
+                            </span>
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">{row.date_from ?? '--'}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">{row.date_to ?? '--'}</TableCell>
@@ -2094,15 +2106,15 @@ export default function DatasetPage() {
               <div className="grid grid-cols-1 xs:grid-cols-3 gap-3 sm:gap-4">
                 <div className="space-y-1">
                   <p className="text-xs text-muted-foreground">Rows</p>
-                  <p className="text-lg font-bold">{coverage.rows?.toLocaleString()}</p>
+                  <p className="text-lg font-bold">{formatRows(coverage.rows, coverage.rows_known)}</p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-xs text-muted-foreground">Expected</p>
-                  <p className="text-lg font-bold">{coverage.expected?.toLocaleString()}</p>
+                  <p className="text-lg font-bold">{coverage.expected?.toLocaleString() ?? '—'}</p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-xs text-muted-foreground">Gaps</p>
-                  <p className="text-lg font-bold">{coverage.gaps}</p>
+                  <p className="text-lg font-bold">{coverage.gaps?.toLocaleString() ?? '—'}</p>
                 </div>
               </div>
             </CardContent>
@@ -2154,18 +2166,22 @@ export default function DatasetPage() {
                   {tables.map(row => (
                     <TableRow key={row.table_name}>
                       <TableCell className="font-mono text-xs">{row.table_name}</TableCell>
-                      <TableCell className="text-xs text-right">{row.rows?.toLocaleString()}</TableCell>
+                      <TableCell className="text-xs text-right">{formatRows(row.rows, row.rows_known)}</TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-2">
-                          <Progress value={row.coverage_pct ?? 0} className="h-1.5 flex-1" />
-                          <span className={cn(
-                            'text-xs w-10 text-right tabular-nums',
-                            (row.coverage_pct ?? 0) >= 95 ? 'text-success' :
-                            (row.coverage_pct ?? 0) >= 70 ? 'text-warning' : 'text-destructive',
-                          )}>
-                            {(row.coverage_pct ?? 0).toFixed(1)}%
-                          </span>
-                        </div>
+                        {row.coverage_pct == null ? (
+                          <span className="text-xs text-muted-foreground">On demand</span>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Progress value={row.coverage_pct} className="h-1.5 flex-1" />
+                            <span className={cn(
+                              'text-xs w-10 text-right tabular-nums',
+                              row.coverage_pct >= 95 ? 'text-success' :
+                              row.coverage_pct >= 70 ? 'text-warning' : 'text-destructive',
+                            )}>
+                              {row.coverage_pct.toFixed(1)}%
+                            </span>
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">{row.date_from ?? '--'}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">{row.date_to ?? '--'}</TableCell>

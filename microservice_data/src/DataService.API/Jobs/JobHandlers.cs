@@ -282,8 +282,18 @@ public sealed class IngestJobHandler : IDatasetJobHandler
 
         // ── compute_features ───────────────────────────────────
         var stageFeat = await ctx.StartStageAsync("compute_features");
-        await ctx.ReportAsync("compute_features", 90, "computing feature columns");
-        var feat = await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesAsync(table, token));
+        var updateFromMs = rows.Count > 0
+            ? rows.Min(static row => row.TimestampMs)
+            : (long?)null;
+        await ctx.ReportAsync(
+            "compute_features",
+            90,
+            updateFromMs is long sinceMs
+                ? $"computing feature columns from {sinceMs}"
+                : "skipping feature recompute; no new rows were materialized");
+        var feat = updateFromMs is long updateFrom
+            ? await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesSinceAsync(table, updateFrom, token))
+            : 0L;
         await ctx.EndStageAsync(stageFeat, feat);
         await ctx.ReportAsync(
             "done",
@@ -350,9 +360,17 @@ public sealed class ComputeFeaturesJobHandler : IDatasetJobHandler
         var p = ctx.Params();
         var table = p.S("table") ?? ctx.Job.TargetTable
             ?? throw new ArgumentException("table required");
+        var updateFromMs = p.L("update_from_ms");
         var stage = await ctx.StartStageAsync("compute_features");
-        await ctx.ReportAsync("compute_features", 5, $"computing on {table}");
-        var n = await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesAsync(table, token));
+        await ctx.ReportAsync(
+            "compute_features",
+            5,
+            updateFromMs is long sinceMs
+                ? $"computing on {table} from {sinceMs}"
+                : $"computing on {table}");
+        var n = updateFromMs is long updateFrom
+            ? await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesSinceAsync(table, updateFrom, token))
+            : await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesAsync(table, token));
         await ctx.EndStageAsync(stage, n);
         await ctx.ReportAsync("done", 100, $"{n} rows updated", completed: n);
     }

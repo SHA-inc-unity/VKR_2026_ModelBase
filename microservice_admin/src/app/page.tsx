@@ -40,6 +40,12 @@ interface DashboardCache {
   modelCount: number | null;
 }
 
+function hasTableRows(cv: TableCoverage | undefined): boolean {
+  if (!cv?.exists) return false;
+  if (cv.rows_known === false) return cv.max_ts_ms !== null;
+  return (cv.rows ?? 0) > 0;
+}
+
 type DashboardExchange = 'bybit' | 'binance' | 'kraken';
 type DashboardExchangeFilter = 'all' | DashboardExchange;
 
@@ -191,7 +197,7 @@ export default function DashboardPage() {
 
   const coverageLoaded = tables.filter(t => coverage[t] !== undefined).length;
   const nonZeroTables = useMemo(
-    () => tables.filter(table => (coverage[table]?.rows ?? 0) > 0),
+    () => tables.filter(table => hasTableRows(coverage[table])),
     [tables, coverage],
   );
   const availableExchanges = useMemo(
@@ -208,6 +214,10 @@ export default function DashboardPage() {
     () => filteredTables.reduce((sum, table) => sum + (coverage[table]?.rows ?? 0), 0),
     [filteredTables, coverage],
   );
+  const totalRowsApprox = useMemo(
+    () => filteredTables.some(table => coverage[table]?.rows_known === false && (coverage[table]?.rows ?? 0) > 0),
+    [filteredTables, coverage],
+  );
   const lastIngestion = useMemo(
     () => filteredTables.reduce((m, t) => {
       const ts = coverage[t]?.max_ts_ms;
@@ -219,7 +229,10 @@ export default function DashboardPage() {
   const statsLoading   = tablesLoading || (filteredTables.length > 0 && filteredCoverageLoaded === 0);
   const coverageChartData: BarDatum[] = useMemo(
     () => filteredTables
-      .map(t => ({ name: t, pct: getCoveragePct(t, coverage[t]) ?? 0 }))
+      .flatMap(t => {
+        const pct = getCoveragePct(t, coverage[t]);
+        return pct === null ? [] : [{ name: t, pct } satisfies BarDatum];
+      })
       .sort((left, right) => right.pct - left.pct || left.name.localeCompare(right.name)),
     [filteredTables, coverage],
   );
@@ -277,11 +290,12 @@ export default function DashboardPage() {
         const initialCoverage: Record<string, TableCoverage> = {};
         for (const t of raw) {
           if (typeof t === 'string') continue;
-          if (t.rows == null) continue;
           initialCoverage[t.table_name] = {
             table:      t.table_name,
             exists:     true,
             rows:       t.rows ?? 0,
+            rows_known: t.rows_known ?? true,
+            coverage_pct: t.coverage_pct ?? null,
             // We don't carry ts back from the enriched response (the backend
             // formats them as YYYY-MM-DD); reconstruct from the date strings
             // when present so charts that key off min/max_ts_ms still render.
@@ -298,7 +312,7 @@ export default function DashboardPage() {
         // string entries (older DataService that didn't enrich the list).
         for (const t of raw) {
           if (typeof t !== 'string') continue;
-          kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table: t }, COVERAGE_TIMEOUT)
+          kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table: t, include_rows: false }, COVERAGE_TIMEOUT)
             .then(cv => setCoverage(prev => ({ ...prev, [t]: cv })))
             .catch(() => {});
         }
@@ -481,7 +495,7 @@ export default function DashboardPage() {
         />
         <StatCard
           label={t('dashboard.totalRows')}
-          value={totalRows > 0 ? totalRows.toLocaleString() : '–'}
+          value={totalRows > 0 ? `${totalRowsApprox ? '~' : ''}${totalRows.toLocaleString()}` : '–'}
           loading={statsLoading}
           icon={Rows}
           accentColor="success"
@@ -565,6 +579,10 @@ export default function DashboardPage() {
               <div className="flex items-center justify-center h-[320px] text-sm text-muted-foreground">
                 {t('dashboard.noNonZeroTables')}
               </div>
+            ) : coverageChartData.length === 0 ? (
+              <div className="flex items-center justify-center h-[320px] text-sm text-muted-foreground">
+                Coverage is calculated on demand
+              </div>
             ) : noTablesForFilter ? (
               <div className="flex items-center justify-center h-[320px] text-sm text-muted-foreground">
                 {t('dashboard.noTablesForExchange')}
@@ -636,7 +654,11 @@ export default function DashboardPage() {
                       <TableRow key={t}>
                         <TableCell className="font-mono text-xs">{t}</TableCell>
                         <TableCell className="text-right text-xs">
-                          {cv ? cv.rows.toLocaleString() : <Skeleton className="h-4 w-16 ml-auto" />}
+                          {cv
+                            ? (cv.rows_known === false
+                              ? (cv.rows > 0 ? `~${cv.rows.toLocaleString()}` : '–')
+                              : cv.rows.toLocaleString())
+                            : <Skeleton className="h-4 w-16 ml-auto" />}
                         </TableCell>
                         <TableCell style={{ minWidth: 140 }}>
                           {cv === undefined ? (
@@ -654,7 +676,7 @@ export default function DashboardPage() {
                               <span className="text-xs tabular-nums w-10 text-right">{pct.toFixed(1)}%</span>
                             </div>
                           ) : (
-                            <span className="text-xs text-muted-foreground">–</span>
+                            <span className="text-xs text-muted-foreground">On demand</span>
                           )}
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">

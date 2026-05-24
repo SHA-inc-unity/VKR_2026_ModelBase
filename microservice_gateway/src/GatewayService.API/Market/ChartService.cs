@@ -103,33 +103,11 @@ public class ChartService : IChartService
         {
             var initialEndMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var initialStartMs = initialEndMs - (long)limit * tfInfo.StepMs * _settings.IngestWindowMultiplier;
-            var initialRows = await TrySynchronizeWindowAsync(
+            await TryTriggerWindowHydrationAsync(
                 ingestKey, symbolUpper, tfInfo, limit, initialStartMs, initialEndMs, ct);
 
-            if (initialRows?.IsClaimCheck == true)
-            {
-                return ServiceResult<ChartResponse>.Ok(
-                    BuildPendingResponse(symbolUpper, timeframe, limit,
-                        "Data payload too large; use a smaller limit or wait for streaming path"));
-            }
-
-            if (initialRows is not null && initialRows.Rows.Count > 0)
-            {
-                return ServiceResult<ChartResponse>.Ok(
-                    await BuildChartResponseAsync(
-                        symbolUpper,
-                        timeframe,
-                        limit,
-                        tfInfo,
-                        ingestKey,
-                        initialStartMs,
-                        initialEndMs,
-                        initialRows,
-                        ct));
-            }
-
             return ServiceResult<ChartResponse>.Ok(BuildPendingResponse(
-                symbolUpper, timeframe, limit, "No data available; ingest triggered"));
+                symbolUpper, timeframe, limit, "No data available locally; ingest triggered"));
         }
 
         // ── 5. Determine time window ──────────────────────────────────────────
@@ -168,17 +146,8 @@ public class ChartService : IChartService
             var initialCoverage = (double)rowsResult.Rows.Count / limit;
             if (initialCoverage < _settings.FullCoverageThreshold)
             {
-                var hydratedRows = await TrySynchronizeWindowAsync(
+                await TryTriggerWindowHydrationAsync(
                     ingestKey, symbol, tfInfo, limit, startMs, endMs, ct);
-
-                if (hydratedRows?.IsClaimCheck == true)
-                {
-                    return BuildPendingResponse(symbol, timeframe, limit,
-                        "Data payload too large; use a smaller limit or wait for streaming path");
-                }
-
-                if (hydratedRows is not null && hydratedRows.Rows.Count > rowsResult.Rows.Count)
-                    rowsResult = hydratedRows;
             }
         }
 
@@ -322,7 +291,7 @@ public class ChartService : IChartService
         };
     }
 
-    private async Task<RowsResult?> TrySynchronizeWindowAsync(
+    private async Task<bool> TryTriggerWindowHydrationAsync(
         string ingestKey,
         string symbol,
         TimeframeInfo tfInfo,
@@ -337,53 +306,26 @@ public class ChartService : IChartService
 
         if (!lockAcquired)
         {
-            _log.LogDebug("Synchronous ingest already locked for {Symbol}/{Interval}",
+            _log.LogDebug("Background ingest already locked for {Symbol}/{Interval}",
                 symbol, tfInfo.BybitInterval);
-            return null;
+            return false;
         }
 
         try
         {
             var correlationId = Activity.Current?.Id ?? "n/a";
             _log.LogInformation(
-                "Synchronizing chart window for {Symbol}/{Interval} [{StartMs}..{EndMs}] "
+                "Scheduling chart window hydration for {Symbol}/{Interval} [{StartMs}..{EndMs}] "
                 + "limit={Limit} correlationId={CorrelationId}",
                 symbol, tfInfo.BybitInterval, startMs, endMs, limit, correlationId);
 
-            var ingest = await _data.IngestAsync(
-                symbol,
-                tfInfo.BybitInterval,
-                startMs,
-                endMs,
-                ct);
-
-            if (!ingest.Success)
-            {
-                _log.LogWarning(
-                    "Synchronous ingest failed for {Symbol}/{Interval}: {Error}",
-                    symbol, tfInfo.BybitInterval, ingest.Error ?? "unknown error");
-
-                await _cache.SetAsync(
-                    ingestKey,
-                    IngestErrorCooldown,
-                    TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
-                    CancellationToken.None);
-
-                return null;
-            }
-
-            await _cache.RemoveAsync(ingestKey);
-
-            var tableName = string.IsNullOrWhiteSpace(ingest.TableName)
-                ? $"{symbol.ToLowerInvariant()}_{tfInfo.BybitInterval}"
-                : ingest.TableName;
-
-            return await _data.GetRowsAsync(tableName, startMs, endMs, limit, ct);
+            TriggerIngestInBackground(ingestKey, symbol, tfInfo, limit, startMs, endMs);
+            return true;
         }
         catch (Exception ex)
         {
             _log.LogError(ex,
-                "Synchronous ingest FAILED for {Symbol}/{Interval} [{StartMs}..{EndMs}]",
+                "Background ingest scheduling FAILED for {Symbol}/{Interval} [{StartMs}..{EndMs}]",
                 symbol, tfInfo.BybitInterval, startMs, endMs);
 
             await _cache.SetAsync(
@@ -392,7 +334,7 @@ public class ChartService : IChartService
                 TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
                 CancellationToken.None);
 
-            return null;
+            return false;
         }
     }
 

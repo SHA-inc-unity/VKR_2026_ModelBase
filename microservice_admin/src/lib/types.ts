@@ -14,6 +14,11 @@ export interface TableCoverage {
   min_ts_ms: number | null;
   max_ts_ms: number | null;
   status: string;
+  coverage_pct?: number | null;
+  rows_known?: boolean;
+  rows_in_range?: number | null;
+  expected?: number | null;
+  gaps?: number | null;
 }
 
 export interface TrainStatus {
