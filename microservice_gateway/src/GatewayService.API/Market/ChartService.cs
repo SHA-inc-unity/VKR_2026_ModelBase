@@ -196,7 +196,29 @@ public class ChartService : IChartService
         var startMs = endMs - (long)(limit - 1) * tfInfo.StepMs;
         var rowsForResponse = latestRows;
 
-        if (NeedsHydration(rowsForResponse, limit))
+        // Freshness gate: when the latest row is older than 2 × stepMs we
+        // refresh up to "now" instead of returning a stale window. Without
+        // this the chart can lock on rows from days/hours ago when the
+        // market watcher hasn't been keeping a given exchange's table fresh.
+        var isStale = IsLatestRowStale(rowsForResponse, tfInfo);
+        if (isStale)
+        {
+            var nowMs            = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var refreshStartMs   = endMs + tfInfo.StepMs;
+            endMs                = nowMs;
+            startMs              = endMs - (long)(limit - 1) * tfInfo.StepMs;
+            _log.LogInformation(
+                "Chart latest-row stale for {Exchange}/{Symbol}/{Interval}: latestTs={LatestMs} ageMs={AgeMs}; refreshing [{RefreshStart}..{RefreshEnd}]",
+                exchangeKey,
+                symbolUpper,
+                tfInfo.BybitInterval,
+                rowsForResponse.Rows[^1].TimestampMs,
+                nowMs - rowsForResponse.Rows[^1].TimestampMs,
+                refreshStartMs,
+                endMs);
+        }
+
+        if (isStale || NeedsHydration(rowsForResponse, limit))
         {
             var hydrationResult = await TryHydrateWindowSynchronouslyAsync(
                 ingestKey,
@@ -452,6 +474,23 @@ public class ChartService : IChartService
     private bool NeedsHydration(RowsFetchResult rowsResult, int limit)
     {
         return rowsResult.HasRows && (double)rowsResult.Rows.Count / limit < _settings.FullCoverageThreshold;
+    }
+
+    /// <summary>
+    /// Returns true when the freshest candle in the result is older than
+    /// 2 × stepMs from "now". Used as a freshness gate so a request like
+    /// "give me the last 200 hourly candles" never silently returns a window
+    /// that ends 2 days ago when the table has not been refreshed (e.g. when
+    /// the watcher dropped a websocket or hasn't been subscribed to a given
+    /// exchange yet). Caller should treat a stale window the same as a
+    /// partial window and trigger a synchronous hydration step.
+    /// </summary>
+    private static bool IsLatestRowStale(RowsFetchResult rowsResult, TimeframeInfo tfInfo)
+    {
+        if (!rowsResult.HasRows) return false;
+        var latestTs = rowsResult.Rows[^1].TimestampMs;
+        var ageMs    = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - latestTs;
+        return ageMs > 2L * tfInfo.StepMs;
     }
 
     private async Task<SyncHydrationResult> TryHydrateWindowSynchronouslyAsync(

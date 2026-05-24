@@ -20,7 +20,7 @@ public sealed class DataServiceSettings
 
 public sealed class MarketWatchSettings
 {
-    public static readonly string[] DefaultLiveExchanges = ["bybit", "binance"];
+    public static readonly string[] DefaultLiveExchanges = ["bybit", "binance", "kraken"];
 
     public bool Enabled { get; set; } = true;
     public int BootstrapIntervalSeconds { get; set; } = 15;
