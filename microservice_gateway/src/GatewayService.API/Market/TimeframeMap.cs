@@ -67,6 +67,12 @@ public static class TimeframeMap
     private static readonly Dictionary<string, TimeframeInfo> _byId =
         _all.ToDictionary(t => t.Id, StringComparer.OrdinalIgnoreCase);
 
+    // Reverse lookup: bybit kline interval ("60", "D") -> client id ("60m", "1d").
+    // Used by data-service callers to derive the canonical table-name suffix
+    // (data-service tables use the client-id key, e.g. btcusdt_60m).
+    private static readonly Dictionary<string, TimeframeInfo> _byBybit =
+        _all.ToDictionary(t => t.BybitInterval, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Returns true if <paramref name="id"/> is a supported timeframe id.</summary>
     public static bool IsValid(string id) => _byId.ContainsKey(id);
 
@@ -91,4 +97,30 @@ public static class TimeframeMap
     /// string (e.g. "5") used in REST requests and data-service commands.
     /// </summary>
     public static string ToBybitInterval(string id) => GetById(id).BybitInterval;
+
+    /// <summary>
+    /// Reverse mapping: converts a Bybit kline interval (e.g. "60", "D") to
+    /// the client-facing id (e.g. "60m", "1d") used as the data-service
+    /// timeframe key — the same key data-service appends to OHLCV table
+    /// names (e.g. <c>btcusdt_60m</c>). Returns false if the value is not
+    /// a known Bybit interval.
+    /// </summary>
+    public static bool TryGetByBybitInterval(
+        string bybitInterval,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TimeframeInfo? info) =>
+        _byBybit.TryGetValue(bybitInterval, out info);
+
+    /// <summary>
+    /// Reverse mapping helper: returns the client-facing timeframe id for
+    /// the given Bybit kline interval, or the input itself when the value
+    /// already looks like a client id (defensive fallback to keep callers
+    /// resilient to mixed inputs upstream).
+    /// </summary>
+    public static string BybitIntervalToClientId(string bybitInterval)
+    {
+        if (string.IsNullOrEmpty(bybitInterval)) return bybitInterval;
+        if (_byBybit.TryGetValue(bybitInterval, out var byBybit)) return byBybit.Id;
+        if (_byId.ContainsKey(bybitInterval)) return bybitInterval; // already a client id
+        return bybitInterval;
+    }
 }

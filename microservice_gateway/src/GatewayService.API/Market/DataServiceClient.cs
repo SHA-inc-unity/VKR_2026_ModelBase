@@ -37,11 +37,14 @@ public sealed class DataServiceClient : IDataServiceClient
         string symbol, string bybitInterval, CancellationToken ct = default)
     {
         var timeout = TimeSpan.FromSeconds(_settings.KafkaTimeoutSeconds);
+        // Data-service normalises the timeframe via DatasetCore.NormalizeTimeframe
+        // which expects the canonical client key ("60m"), not Bybit's "60".
+        var timeframeKey = TimeframeMap.BybitIntervalToClientId(bybitInterval);
         try
         {
             var reply = await _kafka.RequestAsync(
                 DataTopics.CmdDataDatasetCoverage,
-                new { symbol, timeframe = bybitInterval },
+                new { symbol, timeframe = timeframeKey },
                 timeout,
                 ct);
 
@@ -214,6 +217,11 @@ public sealed class DataServiceClient : IDataServiceClient
             _settings.KafkaTimeoutSeconds,
             _settings.IngestKafkaTimeoutSeconds));
         var tableName = BuildTableName(symbol, bybitInterval);
+        // Data-service expects the canonical client timeframe key ("60m"),
+        // not the Bybit interval ("60"). Sending the raw Bybit value made
+        // data-service create/look up the wrong table name and triggered
+        // 42P01 "relation does not exist" on the rows-read path.
+        var timeframeKey = TimeframeMap.BybitIntervalToClientId(bybitInterval);
 
         try
         {
@@ -224,14 +232,14 @@ public sealed class DataServiceClient : IDataServiceClient
                     type = "ingest",
                     target_table = tableName,
                     target_symbol = symbol,
-                    target_timeframe = bybitInterval,
+                    target_timeframe = timeframeKey,
                     target_start_ms = startMs,
                     target_end_ms = endMs,
                     created_by = "gateway_market_chart",
                     @params = new
                     {
                         symbol,
-                        timeframe = bybitInterval,
+                        timeframe = timeframeKey,
                         start_ms = startMs,
                         end_ms = endMs,
                         // Chart endpoint only consumes raw OHLCV columns
@@ -462,8 +470,12 @@ public sealed class DataServiceClient : IDataServiceClient
 
     // ── Parsers ───────────────────────────────────────────────────────────
 
+    // Data-service stores OHLCV in tables named "{symbol}_{tfKey}" where
+    // tfKey is the canonical client id ("60m", "1d"), NOT the Bybit kline
+    // interval ("60", "D"). Historically the codebase mixed them up; this
+    // mapping is the single point of truth.
     private static string BuildTableName(string symbol, string bybitInterval) =>
-        $"{symbol.ToLowerInvariant()}_{bybitInterval}";
+        $"{symbol.ToLowerInvariant()}_{TimeframeMap.BybitIntervalToClientId(bybitInterval)}";
 
     private static bool TryGetNestedJob(JsonElement el, out JsonElement job)
     {

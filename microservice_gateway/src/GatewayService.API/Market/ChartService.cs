@@ -723,9 +723,13 @@ public class ChartService : IChartService
             : ingestResult.ErrorDetail!;
     }
 
+    // Data-service tables use the canonical client timeframe key
+    // ("60m", "1d"), not the Bybit kline interval ("60", "D"). Sending
+    // the Bybit value here would point us at non-existent tables and
+    // surface as 42P01 in data-service logs / 503 rows-timeout to clients.
     private static string BuildTableName(string symbol, string bybitInterval)
     {
-        return $"{symbol.ToLowerInvariant()}_{bybitInterval}";
+        return $"{symbol.ToLowerInvariant()}_{TimeframeMap.BybitIntervalToClientId(bybitInterval)}";
     }
 
     private string BuildCacheKey(string symbol, TimeframeInfo tfInfo, int limit)
