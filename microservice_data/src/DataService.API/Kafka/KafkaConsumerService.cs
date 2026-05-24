@@ -28,7 +28,6 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly MarketDataClientFactory    _markets;
     private readonly MinioClaimCheckService     _minio;
     private readonly Jobs.JobDispatchChannel    _jobDispatch;
-    private readonly Jobs.JobDispatchChannel    _jobDispatch;
     // Browser-facing origin для presigned URL'ов, которые получает admin
     // и в итоге показывает в браузере (CSV/ZIP экспорт, anomaly report).
     // По умолчанию — внешний вход infra-nginx на host-порте 8501; путь
