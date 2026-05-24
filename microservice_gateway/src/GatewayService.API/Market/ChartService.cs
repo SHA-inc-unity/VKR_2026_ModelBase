@@ -110,6 +110,7 @@ public class ChartService : IChartService
             tfInfo.BybitInterval,
             tfInfo.StepMs,
             limit,
+            DataServiceClient.ChartProjectionColumns,
             ct);
 
         if (latestRows.IsFailure)
@@ -438,7 +439,9 @@ public class ChartService : IChartService
             var tableName = string.IsNullOrWhiteSpace(ingestResult.TableName)
                 ? BuildTableName(symbol, tfInfo.BybitInterval)
                 : ingestResult.TableName;
-            var hydratedRows = await _data.GetRowsAsync(tableName, startMs, endMs, limit, ct);
+            var hydratedRows = await _data.GetRowsAsync(
+                tableName, startMs, endMs, limit,
+                DataServiceClient.ChartProjectionColumns, ct);
 
             if (hydratedRows.IsFailure)
             {
@@ -467,7 +470,9 @@ public class ChartService : IChartService
 
             if (NeedsHydration(hydratedRows, limit))
             {
-                var refreshedRows = await _data.GetRowsAsync(tableName, startMs, endMs, limit, ct);
+                var refreshedRows = await _data.GetRowsAsync(
+                    tableName, startMs, endMs, limit,
+                    DataServiceClient.ChartProjectionColumns, ct);
 
                 if (refreshedRows.IsFailure)
                 {

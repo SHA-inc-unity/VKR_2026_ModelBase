@@ -289,6 +289,25 @@ public sealed partial class KafkaConsumerService : BackgroundService
         };
     }
 
+    private static IReadOnlyList<string>? TryGetStringArray(JsonElement p, string name)
+    {
+        if (p.ValueKind != JsonValueKind.Object || !p.TryGetProperty(name, out var v))
+            return null;
+        if (v.ValueKind != JsonValueKind.Array)
+            return null;
+        var list = new List<string>(v.GetArrayLength());
+        foreach (var el in v.EnumerateArray())
+        {
+            if (el.ValueKind == JsonValueKind.String)
+            {
+                var s = el.GetString();
+                if (!string.IsNullOrWhiteSpace(s))
+                    list.Add(s!);
+            }
+        }
+        return list.Count == 0 ? null : list;
+    }
+
     private async Task DispatchAsync(
         string topic, string correlationId, string replyTo,
         JsonElement payload, CancellationToken ct)
@@ -732,11 +751,14 @@ public sealed partial class KafkaConsumerService : BackgroundService
         if (string.IsNullOrEmpty(table) || startMs is null || endMs is null)
             return new { error = "missing fields: table, start_ms, end_ms" };
 
+        var columns = TryGetStringArray(p, "columns");
+
         var rows = await _repo.FetchRowsAsync(
             table,
             startMs.Value,
             endMs.Value,
             limit is long requestedLimit ? (int?)requestedLimit : null,
+            columns,
             ct);
         var json = JsonSerializer.SerializeToUtf8Bytes(new { rows });
         if (json.Length > InlinePayloadLimit)
@@ -759,7 +781,10 @@ public sealed partial class KafkaConsumerService : BackgroundService
         if (stepMs.Value <= 0 || limit.Value <= 0)
             return new { error = "step_ms and limit must be positive" };
 
-        var rows = await _repo.FetchLatestWindowRowsAsync(table, stepMs.Value, (int)limit.Value, ct);
+        var columns = TryGetStringArray(p, "columns");
+
+        var rows = await _repo.FetchLatestWindowRowsAsync(
+            table, stepMs.Value, (int)limit.Value, columns, ct);
         var json = JsonSerializer.SerializeToUtf8Bytes(new { rows });
         if (json.Length > InlinePayloadLimit)
         {

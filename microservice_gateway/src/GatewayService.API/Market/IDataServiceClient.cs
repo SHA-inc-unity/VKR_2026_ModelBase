@@ -125,23 +125,37 @@ public interface IDataServiceClient
     /// <summary>
     /// Fetches the newest fixed-width chart window anchored at the latest
     /// stored candle for the given symbol/timeframe.
+    /// When <paramref name="columns"/> is non-null and non-empty, the data-service
+    /// projects only those columns (in addition to <c>timestamp_utc</c>), which
+    /// dramatically shrinks the Kafka payload for chart-only requests that don't
+    /// need the feature columns.
     /// </summary>
     Task<RowsFetchResult> GetLatestWindowRowsAsync(
         string symbol,
         string bybitInterval,
         long stepMs,
         int limit,
+        IReadOnlyList<string>? columns = null,
         CancellationToken ct = default);
 
     /// <summary>
     /// Fetches OHLCV rows from the given table for the specified time range.
     /// The <paramref name="limit"/> parameter caps the data-service response so the
     /// payload stays under the Kafka message-size threshold.
+    /// When <paramref name="columns"/> is non-null and non-empty, the data-service
+    /// projects only those columns (in addition to <c>timestamp_utc</c>), which
+    /// dramatically shrinks the Kafka payload for chart-only requests that don't
+    /// need the feature columns.
     /// Returns a <see cref="RowsFetchResult"/> whose <see cref="RowsFetchResult.IsClaimCheck"/>
     /// is true when the data-service offloaded the response to the object store.
     /// </summary>
     Task<RowsFetchResult> GetRowsAsync(
-        string tableName, long startMs, long endMs, int limit, CancellationToken ct = default);
+        string tableName,
+        long startMs,
+        long endMs,
+        int limit,
+        IReadOnlyList<string>? columns = null,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Submits a data-service ingest job to the dataset queue and waits for its

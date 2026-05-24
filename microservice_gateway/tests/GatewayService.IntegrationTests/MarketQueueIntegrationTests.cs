@@ -213,6 +213,7 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
         string bybitInterval,
         long stepMs,
         int limit,
+        IReadOnlyList<string>? columns = null,
         CancellationToken ct = default)
     {
         Interlocked.Increment(ref _getLatestWindowCallCount);
@@ -221,7 +222,12 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
     }
 
     public Task<RowsFetchResult> GetRowsAsync(
-        string tableName, long startMs, long endMs, int limit, CancellationToken ct = default)
+        string tableName,
+        long startMs,
+        long endMs,
+        int limit,
+        IReadOnlyList<string>? columns = null,
+        CancellationToken ct = default)
         => Task.FromResult(RowsFetchResult.Empty);
 
     public Task<IngestResult> IngestAsync(

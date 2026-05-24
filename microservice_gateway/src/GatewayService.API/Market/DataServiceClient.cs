@@ -59,6 +59,7 @@ public sealed class DataServiceClient : IDataServiceClient
         string bybitInterval,
         long stepMs,
         int limit,
+        IReadOnlyList<string>? columns = null,
         CancellationToken ct = default)
     {
         var timeout = TimeSpan.FromSeconds(_settings.KafkaTimeoutSeconds);
@@ -68,7 +69,14 @@ public sealed class DataServiceClient : IDataServiceClient
         {
             var reply = await _kafka.RequestAsync(
                 DataTopics.CmdDataDatasetLatestRows,
-                new { table = tableName, step_ms = stepMs, limit },
+                BuildRowsPayload(
+                    new Dictionary<string, object?>
+                    {
+                        ["table"] = tableName,
+                        ["step_ms"] = stepMs,
+                        ["limit"] = limit,
+                    },
+                    columns),
                 timeout,
                 ct);
 
@@ -117,14 +125,27 @@ public sealed class DataServiceClient : IDataServiceClient
 
     /// <inheritdoc />
     public async Task<RowsFetchResult> GetRowsAsync(
-        string tableName, long startMs, long endMs, int limit, CancellationToken ct = default)
+        string tableName,
+        long startMs,
+        long endMs,
+        int limit,
+        IReadOnlyList<string>? columns = null,
+        CancellationToken ct = default)
     {
         var timeout = TimeSpan.FromSeconds(_settings.KafkaTimeoutSeconds);
         try
         {
             var reply = await _kafka.RequestAsync(
                 DataTopics.CmdDataDatasetRows,
-                new { table = tableName, start_ms = startMs, end_ms = endMs, limit },
+                BuildRowsPayload(
+                    new Dictionary<string, object?>
+                    {
+                        ["table"] = tableName,
+                        ["start_ms"] = startMs,
+                        ["end_ms"] = endMs,
+                        ["limit"] = limit,
+                    },
+                    columns),
                 timeout,
                 ct);
 
@@ -613,4 +634,30 @@ public sealed class DataServiceClient : IDataServiceClient
     }
 
     private readonly record struct ReplyError(string? Code, string? Detail);
+
+    /// <summary>
+    /// Columns the chart path actually consumes from data-service rows replies.
+    /// Used to ask the data-service to project only these columns instead of
+    /// returning the full feature-engineered row (40+ columns), which was the
+    /// dominant cost behind the Kafka rows timeout on cold tables.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ChartProjectionColumns = new[]
+    {
+        "timestamp_utc",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "volume",
+        "turnover",
+    };
+
+    private static Dictionary<string, object?> BuildRowsPayload(
+        Dictionary<string, object?> basePayload,
+        IReadOnlyList<string>? columns)
+    {
+        if (columns is { Count: > 0 })
+            basePayload["columns"] = columns;
+        return basePayload;
+    }
 }

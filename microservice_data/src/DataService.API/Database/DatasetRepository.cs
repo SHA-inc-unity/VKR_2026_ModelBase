@@ -300,16 +300,56 @@ public sealed partial class DatasetRepository
     // ── Rows ──────────────────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> FetchRowsAsync(
-        string tableName, long startMs, long endMs, int? limit = null, CancellationToken ct = default)
+        string tableName,
+        long startMs,
+        long endMs,
+        int? limit = null,
+        IReadOnlyList<string>? columns = null,
+        CancellationToken ct = default)
     {
         var tbl = Safe(tableName);
         await using var conn = await _pg.OpenAsync(ct);
         var limited = limit.GetValueOrDefault();
         if (limited < 0) limited = 0;
-        // SELECT * включает raw (8 колонок) и все feature-колонки (27),
-        // плюс синтетическое timestamp_ms для Kafka-границы.
+
+        // When `columns` is provided, project only those columns (plus the
+        // synthetic timestamp_ms required at the Kafka boundary). Reduces
+        // payload size and serialization time for chart-style requests that
+        // only need OHLCV — full per-row data (raw 8 cols + 27+ feature cols
+        // via SELECT *) is overkill for candlesticks and was the dominant
+        // cost behind the rows-timeout 503 on cold tables.
+        string projection;
+        if (columns is { Count: > 0 })
+        {
+            var safeColumns = columns
+                .Select(c => c?.Trim() ?? string.Empty)
+                .Where(c => c.Length > 0)
+                .Select(Safe)
+                .Distinct()
+                .ToList();
+
+            if (safeColumns.Count > 0)
+            {
+                // timestamp_utc is always projected so MapRow can produce it,
+                // even if the caller did not include it explicitly.
+                if (!safeColumns.Contains("timestamp_utc"))
+                    safeColumns.Insert(0, "timestamp_utc");
+
+                projection = string.Join(", ", safeColumns.Select(c => $"\"{c}\""));
+            }
+            else
+            {
+                projection = "*";
+            }
+        }
+        else
+        {
+            // SELECT * включает raw (8 колонок) и все feature-колонки (27).
+            projection = "*";
+        }
+
         var rows = await conn.QueryAsync(new CommandDefinition(
-            $@"SELECT *,
+            $@"SELECT {projection},
                  (EXTRACT(EPOCH FROM timestamp_utc) * 1000)::bigint AS timestamp_ms
                FROM ""{tbl}""
                WHERE timestamp_utc >= @s AND timestamp_utc <= @e
@@ -327,6 +367,7 @@ public sealed partial class DatasetRepository
         string tableName,
         long stepMs,
         int limit,
+        IReadOnlyList<string>? columns = null,
         CancellationToken ct = default)
     {
         if (!await TableExistsAsync(tableName, ct))
@@ -354,7 +395,7 @@ public sealed partial class DatasetRepository
 
         var endMs = ToMs(newest.Value);
         var startMs = endMs - (long)(limit - 1) * stepMs;
-        return await FetchRowsAsync(tableName, startMs, endMs, limit, ct);
+        return await FetchRowsAsync(tableName, startMs, endMs, limit, columns, ct);
     }
 
     /// <summary>
