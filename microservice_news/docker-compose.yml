@@ -1,0 +1,58 @@
+version: "3.9"
+
+services:
+  news-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: news_service_api
+    restart: unless-stopped
+    ports:
+      - "${NEWS_BIND_ADDR:-0.0.0.0}:${NEWS_API_PORT:-7540}:5000"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__DefaultConnection: ${DATABASE_URL}
+      Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
+      Kafka__NewsEventsTopic: ${KAFKA_NEWS_TOPIC:-events.news.v1}
+      News__CryptoPanic__AuthToken: ${CRYPTOPANIC_AUTH_TOKEN}
+      News__CryptoPanic__PollIntervalSeconds: ${CRYPTOPANIC_POLL_SECONDS:-300}
+      News__CryptoPanic__Enabled: ${CRYPTOPANIC_ENABLED:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':1388 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - news_net
+      - modelline_net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: news_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-news_service}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../.runtime-data/microservice_news/postgres
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-news_service}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - news_net
+
+networks:
+  news_net:
+    driver: bridge
+  modelline_net:
+    name: modelline_net
+    external: true
