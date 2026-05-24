@@ -38,6 +38,9 @@ public sealed class MarketSettings
     /// <summary>Chart cache TTL for light timeframes (360m, 720m, 1d) in seconds.</summary>
     public int ChartCacheTtlLightSeconds { get; init; } = 300;
 
+    /// <summary>How long to cache the linear market snapshot / ticker feed (seconds).</summary>
+    public int SnapshotCacheTtlSeconds { get; init; } = 30;
+
     // ── Kafka timeouts ────────────────────────────────────────────────────
 
     /// <summary>Kafka request timeout for lightweight data operations (seconds).</summary>

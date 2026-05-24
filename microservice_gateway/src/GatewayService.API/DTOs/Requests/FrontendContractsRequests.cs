@@ -29,3 +29,6 @@ public sealed record PatchServiceTogglesRequest(
     bool? Alerts = null,
     bool? PortfolioSync = null,
     bool? MarketOverview = null);
+
+public sealed record BatchMarketQuotesRequest(
+    [Required] IReadOnlyList<string> Symbols);

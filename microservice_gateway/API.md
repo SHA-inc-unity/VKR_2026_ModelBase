@@ -50,7 +50,7 @@
 3. Для market-экрана сначала вызвать `GET /api/v1/market/config`.
 4. Строить запросы `GET /api/v1/market/chart` только значениями из `/api/v1/market/config`.
 5. Для защищённых endpoint-ов передавать `Authorization: Bearer <accessToken>`.
-6. Не трактовать каждый `200` как «данные полные и готовы»: `dashboard`, `market/chart` и часть lightweight frontend routes могут возвращать fallback/in-memory payload, а не durable downstream truth.
+6. Не трактовать каждый `200` как «данные полные и готовы»: `dashboard`, `market/chart` и часть lightweight frontend routes могут возвращать fallback/cache-backed payload, а не durable downstream truth.
 7. Если интеграция идёт из `microservice_admin`, использовать только `POST /api/admin/*` с `Authorization: Bearer <admin JWT>`; JWT должен быть выпущен Account Service для login-only пользователя с ролью `admin`. Успешный JSON gateway не нормализует, а возвращает как ответ владельца Kafka-команды.
 
 ---
@@ -145,7 +145,7 @@ Frontend должен различать эти сценарии.
 
 ### Gateway-local frontend state
 
-Часть mobile/BFF routes сейчас обслуживается самим gateway без отдельного durable owner-service:
+Часть mobile/BFF routes сейчас обслуживается самим gateway без отдельного owner-service, но уже не только через process-local объекты:
 
 - `GET /api/portfolio/summary`;
 - `/api/exchanges/*`;
@@ -155,11 +155,12 @@ Frontend должен различать эти сценарии.
 
 Практические последствия:
 
-- данные живут в process-local памяти gateway;
-- state сбрасывается при restart контейнера;
-- при нескольких экземплярах gateway state не реплицируется между инстансами.
+- state хранится через `IFrontendContractState` в `IDistributedCache`;
+- если настроен Redis, linked exchanges / alerts / toggles и lightweight mobile-admin counters переживают restart и становятся доступны другим gateway instances;
+- если Redis не настроен, gateway использует `AddDistributedMemoryCache`, и тогда поведение остаётся локальным для текущего процесса;
+- записи маленькие, а model обновления intentionally простая: last-write-wins.
 
-Эти routes уже пригодны как стабильный frontend contract, но пока не являются shared persistent source of truth.
+Эти routes уже пригодны как стабильный frontend contract, но при memory-only fallback по-прежнему не становятся cross-process persistent source of truth.
 
 ---
 
@@ -226,9 +227,9 @@ UID в теле запроса не используется как источн
 }
 ```
 
-### Важная оговорка
+### Auth/profile error note
 
-`GET /api/account/me` при `503 Service Unavailable` сейчас возвращает не `ErrorResponse`, а строку ошибки. Это legacy-несогласованность текущего API, и frontend должен учитывать её отдельно.
+`GET /api/account/me` и gateway-managed ошибки auth proxy теперь используют общий `ErrorResponse` JSON-contract. Для auth proxy это касается gateway-managed fail-path-ов: network/downstream-unavailable и downstream non-success statuses нормализуются в envelope с `code = "account_proxy_error"`, а успешные payload-ы всё так же проксируются как есть.
 
 ---
 
@@ -246,6 +247,9 @@ UID в теле запроса не используется как источн
 | GET | `/api/account/me` | Required | профиль текущего пользователя |
 | GET | `/api/dashboard` | Optional | главный экран с агрегированными данными; guest получает только public sections |
 | GET | `/api/v1/market/overview` | None | публичный home-screen overview |
+| GET | `/api/v1/market/tickers` | None | searchable/sortable/paginated market snapshot list |
+| POST | `/api/v1/market/quotes/batch` | None | batch quote refresh по списку symbol-ов |
+| GET | `/api/v1/market/converter/quote` | None | quote для asset-to-asset conversion |
 | GET | `/api/v1/market/config` | None | конфиг market UI |
 | GET | `/api/v1/market/chart` | None | свечной график |
 | GET | `/api/portfolio/summary` | Required | расширенная сводка портфеля |
@@ -261,6 +265,7 @@ UID в теле запроса не используется как источн
 | GET | `/api/services/toggles` | Required | получить service toggles для settings UI |
 | PATCH | `/api/services/toggles` | Required | частично обновить service toggles |
 | GET | `/api/news` | None | лента новостей |
+| GET | `/api/news/home` | None | compact home-screen news feed |
 | GET | `/api/notifications` | Required | уведомления пользователя |
 | GET | `/api/admin/summary` | Admin JWT | lightweight mobile-admin summary |
 | GET | `/api/admin/users` | Admin JWT | lightweight mobile-admin users view |
@@ -639,7 +644,8 @@ Gateway публикует тот же auth-flow, что и `microservice_accoun
 
 ### Account Auth Proxy: error semantics
 
-- если Account Service reachable, gateway прозрачно возвращает downstream status code и JSON/body без переупаковки;
+- успешные auth proxy responses gateway по-прежнему возвращает как downstream JSON/body без переупаковки;
+- если downstream auth-flow вернул non-success status, gateway нормализует ответ в `ErrorResponse` с `code = "account_proxy_error"`, сохраняя HTTP status code и вытаскивая `detail/message/error` из downstream body, если это возможно;
 - если proxy path сам не может достучаться до account-service, gateway возвращает structured `503 Service Unavailable`;
 - успешный `logout` через gateway возвращает `204 No Content`.
 
@@ -707,19 +713,22 @@ Authorization: Bearer <access-token>
 
 #### 503 Service Unavailable
 
-Текущий wire-format:
-
 ```json
-"Account service timeout"
+{
+  "status": 503,
+  "title": "Service Unavailable",
+  "code": "account_profile_unavailable",
+  "detail": "Account service timeout",
+  "correlationId": "2de4b66e-8b79-4a3e-b3a1-7e5d65f89e74",
+  "timestamp": "2026-05-24T05:20:00Z"
+}
 ```
-
-Это строка, а не `ErrorResponse`.
 
 ### Account Me: frontend behavior
 
 - использовать для отдельного профиля/кабинета;
 - для стартового экрана лучше сначала опираться на `/api/app/bootstrap`;
-- 503 нужно обрабатывать отдельно как временную недоступность account downstream.
+- `503 account_profile_unavailable` обрабатывать как временную недоступность account downstream, но без отдельного legacy-parser branch.
 
 ---
 
@@ -783,11 +792,11 @@ GET /api/dashboard
 
 Текущая реализация уже не падает в degraded по умолчанию на каждой секции:
 
-- `marketOverview` и `trendingAssets` получают gateway-local fallback payload с нулевыми market metrics и трендовыми symbols из `/api/v1/market/config`;
-- `latestNews` сейчас возвращает пустую, но успешную ленту;
-- `portfolio` для аутентифицированного пользователя берётся из gateway-local frontend state и отражает только linked exchanges, созданные через `/api/exchanges/*`.
+- `marketOverview` и `trendingAssets` получают snapshot-derived payload из gateway market snapshot layer;
+- `latestNews` использует тот же sorted fallback path, что и `/api/news` / `/api/news/home`;
+- `portfolio` для аутентифицированного пользователя берётся из gateway-owned frontend state и отражает только linked exchanges, созданные через `/api/exchanges/*`.
 
-Из-за этого `dashboard` чаще возвращает полноценный `200` без degraded sections, но данные части personal/settings surface остаются in-memory и сбрасываются после restart gateway.
+Из-за этого `dashboard` чаще возвращает полноценный `200` без degraded sections, но personal/settings часть по-прежнему зависит от gateway-owned cache-backed state, а не от отдельного owner-service.
 
 ### Dashboard: errors
 
@@ -804,17 +813,14 @@ GET /api/dashboard
 
 ### Market Overview: how it works
 
-Gateway параллельно собирает:
+Gateway читает cached snapshot из `IMarketServiceClient`, который поверх Bybit linear tickers собирает list-ready universe и из него выводит home metrics.
 
-- symbols/config из `IMarketConfigService`;
-- market overview из `IMarketServiceClient`;
-- trending assets из `IMarketServiceClient`.
+Текущая семантика intentionally pragmatic:
 
-Текущий fallback path intentionally стабилен:
-
-- `totalMarketCap`, `btcDominance`, `volume24h` пока приходят как `0`;
-- `fearGreedValue`/`fearGreedLabel` пока `0` / `Neutral`;
-- `trendingAssets` берутся из первых символов server-authoritative config.
+- `totalMarketCap` = proxy-агрегат по snapshot universe, где per-symbol `marketCap` выводится из `openInterestValue`, а при его отсутствии — из `turnover24h`;
+- `btcDominance` считается как доля `BTCUSDT` внутри того же proxy market-cap universe;
+- `fearGreedValue` / `fearGreedLabel` — gateway-level heuristic по breadth и average 24h change, а не внешний индекс;
+- `trendingAssets` ранжируются по gateway-derived `TrendingScore`, который учитывает magnitude 24h change и liquidity proxy.
 
 ### Market Overview: request
 
@@ -829,17 +835,19 @@ GET /api/v1/market/overview
 ```json
 {
   "marketOverview": {
-    "totalMarketCap": 0,
-    "btcDominance": 0,
-    "volume24h": 0,
+    "totalMarketCap": 1410000000,
+    "btcDominance": 58.164729,
+    "volume24h": 2345000000,
     "activeAssets": 3,
-    "fearGreedValue": 0,
-    "fearGreedLabel": "Neutral"
+    "fearGreedValue": 61,
+    "fearGreedLabel": "Greed"
   },
   "trendingAssets": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
   "meta": {
-    "generatedAt": "2026-05-23T12:00:00Z",
-    "degradedSections": []
+    "generatedAt": "2026-05-24T03:45:30Z",
+    "updatedAt": "2026-05-24T03:45:00Z",
+    "degradedSections": [],
+    "degradedFields": []
   }
 }
 ```
@@ -847,8 +855,164 @@ GET /api/v1/market/overview
 ### Market Overview: frontend behavior
 
 - считать этот endpoint public source of truth для home screen overview;
-- быть готовым к placeholder metric values `0`/`Neutral`, пока у system нет richer market-summary downstream;
-- `meta.degradedSections` использовать только как warning, а не как hard-fail trigger.
+- воспринимать market numbers как snapshot-derived proxies, а не как canonical multi-exchange market-cap feed;
+- использовать `meta.updatedAt` как timestamp последнего snapshot refresh, а `meta.generatedAt` как время ответа gateway;
+- `meta.degradedFields` и `meta.degradedSections` использовать как warning, а не как hard-fail trigger.
+
+---
+
+## GET /api/v1/market/tickers
+
+### Market Tickers: назначение
+
+List-screen endpoint для market watch / asset directory / search results.
+
+### Market Tickers: request
+
+```http
+GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDir=desc&symbols=BTCUSDT,ETHUSDT
+```
+
+Авторизация не требуется.
+
+### Market Tickers: query parameters
+
+| Параметр | Тип | Default | Правило |
+| -------- | --- | ------- | ------- |
+| `page` | number | `1` | minimum `1` |
+| `pageSize` | number | `25` | clamp `1..100` |
+| `search` | string | `null` | match по `symbol`, `displayName`, `baseAsset`, `quoteAsset` |
+| `sortBy` | string | `rank` | one of `symbol`, `displayName`, `price`, `change24h`, `volume24h`, `marketCap`, `high24h`, `low24h`, `rank`, `updatedAt` |
+| `sortDir` | string | `desc` | `asc` or `desc` |
+| `symbols` | string | `null` | comma-separated whitelist of symbols |
+
+### Market Tickers: response example
+
+```json
+{
+  "items": [
+    {
+      "symbol": "BTCUSDT",
+      "displayName": "BTC / USDT",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "price": 106500,
+      "change24h": 2.5,
+      "volume24h": 1250000000,
+      "marketCap": 820000000,
+      "high24h": 107200,
+      "low24h": 103800,
+      "rank": 1,
+      "logoUrl": "https://cdn.test/btc.svg",
+      "exchangeCount": 1,
+      "updatedAt": "2026-05-24T03:45:00Z",
+      "isTrending": true
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 25,
+  "search": "btc",
+  "sortBy": "change24h",
+  "sortDir": "desc",
+  "meta": {
+    "generatedAt": "2026-05-24T03:45:30Z",
+    "updatedAt": "2026-05-24T03:45:00Z",
+    "degradedSections": [],
+    "degradedFields": []
+  }
+}
+```
+
+### Market Tickers: frontend behavior
+
+- использовать для list/table/grid screens вместо многократных `chart` запросов;
+- `marketCap` остаётся proxy-derived полем и может быть `null`, если snapshot не смог вычислить proxy;
+- `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными.
+
+---
+
+## POST /api/v1/market/quotes/batch
+
+### Batch Quotes: назначение
+
+Дешёвый refresh path для небольшого symbol set без pagination/search metadata.
+
+### Batch Quotes: request
+
+```http
+POST /api/v1/market/quotes/batch
+Content-Type: application/json
+
+{
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+}
+```
+
+### Batch Quotes: response example
+
+```json
+{
+  "items": [
+    {
+      "symbol": "BTCUSDT",
+      "price": 106500,
+      "change24h": 2.5,
+      "high24h": 107200,
+      "low24h": 103800,
+      "volume24h": 1250000000,
+      "updatedAt": "2026-05-24T03:45:00Z"
+    }
+  ],
+  "missingSymbols": ["DOGEUSDT"],
+  "meta": {
+    "generatedAt": "2026-05-24T03:45:30Z",
+    "updatedAt": "2026-05-24T03:45:00Z",
+    "degradedSections": [],
+    "degradedFields": []
+  }
+}
+```
+
+### Batch Quotes: frontend behavior
+
+- `missingSymbols` не считается hard-error: это signal, что symbol отсутствует в текущем snapshot universe;
+- endpoint не требует page/sort/search и подходит для widget-level polling.
+
+---
+
+## GET /api/v1/market/converter/quote
+
+### Converter Quote: назначение
+
+Возвращает lightweight conversion quote между двумя asset-ами через snapshot USD prices.
+
+### Converter Quote: request
+
+```http
+GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1
+```
+
+### Converter Quote: response example
+
+```json
+{
+  "fromAsset": "BTC",
+  "toAsset": "USDT",
+  "amount": 1,
+  "rate": 106500,
+  "convertedAmount": 106500,
+  "source": "gateway-market-snapshot",
+  "generatedAt": "2026-05-24T03:45:30Z",
+  "updatedAt": "2026-05-24T03:45:00Z"
+}
+```
+
+### Converter Quote: error cases
+
+- `400` если `fromAsset` / `toAsset` пустые;
+- `400` если `amount <= 0`;
+- `400` если gateway snapshot не знает один из asset-ов и не может вывести USD cross-rate.
 
 ---
 
@@ -1100,14 +1264,14 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 
 Возвращает расширенную сводку портфеля для authenticated user.
 
-Текущая реализация строится полностью внутри gateway по in-memory linked exchanges:
+Текущая реализация строится полностью внутри gateway по linked exchanges, сохранённым в `IFrontendContractState`:
 
 - `totalValue` = сумма `cachedBalance` по linked exchanges;
 - `byAsset` пока пустой массив;
 - `byExchange` содержит по одной записи на linked exchange;
 - `isSynced` сейчас `false`, `change24h` пока `0`.
 
-Эти данные подходят для стабильного contract-shape, но не переживают restart gateway.
+Если gateway настроен с Redis, эти данные переживают restart и становятся видны другим instances. Без Redis behaviour деградирует в прежний memory-only fallback.
 
 ### /api/exchanges/*
 
@@ -1156,7 +1320,7 @@ Runtime normalization:
 - `GET /api/services/toggles` возвращает `{ news, alerts, portfolioSync, marketOverview }`;
 - `PATCH /api/services/toggles` принимает partial body с любым подмножеством этих полей и возвращает обновлённый объект.
 
-Исходный state bootstrap-ится из `FeatureFlagsSettings`, дальше живёт только в memory текущего gateway instance.
+Исходный state bootstrap-ится из `FeatureFlagsSettings`, дальше сохраняется через `IDistributedCache`: при Redis-конфигурации toggles shared/durable, без Redis остаются memory-only внутри текущего процесса.
 
 ### GET /api/admin/{summary,users,services,statistics}
 
@@ -1166,7 +1330,7 @@ Runtime normalization:
 
 - `GET /api/admin/users` сейчас возвращает snapshot только вызывающего admin-user, а не полный user directory;
 - `GET /api/admin/services` строится из текущих service toggles;
-- `summary` и `statistics` считают linked exchanges/alerts/users только внутри in-memory gateway state.
+- `summary` и `statistics` считают linked exchanges/alerts/users только внутри gateway-owned cache-backed state, а не из отдельного admin owner-service.
 
 Использовать эти routes как mobile-facing contract можно уже сейчас, но не как cross-instance persistent admin truth.
 
@@ -1183,7 +1347,8 @@ Runtime normalization:
 1. Принимает `limit`.
 2. Clamp-ит его в диапазон `1..100`.
 3. Запрашивает news client.
-4. Даже при недоступности downstream отвечает `200`, но ставит `degraded = true`.
+4. Сортирует items по `publishedAt desc` и режет до итогового `limit`.
+5. Даже при недоступности downstream отвечает `200`, но ставит `degraded = true`.
 
 ### News: request
 
@@ -1219,7 +1384,23 @@ GET /api/news?limit=20
 
 ### News: current implementation note
 
-Текущий fallback path возвращает успешную пустую gateway-local ленту, поэтому типичный сценарий сейчас — `items = []`, `total = 0`, `degraded = false`. `degraded = true` остаётся только для реальной ошибки news client.
+`GET /api/news` и `GET /api/news/home` используют один и тот же sorted response builder. `GET /api/news/home` — это просто compact variant с фиксированным `limit = 3` для home screen. Каждый `NewsItemDto` может дополнительно нести `url`, `imageUrl` и `tags`. Пустая лента остаётся нормальным `200`-сценарием, а `degraded = true` выставляется только при реальной ошибке news client.
+
+---
+
+## GET /api/news/home
+
+### News Home: назначение
+
+Compact home-screen variant news feed.
+
+### News Home: request
+
+```http
+GET /api/news/home
+```
+
+Авторизация не требуется. Endpoint всегда использует `limit = 3` и тот же response shape, что и `GET /api/news`.
 
 ---
 

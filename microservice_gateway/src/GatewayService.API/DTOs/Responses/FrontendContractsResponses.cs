@@ -20,7 +20,9 @@ public sealed record PublicMarketOverviewDto
 public sealed record FrontendResponseMetaDto
 {
     public DateTimeOffset GeneratedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? UpdatedAt { get; init; }
     public IReadOnlyList<string> DegradedSections { get; init; } = [];
+    public IReadOnlyList<string> DegradedFields { get; init; } = [];
 }
 
 public sealed record PortfolioDetailedSummaryResponse

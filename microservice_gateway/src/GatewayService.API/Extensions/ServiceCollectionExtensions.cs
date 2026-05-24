@@ -83,6 +83,8 @@ public static class ServiceCollectionExtensions
         // Market API — Bybit HTTP client
         services.AddHttpClient(nameof(BybitSymbolProvider))
                 .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(15));
+        services.AddHttpClient(nameof(MarketServiceClient))
+            .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(15));
 
         // Market API — services
         // All market services are singletons: they delegate to singleton Redis/Kafka,

@@ -82,23 +82,26 @@ API Gateway  :7520 (host) -> :5020 (container)
     ├── POST /api/account/*       ← proxies:    Account Service (HTTP auth flow)
     ├── GET /api/account/me       ← proxies:    Account Service (via Kafka)
     ├── GET /api/dashboard        ← aggregates: Guest → Market + News; User → Portfolio + Market + News
-    ├── GET /api/v1/market/overview ← public market overview (gateway-local fallback)
+  ├── GET /api/v1/market/overview ← snapshot-backed public market overview
+  ├── GET /api/v1/market/tickers  ← list-ready market snapshot cards
+  ├── POST /api/v1/market/quotes/batch ← lightweight quote refresh by symbol set
+  ├── GET /api/v1/market/converter/quote ← asset conversion quote from snapshot prices
     ├── GET /api/v1/market/config ← Market config (symbols, timeframes, candle grids)
     ├── GET /api/v1/market/chart  ← OHLCV candles (Redis cached, Kafka ingest)
     ├── GET /api/portfolio/summary ← gateway-local frontend contract state
     ├── /api/exchanges/*, /api/alerts/*, /api/services/toggles
     │                              ← gateway-local frontend contract state
-    ├── GET /api/news             ← gateway-local empty feed fallback
+  ├── GET /api/news, /api/news/home ← sorted public news feed fallback
     ├── GET /api/notifications    ← gateway-local empty inbox fallback
     └── GET /api/admin/{summary,users,services,statistics}
                                    ← lightweight mobile-admin surface (JWT admin)
     │
     ├── Account Service        (HTTP auth proxy + Kafka: cmd.account.*)
     ├── Market/Bybit           (HTTP: api.bybit.com, Redis cache, Kafka ingest)
-    └── Frontend fallback state (in-memory, per gateway instance)
+  └── Frontend fallback state (distributed cache-backed; Redis shared when configured)
 ```
 
-Gateway now also exposes a lightweight frontend-contract layer for routes that do not yet have a dedicated owner service. These payloads are stable enough for mobile/web integration, but the state is process-local and resets on gateway restart.
+Gateway now also exposes a lightweight frontend-contract layer for routes that do not yet have a dedicated owner service. These payloads are stable enough for mobile/web integration. Linked exchanges, alerts, service toggles and lightweight mobile-admin counters are now stored through `IDistributedCache`: with Redis configured they survive restart and can be shared across gateway instances; without Redis the fallback distributed-memory cache keeps the old per-process semantics.
 
 ---
 
@@ -114,13 +117,17 @@ Gateway now also exposes a lightweight frontend-contract layer for routes that d
 | GET | `/api/account/me` | Required | Current user profile |
 | GET | `/api/dashboard` | Optional | Aggregated main screen data; guest gets only public sections, user also gets personal sections |
 | GET | `/api/v1/market/overview` | None | Public market overview for the home screen |
+| GET | `/api/v1/market/tickers` | None | Searchable, sortable, paginated market snapshot list |
+| POST | `/api/v1/market/quotes/batch` | None | Lightweight quote refresh for a symbol set |
+| GET | `/api/v1/market/converter/quote` | None | Asset conversion quote derived from snapshot prices |
 | GET | `/api/v1/market/config` | None | Symbols, timeframes, candle-count grids, defaults |
 | GET | `/api/v1/market/chart` | None | OHLCV candles — `?symbol=BTCUSDT&timeframe=5m&limit=200` |
-| GET | `/api/portfolio/summary` | Required | Detailed portfolio summary (gateway-local fallback state) |
+| GET | `/api/portfolio/summary` | Required | Detailed portfolio summary (gateway-owned fallback state, distributed-cache-backed when Redis is configured) |
 | GET/POST/PATCH/DELETE | `/api/exchanges/*` | Required | Available exchanges + linked exchanges CRUD |
 | GET/POST/PATCH/DELETE | `/api/alerts*` | Required | Price alerts CRUD |
 | GET/PATCH | `/api/services/toggles` | Required | Service toggles for settings UI |
 | GET | `/api/news` | None | Latest news items |
+| GET | `/api/news/home` | None | Compact home-screen news feed (`limit=3`) |
 | GET | `/api/notifications` | Required | User notifications |
 | GET | `/api/admin/{summary,users,services,statistics}` | Admin JWT | Lightweight mobile-admin surface |
 | GET | `/health` | None | Health check |
@@ -128,6 +135,11 @@ Gateway now also exposes a lightweight frontend-contract layer for routes that d
 | GET | `/swagger` | None (dev only) | Swagger UI |
 
 All responses include `X-Correlation-Id` header.
+
+Auth error note:
+
+- `GET /api/account/me` and auth proxy failures now use the shared JSON `ErrorResponse` contract on gateway-managed errors;
+- successful auth proxy responses still pass through the downstream JSON payload unchanged.
 
 Browser/web note:
 
@@ -285,11 +297,11 @@ API.md               — frontend-oriented HTTP contract reference
 src/
   GatewayService.API/
     Aggregators/         — BFF orchestration logic (Bootstrap, Dashboard)
-    Clients/             — Downstream clients (Account via Kafka + HTTP auth proxy, plus market/news/notifications/portfolio fallbacks)
+    Clients/             — Downstream clients (Account via Kafka + HTTP auth proxy, snapshot-backed market client, plus news/notifications/portfolio fallbacks)
     Controllers/         — Thin ASP.NET controllers, including mobile BFF routes for account auth, portfolio, exchanges, alerts, toggles and mobile-admin summaries
-    DTOs/                — Response contracts, ErrorResponse and frontend contract request/response models
+    DTOs/                — Response contracts, ErrorResponse, market snapshot DTOs and frontend contract request/response models
     Extensions/          — ServiceCollectionExtensions
-    Frontend/            — In-memory frontend contract state used by fallback mobile routes
+    Frontend/            — Distributed-cache-backed frontend contract state used by fallback mobile routes
     Kafka/               — KafkaSettings, Topics, KafkaRequestClient (request/reply)
     Market/              — Full market API: TimeframeMap, CandleCountGrid, MarketSettings,
                            ChartService, ChartRequestQueue (coalescing), MarketCacheService,
@@ -318,8 +330,11 @@ tests/
 - [ ] `POST /api/account/login` → 200, accepts `email` or `login`, returns top-level `uid`, `id`, `email`, `roles`
 - [ ] `GET /api/account/me` (no token) → 401 JSON with `status`, `title`, `timestamp`
 - [ ] `GET /api/dashboard` (no token) → 200 guest payload, `portfolio = null`, `meta.degradedSections` не содержит `portfolio`
-- [ ] `GET /api/v1/market/overview` → 200 public payload with `marketOverview`, `trendingAssets`, `meta.generatedAt`
-- [ ] `GET /api/news` → 200, `degraded: false`, `items: []`
+- [ ] `GET /api/v1/market/overview` → 200 public payload with snapshot-derived metrics, `meta.generatedAt`, `meta.updatedAt`
+- [ ] `GET /api/v1/market/tickers?page=1&pageSize=25` → 200, `items`, `total`, `meta.updatedAt`
+- [ ] `POST /api/v1/market/quotes/batch` → 200, returns `items` and `missingSymbols`
+- [ ] `GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1` → 200 quote payload
+- [ ] `GET /api/news` / `GET /api/news/home` → 200, newest-first items, `degraded` reflects only real news client failure
 - [ ] All responses contain `X-Correlation-Id` header
 - [ ] Swagger UI accessible at `/swagger` in Development
 

@@ -1,4 +1,5 @@
 using GatewayService.API.Clients.Market;
+using GatewayService.API.DTOs.Requests;
 using GatewayService.API.DTOs;
 using GatewayService.API.DTOs.Responses;
 using GatewayService.API.Market;
@@ -57,52 +58,75 @@ public sealed class MarketController : ControllerBase
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<IActionResult> GetOverview(CancellationToken ct)
     {
-        var configTask = _marketConfig.GetConfigAsync(ct);
-        var overviewTask = _market.GetOverviewAsync(ct);
-        var trendingTask = _market.GetTrendingAsync(5, ct);
-
-        await Task.WhenAll(configTask, overviewTask, trendingTask);
-
-        var config = await configTask;
-        var degraded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        var overviewResult = await overviewTask;
-        var overview = overviewResult.IsSuccess && overviewResult.Value is not null
-            ? overviewResult.Value
-            : null;
-        if (overview is null)
+        var result = await _market.GetPublicOverviewAsync(5, ct);
+        if (!result.IsSuccess || result.Value is null)
         {
-            degraded.Add("marketOverview");
-        }
-
-        var trendingResult = await trendingTask;
-        var trendingAssets = trendingResult.IsSuccess && trendingResult.Value is not null
-            ? trendingResult.Value.Select(item => item.Symbol).Where(item => !string.IsNullOrWhiteSpace(item)).ToArray()
-            : config.Symbols.Take(5).ToArray();
-        if (!trendingResult.IsSuccess)
-        {
-            degraded.Add("trendingAssets");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                ErrorResponse.ServiceUnavailable("market_overview", HttpContext.GetCorrelationId()));
         }
 
         Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=120";
-        return Ok(new PublicMarketOverviewResponse
+        return Ok(result.Value);
+    }
+
+    [HttpGet("tickers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetTickers(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 25,
+        [FromQuery] string? search = null,
+        [FromQuery] string? sortBy = null,
+        [FromQuery] string? sortDir = null,
+        [FromQuery] string? symbols = null,
+        CancellationToken ct = default)
+    {
+        var filteredSymbols = string.IsNullOrWhiteSpace(symbols)
+            ? Array.Empty<string>()
+            : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        var result = await _market.GetTickersAsync(page, pageSize, search, sortBy, sortDir, filteredSymbols, ct);
+        if (!result.IsSuccess || result.Value is null)
         {
-            MarketOverview = new PublicMarketOverviewDto
-            {
-                TotalMarketCap = overview?.TotalMarketCapUsd ?? 0,
-                BtcDominance = overview?.BtcDominance ?? 0,
-                Volume24h = overview?.Volume24hUsd ?? 0,
-                ActiveAssets = config.Symbols.Count,
-                FearGreedValue = 0,
-                FearGreedLabel = "Neutral",
-            },
-            TrendingAssets = trendingAssets,
-            Meta = new FrontendResponseMetaDto
-            {
-                GeneratedAt = DateTimeOffset.UtcNow,
-                DegradedSections = degraded.ToArray(),
-            }
-        });
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid tickers request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(result.Value);
+    }
+
+    [HttpPost("quotes/batch")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetBatchQuotes([FromBody] BatchMarketQuotesRequest request, CancellationToken ct)
+    {
+        var result = await _market.GetQuotesAsync(request.Symbols, ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid quotes request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=20";
+        return Ok(result.Value);
+    }
+
+    [HttpGet("converter/quote")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetConverterQuote(
+        [FromQuery] string fromAsset,
+        [FromQuery] string toAsset,
+        [FromQuery] decimal amount = 1,
+        CancellationToken ct = default)
+    {
+        var result = await _market.GetConverterQuoteAsync(fromAsset, toAsset, amount, ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid converter quote request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=20";
+        return Ok(result.Value);
     }
 
     /// <summary>

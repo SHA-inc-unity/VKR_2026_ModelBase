@@ -89,6 +89,82 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
         cc!.Public.Should().BeTrue();
     }
 
+    // ── GET /api/v1/market/overview ──────────────────────────────────────
+
+    [Fact]
+    public async Task Overview_returns_200_and_non_placeholder_market_stats()
+    {
+        var response = await _client.GetAsync("/api/v1/market/overview");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("marketOverview").GetProperty("totalMarketCap").GetDecimal().Should().BeGreaterThan(0);
+        body.GetProperty("marketOverview").GetProperty("volume24h").GetDecimal().Should().BeGreaterThan(0);
+        body.GetProperty("trendingAssets").GetArrayLength().Should().BeGreaterThan(0);
+    }
+
+    // ── GET /api/v1/market/tickers ───────────────────────────────────────
+
+    [Fact]
+    public async Task Tickers_returns_paginated_items_with_required_fields()
+    {
+        var response = await _client.GetAsync("/api/v1/market/tickers?page=1&pageSize=2&sortBy=rank&sortDir=asc");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("items").GetArrayLength().Should().Be(2);
+
+        var first = body.GetProperty("items")[0];
+        first.TryGetProperty("symbol", out _).Should().BeTrue();
+        first.TryGetProperty("displayName", out _).Should().BeTrue();
+        first.TryGetProperty("price", out _).Should().BeTrue();
+        first.TryGetProperty("change24h", out _).Should().BeTrue();
+        first.TryGetProperty("volume24h", out _).Should().BeTrue();
+        first.TryGetProperty("marketCap", out _).Should().BeTrue();
+        first.TryGetProperty("exchangeCount", out _).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Tickers_supports_search_filter()
+    {
+        var response = await _client.GetAsync("/api/v1/market/tickers?search=ETH&pageSize=10");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("items").GetArrayLength().Should().Be(1);
+        body.GetProperty("items")[0].GetProperty("symbol").GetString().Should().Be("ETHUSDT");
+    }
+
+    // ── POST /api/v1/market/quotes/batch ─────────────────────────────────
+
+    [Fact]
+    public async Task Quotes_batch_returns_requested_symbols()
+    {
+        using var response = await _client.PostAsJsonAsync("/api/v1/market/quotes/batch", new
+        {
+            symbols = new[] { "BTCUSDT", "ETHUSDT" }
+        });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("items").GetArrayLength().Should().Be(2);
+        body.GetProperty("missingSymbols").GetArrayLength().Should().Be(0);
+    }
+
+    // ── GET /api/v1/market/converter/quote ───────────────────────────────
+
+    [Fact]
+    public async Task Converter_quote_returns_rate_and_converted_amount()
+    {
+        var response = await _client.GetAsync("/api/v1/market/converter/quote?fromAsset=BTC&toAsset=ETH&amount=2");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("rate").GetDecimal().Should().BeGreaterThan(0);
+        body.GetProperty("convertedAmount").GetDecimal().Should().BeGreaterThan(0);
+        body.GetProperty("source").GetString().Should().NotBeNullOrEmpty();
+    }
+
     // ── GET /api/v1/market/chart ──────────────────────────────────────────
 
     [Theory]
@@ -188,5 +264,19 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
         // "btcusdt" (lower) should resolve the same as "BTCUSDT"
         var response = await _client.GetAsync("/api/v1/market/chart?symbol=btcusdt&timeframe=5m&limit=200");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    // ── GET /api/news/home ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task News_home_returns_compact_feed_shape()
+    {
+        var response = await _client.GetAsync("/api/news/home");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.TryGetProperty("items", out _).Should().BeTrue();
+        body.TryGetProperty("total", out _).Should().BeTrue();
+        body.TryGetProperty("degraded", out _).Should().BeTrue();
     }
 }

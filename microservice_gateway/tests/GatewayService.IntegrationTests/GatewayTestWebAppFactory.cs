@@ -1,5 +1,6 @@
 using GatewayService.API.Clients.Account;
 using GatewayService.API.Clients.Account.Dtos;
+using GatewayService.API.Clients.Market;
 using GatewayService.API.Common;
 using GatewayService.API.DTOs.Responses;
 using GatewayService.API.Market;
@@ -50,12 +51,14 @@ public sealed class GatewayTestWebAppFactory : WebApplicationFactory<Program>
             services.RemoveAll<IMarketConfigService>();
             services.RemoveAll<IChartService>();
             services.RemoveAll<IMarketCacheService>();
+            services.RemoveAll<IMarketServiceClient>();
 
             services.AddSingleton<IMarketCacheService, NoopMarketCacheService>();
             services.AddSingleton<IBybitSymbolProvider>(
                 new FakeBybitSymbolProvider(["BTCUSDT", "ETHUSDT", "SOLUSDT"]));
             services.AddSingleton<IMarketConfigService, FakeMarketConfigService>();
             services.AddSingleton<IChartService, FakeChartService>();
+            services.AddSingleton<IMarketServiceClient, FakeMarketServiceClient>();
         });
     }
 }
@@ -169,5 +172,184 @@ internal sealed class FakeChartService : IChartService
             RetryAfterMs = null,
         };
         return Task.FromResult(ServiceResult<ChartResponse>.Ok(resp));
+    }
+}
+
+internal sealed class FakeMarketServiceClient : IMarketServiceClient
+{
+    private static readonly DateTimeOffset UpdatedAt = DateTimeOffset.Parse("2026-05-24T03:45:00Z");
+
+    private static readonly MarketTickerItemDto[] Items =
+    [
+        new()
+        {
+            Symbol = "BTCUSDT",
+            DisplayName = "BTC / USDT",
+            BaseAsset = "BTC",
+            QuoteAsset = "USDT",
+            Price = 106500m,
+            Change24h = 2.5m,
+            Volume24h = 1250000000m,
+            MarketCap = 820000000m,
+            High24h = 107200m,
+            Low24h = 103800m,
+            Rank = 1,
+            LogoUrl = "https://cdn.test/btc.svg",
+            ExchangeCount = 1,
+            UpdatedAt = UpdatedAt,
+            IsTrending = true,
+        },
+        new()
+        {
+            Symbol = "ETHUSDT",
+            DisplayName = "ETH / USDT",
+            BaseAsset = "ETH",
+            QuoteAsset = "USDT",
+            Price = 4250m,
+            Change24h = 1.1m,
+            Volume24h = 780000000m,
+            MarketCap = 410000000m,
+            High24h = 4295m,
+            Low24h = 4180m,
+            Rank = 2,
+            LogoUrl = "https://cdn.test/eth.svg",
+            ExchangeCount = 1,
+            UpdatedAt = UpdatedAt,
+            IsTrending = true,
+        },
+        new()
+        {
+            Symbol = "SOLUSDT",
+            DisplayName = "SOL / USDT",
+            BaseAsset = "SOL",
+            QuoteAsset = "USDT",
+            Price = 210m,
+            Change24h = -0.8m,
+            Volume24h = 315000000m,
+            MarketCap = 180000000m,
+            High24h = 215m,
+            Low24h = 205m,
+            Rank = 3,
+            LogoUrl = "https://cdn.test/sol.svg",
+            ExchangeCount = 1,
+            UpdatedAt = UpdatedAt,
+            IsTrending = false,
+        }
+    ];
+
+    public Task<ServiceResult<MarketOverviewDto>> GetOverviewAsync(CancellationToken ct = default)
+    {
+        return Task.FromResult(ServiceResult<MarketOverviewDto>.Ok(new MarketOverviewDto
+        {
+            BtcDominance = 58.164729m,
+            TotalMarketCapUsd = 1410000000m,
+            Volume24hUsd = 2345000000m,
+        }));
+    }
+
+    public Task<ServiceResult<IReadOnlyList<TrendingAssetDto>>> GetTrendingAsync(int limit = 10, CancellationToken ct = default)
+    {
+        var items = Items.Take(limit).Select(item => new TrendingAssetDto
+        {
+            Symbol = item.Symbol,
+            PriceUsd = item.Price,
+            ChangePercent24h = item.Change24h,
+        }).ToArray();
+        return Task.FromResult(ServiceResult<IReadOnlyList<TrendingAssetDto>>.Ok(items));
+    }
+
+    public Task<ServiceResult<PublicMarketOverviewResponse>> GetPublicOverviewAsync(int trendingLimit = 5, CancellationToken ct = default)
+    {
+        return Task.FromResult(ServiceResult<PublicMarketOverviewResponse>.Ok(new PublicMarketOverviewResponse
+        {
+            MarketOverview = new PublicMarketOverviewDto
+            {
+                TotalMarketCap = 1410000000m,
+                BtcDominance = 58.164729m,
+                Volume24h = 2345000000m,
+                ActiveAssets = Items.Length,
+                FearGreedValue = 61,
+                FearGreedLabel = "Greed",
+            },
+            TrendingAssets = Items.Take(trendingLimit).Select(item => item.Symbol).ToArray(),
+            Meta = new FrontendResponseMetaDto
+            {
+                GeneratedAt = UpdatedAt,
+                UpdatedAt = UpdatedAt,
+            }
+        }));
+    }
+
+    public Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(int page = 1, int pageSize = 25, string? search = null, string? sortBy = null, string? sortDir = null, IReadOnlyList<string>? symbols = null, CancellationToken ct = default)
+    {
+        IEnumerable<MarketTickerItemDto> items = Items;
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            items = items.Where(item => item.Symbol.Contains(search, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (symbols is { Count: > 0 })
+        {
+            var filter = symbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            items = items.Where(item => filter.Contains(item.Symbol));
+        }
+
+        var pageItems = items.Take(pageSize).ToArray();
+        return Task.FromResult(ServiceResult<MarketTickersResponse>.Ok(new MarketTickersResponse
+        {
+            Items = pageItems,
+            Total = pageItems.Length,
+            Page = page,
+            PageSize = pageSize,
+            Search = search,
+            SortBy = sortBy ?? "rank",
+            SortDir = sortDir ?? "desc",
+            Meta = new FrontendResponseMetaDto
+            {
+                GeneratedAt = UpdatedAt,
+                UpdatedAt = UpdatedAt,
+            }
+        }));
+    }
+
+    public Task<ServiceResult<MarketBatchQuotesResponse>> GetQuotesAsync(IReadOnlyList<string> symbols, CancellationToken ct = default)
+    {
+        var filter = (symbols ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var items = Items.Where(item => filter.Contains(item.Symbol)).Select(item => new MarketQuoteDto
+        {
+            Symbol = item.Symbol,
+            Price = item.Price,
+            Change24h = item.Change24h,
+            High24h = item.High24h,
+            Low24h = item.Low24h,
+            Volume24h = item.Volume24h,
+            UpdatedAt = item.UpdatedAt,
+        }).ToArray();
+
+        return Task.FromResult(ServiceResult<MarketBatchQuotesResponse>.Ok(new MarketBatchQuotesResponse
+        {
+            Items = items,
+            MissingSymbols = [],
+            Meta = new FrontendResponseMetaDto
+            {
+                GeneratedAt = UpdatedAt,
+                UpdatedAt = UpdatedAt,
+            }
+        }));
+    }
+
+    public Task<ServiceResult<MarketConverterQuoteResponse>> GetConverterQuoteAsync(string fromAsset, string toAsset, decimal amount, CancellationToken ct = default)
+    {
+        return Task.FromResult(ServiceResult<MarketConverterQuoteResponse>.Ok(new MarketConverterQuoteResponse
+        {
+            FromAsset = fromAsset.ToUpperInvariant(),
+            ToAsset = toAsset.ToUpperInvariant(),
+            Amount = amount,
+            Rate = 25.058823m,
+            ConvertedAmount = decimal.Round(amount * 25.058823m, 6, MidpointRounding.AwayFromZero),
+            Source = "fake-market-service",
+            GeneratedAt = UpdatedAt,
+            UpdatedAt = UpdatedAt,
+        }));
     }
 }

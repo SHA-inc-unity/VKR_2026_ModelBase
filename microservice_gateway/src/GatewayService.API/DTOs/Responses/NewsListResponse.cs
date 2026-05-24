@@ -13,6 +13,7 @@ public sealed record NewsItemDto
     public string Title { get; init; } = string.Empty;
     public string Summary { get; init; } = string.Empty;
     public string Source { get; init; } = string.Empty;
+    public string? Url { get; init; }
     public string? ImageUrl { get; init; }
     public DateTimeOffset PublishedAt { get; init; }
     public IReadOnlyList<string> Tags { get; init; } = [];
