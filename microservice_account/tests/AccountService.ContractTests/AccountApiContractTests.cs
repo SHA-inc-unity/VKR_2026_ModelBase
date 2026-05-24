@@ -53,6 +53,22 @@ public sealed class AccountApiContractTests : IClassFixture<WebApplicationFactor
     }
 
     [Fact]
+    public async Task Login_UsernameJsonBody_InvalidCredentialsStillReturns401()
+    {
+        var response = await _client.PostAsJsonAsync("/api/account/login",
+            new { login = "admin", password = "WrongPass1" });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+
+        var body = await response.Content.ReadAsStringAsync();
+        var json = JsonDocument.Parse(body).RootElement;
+
+        json.TryGetProperty("title", out _).Should().BeTrue("response should be ProblemDetails");
+        json.TryGetProperty("status", out var status).Should().BeTrue();
+        status.GetInt32().Should().Be(401);
+    }
+
+    [Fact]
     public async Task HealthCheck_Returns200()
     {
         var response = await _client.GetAsync("/health");

@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace AccountService.Application.DTOs.Requests;
 
+[method: JsonConstructor]
 public sealed record LoginRequest(
     [property: JsonPropertyName("email")] string? Email,
     [property: JsonPropertyName("login")] string? Login,
