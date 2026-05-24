@@ -66,6 +66,19 @@
 | Correlation header | `X-Correlation-Id` присутствует в ответах |
 | Версионирование | только market API версионирован через `/api/v1/market/*`; остальные endpoint-ы пока без path-version |
 
+### Public cache semantics
+
+| Route | Текущее поведение |
+| ----- | ----------------- |
+| `GET /api/v1/market/config` | `Cache-Control: public, max-age=60, stale-while-revalidate=3540` |
+| `GET /api/v1/market/overview` | `Cache-Control: public, max-age=30, stale-while-revalidate=120` |
+| `GET /api/v1/market/tickers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
+| `POST /api/v1/market/quotes/batch` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
+| `GET /api/v1/market/converter/quote` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
+| `GET /api/news` and `GET /api/news/home` | `Cache-Control: public, max-age=30, stale-while-revalidate=300` |
+
+ETag/If-None-Match semantics для этих routes пока не реализованы. Frontend и edge cache должны опираться именно на `Cache-Control` и timestamps в payload.
+
 ### Browser CORS rules
 
 | Сценарий | Текущее поведение gateway |
@@ -145,7 +158,7 @@ Frontend должен различать эти сценарии.
 
 ### Gateway-local frontend state
 
-Часть mobile/BFF routes сейчас обслуживается самим gateway без отдельного owner-service, но уже не только через process-local объекты:
+Часть mobile/BFF routes сейчас обслуживается самим gateway без отдельного owner-service и хранится в gateway-owned cache-backed state:
 
 - `GET /api/portfolio/summary`;
 - `/api/exchanges/*`;
@@ -649,6 +662,12 @@ Gateway публикует тот же auth-flow, что и `microservice_accoun
 - если proxy path сам не может достучаться до account-service, gateway возвращает structured `503 Service Unavailable`;
 - успешный `logout` через gateway возвращает `204 No Content`.
 
+Практическое правило для клиента:
+
+- `code = "account_proxy_error"` означает, что upstream auth route ответил non-2xx и gateway перепаковал его в единый envelope;
+- `code = "account_profile_unavailable"` относится только к `GET /api/account/me` и означает сбой Kafka-backed profile lookup;
+- успешные auth responses по-прежнему не получают gateway wrapper и должны парситься по downstream account contract.
+
 ---
 
 ## GET /api/account/me
@@ -857,7 +876,8 @@ GET /api/v1/market/overview
 - считать этот endpoint public source of truth для home screen overview;
 - воспринимать market numbers как snapshot-derived proxies, а не как canonical multi-exchange market-cap feed;
 - использовать `meta.updatedAt` как timestamp последнего snapshot refresh, а `meta.generatedAt` как время ответа gateway;
-- `meta.degradedFields` и `meta.degradedSections` использовать как warning, а не как hard-fail trigger.
+- `meta.degradedFields` и `meta.degradedSections` использовать как warning, а не как hard-fail trigger;
+- frontend cache должен учитывать route-level freshness policy `max-age=30, stale-while-revalidate=120`.
 
 ---
 
@@ -928,7 +948,8 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 
 - использовать для list/table/grid screens вместо многократных `chart` запросов;
 - `marketCap` остаётся proxy-derived полем и может быть `null`, если snapshot не смог вычислить proxy;
-- `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными.
+- `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными;
+- route рассчитан на короткий public cache: `max-age=15, stale-while-revalidate=45`.
 
 ---
 
@@ -977,7 +998,8 @@ Content-Type: application/json
 ### Batch Quotes: frontend behavior
 
 - `missingSymbols` не считается hard-error: это signal, что symbol отсутствует в текущем snapshot universe;
-- endpoint не требует page/sort/search и подходит для widget-level polling.
+- endpoint не требует page/sort/search и подходит для widget-level polling;
+- route рассчитан на самый короткий public cache среди market snapshot endpoints: `max-age=10, stale-while-revalidate=20`.
 
 ---
 
@@ -1002,7 +1024,7 @@ GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1
   "amount": 1,
   "rate": 106500,
   "convertedAmount": 106500,
-  "source": "gateway-market-snapshot",
+  "source": "bybit-linear-tickers",
   "generatedAt": "2026-05-24T03:45:30Z",
   "updatedAt": "2026-05-24T03:45:00Z"
 }
@@ -1013,6 +1035,11 @@ GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1
 - `400` если `fromAsset` / `toAsset` пустые;
 - `400` если `amount <= 0`;
 - `400` если gateway snapshot не знает один из asset-ов и не может вывести USD cross-rate.
+
+### Converter Quote: frontend behavior
+
+- `source` сейчас отражает production snapshot source и в live path равен `bybit-linear-tickers`;
+- route использует тот же короткий freshness window, что и batch quotes: `max-age=10, stale-while-revalidate=20`.
 
 ---
 
@@ -1382,9 +1409,26 @@ GET /api/news?limit=20
 | `total` | number | число элементов в `items` |
 | `degraded` | boolean | downstream news currently unavailable |
 
+#### News item fields
+
+| Поле | Тип | Смысл |
+| ---- | --- | ----- |
+| `id` | string | идентификатор новости |
+| `title` | string | заголовок карточки |
+| `summary` | string | краткое описание |
+| `source` | string | источник публикации |
+| `url` | string/null | canonical article URL |
+| `imageUrl` | string/null | preview image URL |
+| `publishedAt` | string | время публикации |
+| `tags` | string[] | произвольные теги |
+
 ### News: current implementation note
 
 `GET /api/news` и `GET /api/news/home` используют один и тот же sorted response builder. `GET /api/news/home` — это просто compact variant с фиксированным `limit = 3` для home screen. Каждый `NewsItemDto` может дополнительно нести `url`, `imageUrl` и `tags`. Пустая лента остаётся нормальным `200`-сценарием, а `degraded = true` выставляется только при реальной ошибке news client.
+
+Frontend cache note:
+
+- обе news routes отдают `Cache-Control: public, max-age=30, stale-while-revalidate=300`.
 
 ---
 
