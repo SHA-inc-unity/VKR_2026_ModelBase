@@ -544,7 +544,7 @@ public class ChartService : IChartService
                 }
 
                 var waitedRows = await WaitForInflightIngestAsync(
-                    ingestKey, symbol, tfInfo, limit, ct);
+                    ingestKey, symbol, tfInfo, limit, exchange, ct);
 
                 if (waitedRows.IsFailure)
                 {
@@ -608,7 +608,7 @@ public class ChartService : IChartService
                 // empty — give the data-service a few more polling cycles
                 // before deciding it's a real failure.
                 var waitedRows = await WaitForInflightIngestAsync(
-                    ingestKey, symbol, tfInfo, limit, ct);
+                    ingestKey, symbol, tfInfo, limit, exchange, ct);
 
                 if (waitedRows.IsFailure)
                 {
