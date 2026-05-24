@@ -58,6 +58,15 @@ get_bind_mount_data_paths() {
             printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/postgres"
             printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_account/redis"
             ;;
+        microservice_social)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_social/postgres"
+            ;;
+        microservice_news)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_news/postgres"
+            ;;
+        microservice_notification)
+            printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_notification/postgres"
+            ;;
         microservice_data)
             printf '%s\n' "$REPO_ROOT/.runtime-data/microservice_data/postgres"
             ;;
