@@ -116,15 +116,15 @@ public sealed record IngestResult(
 public interface IDataServiceClient
 {
     /// <summary>
-    /// Requests coverage info for the given symbol + timeframe.
+    /// Requests coverage info for the given symbol + timeframe + exchange.
     /// Returns null when the request fails or times out.
     /// </summary>
     Task<CoverageResult?> GetCoverageAsync(
-        string symbol, string bybitInterval, CancellationToken ct = default);
+        string symbol, string bybitInterval, string exchange = "bybit", CancellationToken ct = default);
 
     /// <summary>
     /// Fetches the newest fixed-width chart window anchored at the latest
-    /// stored candle for the given symbol/timeframe.
+    /// stored candle for the given symbol/timeframe/exchange.
     /// When <paramref name="columns"/> is non-null and non-empty, the data-service
     /// projects only those columns (in addition to <c>timestamp_utc</c>), which
     /// dramatically shrinks the Kafka payload for chart-only requests that don't
@@ -136,6 +136,7 @@ public interface IDataServiceClient
         long stepMs,
         int limit,
         IReadOnlyList<string>? columns = null,
+        string exchange = "bybit",
         CancellationToken ct = default);
 
     /// <summary>
@@ -163,7 +164,8 @@ public interface IDataServiceClient
     /// before replying while reusing the shared 4-slot job runner and per-table locks.
     /// </summary>
     Task<IngestResult> IngestAsync(
-        string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default);
+        string symbol, string bybitInterval, long startMs, long endMs,
+        string exchange = "bybit", CancellationToken ct = default);
 
     /// <summary>
     /// Submits the same queued ingest path asynchronously (fire-and-forget).
@@ -172,5 +174,5 @@ public interface IDataServiceClient
     /// </summary>
     void FireAndForgetIngest(
         string symbol, string bybitInterval, long startMs, long endMs,
-        Action onComplete, Action<Exception> onError);
+        Action onComplete, Action<Exception> onError, string exchange = "bybit");
 }

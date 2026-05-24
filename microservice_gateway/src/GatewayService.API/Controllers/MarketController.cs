@@ -258,6 +258,12 @@ public sealed class MarketController : ControllerBase
     /// Number of candles to return. Must be one of the values from /config
     /// candle_counts for the chosen timeframe class.
     /// </param>
+    /// <param name="exchange">
+    /// Exchange to fetch candles from. Supported: "bybit" (default), "binance", "kraken".
+    /// Unknown values fall back to bybit. Each exchange has its own data-service table
+    /// and independent Redis cache namespace.
+    /// </param>
+    /// <param name="ct">Cancellation token (request abort).</param>
     /// <response code="200">Chart response (status is "ok" or "partial").</response>
     /// <response code="400">Invalid symbol, timeframe, or limit.</response>
     /// <response code="503">Downstream chart data is temporarily unavailable.</response>
@@ -269,11 +275,13 @@ public sealed class MarketController : ControllerBase
         [FromQuery] string symbol,
         [FromQuery] string timeframe,
         [FromQuery] int limit,
+        [FromQuery] string? exchange,
         CancellationToken ct)
     {
         var correlationId = HttpContext.GetCorrelationId();
+        var exchangeKey = DataServiceClient.NormalizeExchange(exchange);
 
-        var result = await _chart.GetChartAsync(symbol, timeframe, limit, ct);
+        var result = await _chart.GetChartAsync(symbol, timeframe, limit, exchangeKey, ct);
 
         if (!result.IsSuccess)
         {
@@ -316,6 +324,100 @@ public sealed class MarketController : ControllerBase
         }
 
         return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// Returns OHLCV chart data for the same symbol/timeframe across multiple
+    /// exchanges, fetched in parallel. Used by the frontend "Compare exchanges"
+    /// overlay so the client doesn't need 3 separate roundtrips.
+    /// </summary>
+    /// <param name="symbol">Trading pair, e.g. BTCUSDT.</param>
+    /// <param name="timeframe">Timeframe id from /config.</param>
+    /// <param name="limit">Number of candles per exchange.</param>
+    /// <param name="exchanges">Comma-separated list of exchanges. Default: "bybit,binance,kraken".</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <response code="200">
+    /// Object with <c>items</c> (exchange → ChartResponse) and <c>errors</c>
+    /// (exchange → error code) so partial failures don't blank the whole comparison.
+    /// </response>
+    /// <response code="400">No valid exchanges, or invalid symbol/timeframe/limit.</response>
+    [HttpGet("chart/compare")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetChartCompare(
+        [FromQuery] string symbol,
+        [FromQuery] string timeframe,
+        [FromQuery] int limit,
+        [FromQuery] string? exchanges = null,
+        CancellationToken ct = default)
+    {
+        var correlationId = HttpContext.GetCorrelationId();
+
+        var requested = string.IsNullOrWhiteSpace(exchanges)
+            ? new[] { "bybit", "binance", "kraken" }
+            : exchanges
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(static e => DataServiceClient.NormalizeExchange(e))
+                .Distinct()
+                .ToArray();
+
+        if (requested.Length == 0)
+        {
+            return BadRequest(ErrorResponse.BadRequest(
+                "At least one valid exchange must be requested",
+                correlationId));
+        }
+
+        // Cap parallel fan-out so a malicious caller can't spawn dozens of
+        // concurrent ingests by passing a huge exchanges list.
+        if (requested.Length > 3)
+        {
+            requested = requested.Take(3).ToArray();
+        }
+
+        var tasks = requested
+            .Select(async ex =>
+            {
+                var result = await _chart.GetChartAsync(symbol, timeframe, limit, ex, ct);
+                return (Exchange: ex, Result: result);
+            })
+            .ToArray();
+
+        var completed = await Task.WhenAll(tasks);
+
+        var items  = new Dictionary<string, ChartResponse>(StringComparer.OrdinalIgnoreCase);
+        var errors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (ex, result) in completed)
+        {
+            if (result.IsSuccess && result.Value is not null)
+            {
+                items[ex] = result.Value;
+            }
+            else
+            {
+                errors[ex] = result.Error ?? "DATA_SOURCE_UNAVAILABLE: unknown error";
+            }
+        }
+
+        // If everything failed, surface a clean 400/503 so the client can
+        // handle it instead of receiving an empty success.
+        if (items.Count == 0)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                ErrorResponse.ServiceUnavailable("market_chart_compare", correlationId));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(new
+        {
+            symbol,
+            timeframe,
+            limit,
+            exchanges = requested,
+            items,
+            errors,
+        });
     }
 
     private static bool IsChartServiceUnavailableCode(string? errorCode)

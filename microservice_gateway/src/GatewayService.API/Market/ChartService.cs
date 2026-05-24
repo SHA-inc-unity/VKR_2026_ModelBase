@@ -27,11 +27,13 @@ public class ChartService : IChartService
     // is exhausted, or the cooldown lock signals a failed ingest. After the
     // budget we return SERVICE_BUSY so the controller emits a clean 503.
 
-    // Cache key patterns:
-    //   market:chart:{symbol}:{bybitInterval}:{limit}:v1
-    //   market:ingest-lock:{symbol}:{bybitInterval}
-    private const string ChartKeyFmt         = "market:chart:{0}:{1}:{2}:v1";
-    private const string IngestLockFmt       = "market:ingest-lock:{0}:{1}";
+    // Cache key patterns (note the `{exchange}` segment — without it,
+    // switching exchange would serve stale candles from another exchange's
+    // cache, and a Bybit ingest-lock would block a Binance request):
+    //   market:chart:{exchange}:{symbol}:{bybitInterval}:{limit}:v2
+    //   market:ingest-lock:{exchange}:{symbol}:{bybitInterval}
+    private const string ChartKeyFmt         = "market:chart:{0}:{1}:{2}:{3}:v2";
+    private const string IngestLockFmt       = "market:ingest-lock:{0}:{1}:{2}";
     private const string IngestInProgress    = "inprogress";
     private const string IngestErrorCooldown = "error_cooldown";
 
@@ -57,13 +59,19 @@ public class ChartService : IChartService
 
     /// <inheritdoc />
     public virtual async Task<ServiceResult<ChartResponse>> GetChartAsync(
-        string symbol, string timeframe, int limit, CancellationToken ct = default)
+        string symbol, string timeframe, int limit,
+        string exchange = "bybit", CancellationToken ct = default)
     {
         // ── 1. Validate ───────────────────────────────────────────────────────
 
         var symbolUpper = symbol.ToUpperInvariant();
+        var exchangeKey = DataServiceClient.NormalizeExchange(exchange);
 
-        if (!await _config.IsKnownSymbolAsync(symbolUpper, ct))
+        // _config.IsKnownSymbolAsync is sourced from the Bybit instrument list.
+        // For non-Bybit exchanges we skip the strict whitelist for now — typos
+        // will surface as a downstream 503 rather than a 400 until we add
+        // per-exchange instrument lists. (See plan: Phase 1 / risks.)
+        if (exchangeKey == "bybit" && !await _config.IsKnownSymbolAsync(symbolUpper, ct))
             return ServiceResult<ChartResponse>.Fail(
                 $"INVALID_SYMBOL: '{symbol}' is not in the active symbol list");
 
@@ -82,7 +90,7 @@ public class ChartService : IChartService
 
         // ── 2. Cache check ────────────────────────────────────────────────────
 
-        var cached = await TryGetCachedChartAsync(symbolUpper, tfInfo, limit, ct);
+        var cached = await TryGetCachedChartAsync(symbolUpper, tfInfo, limit, exchangeKey, ct);
         if (cached is not null)
             return ServiceResult<ChartResponse>.Ok(cached);
 
@@ -91,7 +99,7 @@ public class ChartService : IChartService
         // "error_cooldown" → previous ingest failed; short retry window before re-attempt
         // null             → no ingest in flight, proceed normally
 
-        var ingestKey    = string.Format(IngestLockFmt, symbolUpper, tfInfo.BybitInterval);
+        var ingestKey    = string.Format(IngestLockFmt, exchangeKey, symbolUpper, tfInfo.BybitInterval);
         var ingestActive = await _cache.GetAsync<string>(ingestKey, ct);
         if (ingestActive == IngestErrorCooldown)
         {
@@ -105,7 +113,7 @@ public class ChartService : IChartService
             // Block here and poll the latest window until rows arrive or we
             // exhaust the budget; never return "pending" to the client.
             var waited = await WaitForInflightIngestAsync(
-                ingestKey, symbolUpper, tfInfo, limit, ct);
+                ingestKey, symbolUpper, tfInfo, limit, exchangeKey, ct);
 
             if (waited.IsFailure)
             {
@@ -116,7 +124,7 @@ public class ChartService : IChartService
             {
                 return ServiceResult<ChartResponse>.Ok(
                     await BuildChartResponseAsync(
-                        symbolUpper, timeframe, limit, tfInfo, waited, ct));
+                        symbolUpper, timeframe, limit, tfInfo, waited, exchangeKey, ct));
             }
 
             return ServiceResult<ChartResponse>.Fail(
@@ -131,6 +139,7 @@ public class ChartService : IChartService
             tfInfo.StepMs,
             limit,
             DataServiceClient.ChartProjectionColumns,
+            exchangeKey,
             ct);
 
         if (latestRows.IsFailure)
@@ -160,6 +169,7 @@ public class ChartService : IChartService
                 initialStartMs,
                 initialEndMs,
                 fallbackRows: null,
+                exchangeKey,
                 ct);
 
             return hydrationResult.Disposition switch
@@ -171,6 +181,7 @@ public class ChartService : IChartService
                         limit,
                         tfInfo,
                         hydrationResult.Rows!,
+                        exchangeKey,
                         ct)),
                 SyncHydrationDisposition.Failed => ServiceResult<ChartResponse>.Fail(
                     hydrationResult.Error ?? "SERVICE_BUSY: Unable to hydrate chart right now"),
@@ -196,6 +207,7 @@ public class ChartService : IChartService
                 startMs,
                 endMs,
                 rowsForResponse,
+                exchangeKey,
                 ct);
 
             if (hydrationResult.Disposition == SyncHydrationDisposition.Failed)
@@ -220,6 +232,7 @@ public class ChartService : IChartService
                 limit,
                 tfInfo,
                 rowsForResponse,
+                exchangeKey,
                 ct));
     }
 
@@ -229,6 +242,7 @@ public class ChartService : IChartService
         int limit,
         TimeframeInfo tfInfo,
         RowsFetchResult rowsResult,
+        string exchange,
         CancellationToken ct)
     {
         var candles = rowsResult.Rows
@@ -272,7 +286,7 @@ public class ChartService : IChartService
 
         // Cache only when data is complete; partial results get a shorter TTL
         var cacheTtl = CacheTtlFor(tfInfo, isFullCoverage);
-        var cacheKey = BuildCacheKey(symbol, tfInfo, limit);
+        var cacheKey = BuildCacheKey(symbol, tfInfo, limit, exchange);
         await _cache.SetAsync(cacheKey, response, cacheTtl, ct);
 
         return response;
@@ -282,28 +296,35 @@ public class ChartService : IChartService
         string symbol,
         string timeframe,
         int limit,
+        string exchange = "bybit",
         CancellationToken ct = default)
     {
         if (!TimeframeMap.TryGetById(timeframe, out var tfInfo))
             return null;
 
-        return await TryGetCachedChartAsync(symbol.ToUpperInvariant(), tfInfo, limit, ct);
+        return await TryGetCachedChartAsync(
+            symbol.ToUpperInvariant(),
+            tfInfo,
+            limit,
+            DataServiceClient.NormalizeExchange(exchange),
+            ct);
     }
 
     public async Task<ChartResponse?> TryGetCachedChartAsync(
         string symbol,
         TimeframeInfo tfInfo,
         int limit,
+        string exchange,
         CancellationToken ct = default)
     {
-        var exactKey = BuildCacheKey(symbol, tfInfo, limit);
+        var exactKey = BuildCacheKey(symbol, tfInfo, limit, exchange);
         var exact = await _cache.GetAsync<ChartResponse>(exactKey, ct);
         if (exact is not null)
             return exact;
 
         foreach (var candidateLimit in CandleCountGrid.ForClass(tfInfo.Class).Where(value => value > limit))
         {
-            var candidateKey = BuildCacheKey(symbol, tfInfo, candidateLimit);
+            var candidateKey = BuildCacheKey(symbol, tfInfo, candidateLimit, exchange);
             var candidate = await _cache.GetAsync<ChartResponse>(candidateKey, ct);
             if (!CanSatisfyFromCachedWindow(candidate, limit))
                 continue;
@@ -363,6 +384,7 @@ public class ChartService : IChartService
         string symbol,
         TimeframeInfo tfInfo,
         int limit,
+        string exchange,
         CancellationToken ct)
     {
         var maxWaitSeconds = Math.Max(1, _settings.ChartInflightWaitSeconds);
@@ -390,6 +412,7 @@ public class ChartService : IChartService
                 tfInfo.StepMs,
                 limit,
                 DataServiceClient.ChartProjectionColumns,
+                exchange,
                 ct);
 
             if (rows.IsFailure)
@@ -440,6 +463,7 @@ public class ChartService : IChartService
         long startMs,
         long endMs,
         RowsFetchResult? fallbackRows,
+        string exchange,
         CancellationToken ct)
     {
         var lockAcquired = await _cache.SetIfNotExistsAsync(
@@ -463,7 +487,7 @@ public class ChartService : IChartService
             // Another caller already owns the ingest lock — wait for rows
             // synchronously rather than telling the client to come back later.
             var waitedRows = await WaitForInflightIngestAsync(
-                ingestKey, symbol, tfInfo, limit, ct);
+                ingestKey, symbol, tfInfo, limit, exchange, ct);
 
             if (waitedRows.IsFailure)
             {
@@ -502,6 +526,7 @@ public class ChartService : IChartService
                 tfInfo.BybitInterval,
                 startMs,
                 endMs,
+                exchange,
                 ct);
 
             if (ingestResult.IsInProgress)
@@ -547,7 +572,7 @@ public class ChartService : IChartService
             }
 
             var tableName = string.IsNullOrWhiteSpace(ingestResult.TableName)
-                ? BuildTableName(symbol, tfInfo.BybitInterval)
+                ? BuildTableName(symbol, tfInfo.BybitInterval, exchange)
                 : ingestResult.TableName;
             var hydratedRows = await _data.GetRowsAsync(
                 tableName, startMs, endMs, limit,
@@ -727,14 +752,15 @@ public class ChartService : IChartService
     // ("60m", "1d"), not the Bybit kline interval ("60", "D"). Sending
     // the Bybit value here would point us at non-existent tables and
     // surface as 42P01 in data-service logs / 503 rows-timeout to clients.
-    private static string BuildTableName(string symbol, string bybitInterval)
+    // For non-Bybit exchanges DatasetCore prefixes the exchange ("binance_btcusdt_60m").
+    private static string BuildTableName(string symbol, string bybitInterval, string exchange)
     {
-        return $"{symbol.ToLowerInvariant()}_{TimeframeMap.BybitIntervalToClientId(bybitInterval)}";
+        return DataServiceClient.BuildTableName(symbol, bybitInterval, exchange);
     }
 
-    private string BuildCacheKey(string symbol, TimeframeInfo tfInfo, int limit)
+    private string BuildCacheKey(string symbol, TimeframeInfo tfInfo, int limit, string exchange)
     {
-        return string.Format(ChartKeyFmt, symbol, tfInfo.BybitInterval, limit);
+        return string.Format(ChartKeyFmt, exchange, symbol, tfInfo.BybitInterval, limit);
     }
 
     private TimeSpan CacheTtlFor(TimeframeInfo tfInfo, bool fullCoverage)

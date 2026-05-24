@@ -26,5 +26,6 @@ public interface IChartService
     /// - "SERVICE_BUSY"            → hydrate path failed/cooldown       → 503
     /// </summary>
     Task<ServiceResult<ChartResponse>> GetChartAsync(
-        string symbol, string timeframe, int limit, CancellationToken ct = default);
+        string symbol, string timeframe, int limit,
+        string exchange = "bybit", CancellationToken ct = default);
 }

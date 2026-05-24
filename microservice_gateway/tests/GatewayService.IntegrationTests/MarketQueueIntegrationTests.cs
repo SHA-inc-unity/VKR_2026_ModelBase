@@ -207,7 +207,7 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
     public int GetLatestWindowCallCount => _getLatestWindowCallCount;
 
     public Task<CoverageResult?> GetCoverageAsync(
-        string symbol, string bybitInterval, CancellationToken ct = default)
+        string symbol, string bybitInterval, string exchange = "bybit", CancellationToken ct = default)
         => Task.FromResult<CoverageResult?>(null);
 
     public async Task<RowsFetchResult> GetLatestWindowRowsAsync(
@@ -216,6 +216,7 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
         long stepMs,
         int limit,
         IReadOnlyList<string>? columns = null,
+        string exchange = "bybit",
         CancellationToken ct = default)
     {
         Interlocked.Increment(ref _getLatestWindowCallCount);
@@ -244,12 +245,13 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
         => Task.FromResult(RowsFetchResult.Empty);
 
     public Task<IngestResult> IngestAsync(
-        string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default)
+        string symbol, string bybitInterval, long startMs, long endMs,
+        string exchange = "bybit", CancellationToken ct = default)
         => Task.FromResult(IngestResult.Fail("disabled"));
 
     public void FireAndForgetIngest(
         string symbol, string bybitInterval, long startMs, long endMs,
-        Action onComplete, Action<Exception> onError)
+        Action onComplete, Action<Exception> onError, string exchange = "bybit")
     {
         // No-op — ingest lock never acquired (SetIfNotExistsAsync returns false)
     }

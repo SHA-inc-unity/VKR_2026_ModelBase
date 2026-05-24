@@ -86,6 +86,7 @@ public sealed class MarketControllerTests
             string symbol,
             string timeframe,
             int limit,
+            string exchange = "bybit",
             CancellationToken ct = default)
         {
             return Task.FromResult(_result);

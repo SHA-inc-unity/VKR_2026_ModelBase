@@ -136,7 +136,8 @@ internal sealed class FakeChartService : IChartService
     private static readonly long StableNowMs = DateTimeOffset.Parse("2026-05-24T03:45:00Z").ToUnixTimeMilliseconds();
 
     public Task<ServiceResult<ChartResponse>> GetChartAsync(
-        string symbol, string timeframe, int limit, CancellationToken ct = default)
+        string symbol, string timeframe, int limit,
+        string exchange = "bybit", CancellationToken ct = default)
     {
         if (!new[] { "BTCUSDT", "ETHUSDT", "SOLUSDT" }
                 .Contains(symbol, StringComparer.OrdinalIgnoreCase))

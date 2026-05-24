@@ -57,7 +57,8 @@ public sealed class ChartRequestQueue : IChartService
     private readonly SemaphoreSlim _totalSemaphore;
 
     // Cache key format mirrors ChartService so the fast-path hits the same Redis key.
-    private const string ChartCacheKeyFmt = "market:chart:{0}:{1}:{2}:v1";
+    // {exchange} is included in the key so different exchanges don't share cache.
+    private const string ChartCacheKeyFmt = "market:chart:{0}:{1}:{2}:{3}:v2";
 
     public ChartRequestQueue(
         ChartService inner,
@@ -78,22 +79,24 @@ public sealed class ChartRequestQueue : IChartService
 
     /// <inheritdoc />
     public async Task<ServiceResult<ChartResponse>> GetChartAsync(
-        string symbol, string timeframe, int limit, CancellationToken ct = default)
+        string symbol, string timeframe, int limit,
+        string exchange = "bybit", CancellationToken ct = default)
     {
         // ── 1. Normalize ──────────────────────────────────────────────────
 
-        var normalizedSymbol = symbol.ToUpperInvariant();
-        var normalizedTf     = timeframe.ToLowerInvariant();
-        var requestKey       = $"{normalizedSymbol}:{normalizedTf}:{limit}:v1";
+        var normalizedSymbol   = symbol.ToUpperInvariant();
+        var normalizedTf       = timeframe.ToLowerInvariant();
+        var normalizedExchange = DataServiceClient.NormalizeExchange(exchange);
+        var requestKey         = $"{normalizedExchange}:{normalizedSymbol}:{normalizedTf}:{limit}:v2";
 
         // ── 2. Fast-path cache check (avoids TCS allocation on cache hit) ─
 
         if (TimeframeMap.TryGetById(normalizedTf, out var tfInfo))
         {
             var cacheKey = string.Format(
-                ChartCacheKeyFmt, normalizedSymbol, tfInfo.BybitInterval, limit);
+                ChartCacheKeyFmt, normalizedExchange, normalizedSymbol, tfInfo.BybitInterval, limit);
             var cached = await _cache.GetAsync<ChartResponse>(cacheKey, ct)
-                ?? await _inner.TryGetCachedChartAsync(normalizedSymbol, tfInfo, limit, ct);
+                ?? await _inner.TryGetCachedChartAsync(normalizedSymbol, tfInfo, limit, normalizedExchange, ct);
             if (cached is not null)
             {
                 _log.LogDebug("[queue:cache-hit] {Key}", requestKey);
@@ -176,7 +179,7 @@ public sealed class ChartRequestQueue : IChartService
             _log.LogDebug("[queue:downstream-start] {Key}", requestKey);
 
             var result = await _inner.GetChartAsync(
-                normalizedSymbol, normalizedTf, limit, workCts.Token);
+                normalizedSymbol, normalizedTf, limit, normalizedExchange, workCts.Token);
 
             downstreamSw.Stop();
             _log.LogInformation(

@@ -77,7 +77,7 @@ public sealed class ChartRequestQueueTests
         // path and return a SERVICE_BUSY failure (no "pending" status anymore).
         dataMock
             .Setup(d => d.GetCoverageAsync(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<CancellationToken>()))
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((CoverageResult?)null);
 
         return new ChartService(
@@ -135,7 +135,8 @@ public sealed class ChartRequestQueueTests
             Unblock(ServiceResult<ChartResponse>.Fail("DOWNSTREAM_ERROR"));
 
         public override async Task<ServiceResult<ChartResponse>> GetChartAsync(
-            string symbol, string timeframe, int limit, CancellationToken ct = default)
+            string symbol, string timeframe, int limit,
+            string exchange = "bybit", CancellationToken ct = default)
         {
             Interlocked.Increment(ref _callCount);
             return await _gate.Task.WaitAsync(ct);
