@@ -10,6 +10,10 @@
 
 ## Текущий контекст
 
+### 2026-05-24
+
+- `microservice_data/src/DataService.API/Jobs/MarketWatcherService.cs`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: CSV Inspect показал, что прошлый watcher-save fix был недостаточным: canonical dataset rows, созданные на candle rollover, содержали только `open/high/low/close`, а `volume/turnover/funding_rate/open_interest/rsi` оставались `NULL`, из-за чего таблица выглядела почти пустой. `MarketWatcherService` теперь при закрытии свечи дотягивает authoritative raw candle через `MarketDataClientFactory` и пишет в dataset полный `MarketRow` (`OHLCV + funding_rate + open_interest + RSI`) через `BulkUpsertAsync`. Full-table `compute_features` на hot path не добавлялся намеренно, чтобы не пересчитывать целую 1m-таблицу каждую минуту. `dotnet build src/DataService.API/DataService.API.csproj` проходит.
+
 ### 2026-05-23
 
 - `microservice_gateway/src/GatewayService.API/Kafka/KafkaRequestClient.cs`, `microservice_infra/docker-compose.yml`, `microservice_gateway/{README.md,STRUCTURE.md}`, `microservice_infra/{README.md,STRUCTURE.md}`: закрыт live split-admin incident `Kafka error: HTTP 503`. Root cause оказался в janitor policy: живой, но idle `reply.gateway.*` topic оставался с `HW=0`, `redpanda-janitor` удалял его, gateway получал `partitions revoked` и зависал в `kafka-request-reply=Unhealthy` до рестарта. Фикс: gateway теперь после успешного `CreateTopicsAsync` тоже пишет bootstrap-marker в inbox, чтобы `HW > 0` до первого реального reply. После rebuild/redeploy `http://localhost:7520/health/ready` и `https://95.165.27.159:8443/health/ready` снова `200`, новый inbox assigned, `rpk topic describe` показывает ненулевой HighWatermark.

@@ -802,24 +802,173 @@ public sealed class MarketWatcherService : BackgroundService
             item => DatasetCore.MakeTableName(item.Symbol, item.Timeframe, item.Exchange),
             StringComparer.OrdinalIgnoreCase))
         {
-            var first = group.First();
-            await _datasetRepo.CreateTableIfNotExistsAsync(group.Key, ct);
-            await _datasetRepo.BulkUpsertLiveCandlesAsync(
+            await PersistClosedCandleGroupAsync(
                 group.Key,
-                first.Symbol,
-                first.Exchange,
-                first.Timeframe,
-                group
-                    .OrderBy(item => item.Candle.BucketStartMs)
-                    .Select(item => new DatasetRepository.LiveCandleRow(
-                        item.Candle.BucketStartMs,
-                        item.Candle.Open,
-                        item.Candle.High,
-                        item.Candle.Low,
-                        item.Candle.Close))
-                    .ToArray(),
+                group.OrderBy(item => item.Candle.BucketStartMs).ToArray(),
                 ct);
         }
+    }
+
+    private async Task PersistClosedCandleGroupAsync(
+        string tableName,
+        IReadOnlyList<ClosedDatasetCandle> closedCandles,
+        CancellationToken ct)
+    {
+        if (closedCandles.Count == 0)
+        {
+            return;
+        }
+
+        const int rsiPeriod = 14;
+        const long fundingIntervalMs = 28_800_000L;
+
+        var first = closedCandles[0];
+        var (timeframeKey, interval, stepMs) = DatasetCore.NormalizeTimeframe(first.Timeframe);
+        var targetTimestamps = closedCandles
+            .Select(item => item.Candle.BucketStartMs)
+            .Distinct()
+            .OrderBy(item => item)
+            .ToArray();
+
+        if (targetTimestamps.Length == 0)
+        {
+            return;
+        }
+
+        var warmupCandles = Math.Max(DatasetConstants.DefaultWarmupCandles, rsiPeriod * 2);
+        var fetchStart = Math.Max(0L, targetTimestamps[0] - warmupCandles * stepMs);
+        var fetchEnd = targetTimestamps[^1];
+        var symbol = first.Symbol.ToUpperInvariant();
+        var exchange = first.Exchange;
+        var market = _marketDataClientFactory.GetRequiredClient(exchange);
+        var (oiLabel, oiIntervalMs) = DatasetCore.ChooseOpenInterestInterval(stepMs);
+
+        var klineTask = market.FetchKlinesAsync(symbol, interval, fetchStart, fetchEnd, stepMs, 1, ct);
+        Task<IReadOnlyList<(long TimestampMs, decimal Rate)>> fundingTask =
+            string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
+                ? Task.FromResult<IReadOnlyList<(long TimestampMs, decimal Rate)>>(Array.Empty<(long TimestampMs, decimal Rate)>())
+                : market.FetchFundingRatesAsync(symbol, Math.Max(0L, targetTimestamps[0] - fundingIntervalMs), fetchEnd, fundingIntervalMs, ct);
+        Task<IReadOnlyList<(long TimestampMs, decimal Oi)>> oiTask =
+            string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
+                ? Task.FromResult<IReadOnlyList<(long TimestampMs, decimal Oi)>>(Array.Empty<(long TimestampMs, decimal Oi)>())
+                : market.FetchOpenInterestAsync(symbol, oiLabel, Math.Max(0L, targetTimestamps[0] - oiIntervalMs), fetchEnd, oiIntervalMs, ct);
+
+        var klines = await klineTask;
+        var funding = await fundingTask;
+        var openInterest = await oiTask;
+
+        var klinesByTs = klines
+            .GroupBy(item => item.TimestampMs)
+            .ToDictionary(group => group.Key, group => group.Last());
+        var rsiByTs = ComputeWilderRsi(
+            klines
+                .OrderBy(item => item.TimestampMs)
+                .Select(item => (item.TimestampMs, item.Close))
+                .ToList(),
+            rsiPeriod);
+        var fundingFf = BuildForwardFill(funding.Select(item => (item.TimestampMs, item.Rate)).ToArray());
+        var oiFf = BuildForwardFill(openInterest.Select(item => (item.TimestampMs, item.Oi)).ToArray());
+
+        var rows = new List<DatasetRepository.MarketRow>(targetTimestamps.Length);
+        foreach (var timestampMs in targetTimestamps)
+        {
+            if (!klinesByTs.TryGetValue(timestampMs, out var kline))
+            {
+                continue;
+            }
+
+            rows.Add(new DatasetRepository.MarketRow(
+                TimestampMs: timestampMs,
+                Symbol: symbol,
+                Exchange: exchange,
+                Timeframe: timeframeKey,
+                OpenPrice: kline.Open,
+                HighPrice: kline.High,
+                LowPrice: kline.Low,
+                ClosePrice: kline.Close,
+                Volume: kline.Volume,
+                Turnover: kline.Turnover,
+                FundingRate: LookupForwardFill(fundingFf, timestampMs),
+                OpenInterest: LookupForwardFill(oiFf, timestampMs),
+                Rsi: rsiByTs.TryGetValue(timestampMs, out var rsi) ? rsi : null));
+        }
+
+        if (rows.Count != targetTimestamps.Length)
+        {
+            throw new InvalidOperationException(
+                $"Market watcher could not hydrate {targetTimestamps.Length - rows.Count} closed candles for {tableName}");
+        }
+
+        await _datasetRepo.CreateTableIfNotExistsAsync(tableName, ct);
+        await _datasetRepo.BulkUpsertAsync(tableName, rows, ct);
+    }
+
+    private static Dictionary<long, decimal> ComputeWilderRsi(IList<(long Ts, decimal Close)> closes, int period)
+    {
+        var result = new Dictionary<long, decimal>();
+        if (closes.Count < period + 1) return result;
+
+        decimal gainSum = 0;
+        decimal lossSum = 0;
+        for (int i = 1; i <= period; i++)
+        {
+            var diff = closes[i].Close - closes[i - 1].Close;
+            if (diff > 0)
+            {
+                gainSum += diff;
+            }
+            else
+            {
+                lossSum -= diff;
+            }
+        }
+
+        var avgGain = gainSum / period;
+        var avgLoss = lossSum / period;
+        result[closes[period].Ts] = avgLoss == 0 ? 100m : 100m - 100m / (1m + avgGain / avgLoss);
+        for (int i = period + 1; i < closes.Count; i++)
+        {
+            var diff = closes[i].Close - closes[i - 1].Close;
+            var gain = diff > 0 ? diff : 0m;
+            var loss = diff < 0 ? -diff : 0m;
+            avgGain = (avgGain * (period - 1) + gain) / period;
+            avgLoss = (avgLoss * (period - 1) + loss) / period;
+            result[closes[i].Ts] = avgLoss == 0 ? 100m : 100m - 100m / (1m + avgGain / avgLoss);
+        }
+
+        return result;
+    }
+
+    private static List<(long Ts, decimal? Value)> BuildForwardFill(IReadOnlyList<(long Ts, decimal Value)> src)
+    {
+        return src
+            .OrderBy(item => item.Ts)
+            .Select(item => (item.Ts, (decimal?)item.Value))
+            .ToList();
+    }
+
+    private static decimal? LookupForwardFill(List<(long Ts, decimal? Value)> src, long ts)
+    {
+        if (src.Count == 0) return null;
+
+        int lo = 0;
+        int hi = src.Count - 1;
+        int best = -1;
+        while (lo <= hi)
+        {
+            int mid = (lo + hi) >> 1;
+            if (src[mid].Ts <= ts)
+            {
+                best = mid;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        return best >= 0 ? src[best].Value : null;
     }
 
     private static Dictionary<string, long> NormalizeTimeframes(IEnumerable<string>? configured)

@@ -4,6 +4,10 @@
 
 ## 2026-05
 
+### 2026-05-24
+
+- `microservice_data/src/DataService.API/Jobs/MarketWatcherService.cs`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: закрыт defect в watcher-backed dataset save path, который всплыл в Inspect CSV. Предыдущий live bridge писал в canonical dataset table только `open/high/low/close`, поэтому новые watcher-свечи выглядели как skeleton rows с `volume/turnover/funding_rate/open_interest/rsi=NULL` и пустыми feature-колонками. `MarketWatcherService` теперь на candle rollover дотягивает authoritative closed raw candle через `IMarketDataClient` и сохраняет в dataset полноценный `MarketRow` (`OHLCV + funding_rate + open_interest + RSI`). Полный `compute_features` на каждом rollover сознательно не запускается, чтобы не делать full-table SQL pass на горячем пути. Узкий `dotnet build src/DataService.API/DataService.API.csproj` проходит.
+
 ### 2026-05-23
 
 - `microservice_gateway/src/GatewayService.API/Kafka/KafkaRequestClient.cs`, `microservice_gateway/{README.md,STRUCTURE.md}`, `microservice_infra/{README.md,STRUCTURE.md}`: закрыт live incident с `Kafka error: HTTP 503` на split admin. Root cause был не в broker bootstrap, а в том, что `redpanda-janitor` удалял живой, но ещё пустой `reply.gateway.*` topic с `HW=0`; gateway после `partitions revoked` оставался `kafka-request-reply=Unhealthy` до рестарта. `KafkaRequestClient` теперь даже после успешного `CreateTopicsAsync` сразу пишет bootstrap-marker в новый reply inbox, чтобы `HighWatermark > 0` до первого реального reply. После rebuild/redeploy gateway `/health/ready` и backend facade `:8443/health/ready` вернулись к `200`.

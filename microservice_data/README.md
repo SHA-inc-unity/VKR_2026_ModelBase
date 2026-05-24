@@ -443,15 +443,16 @@ its own runtime state, logs and control plane.
 
 The watcher still does not run the full historical ingest/repair pipeline, but
 it no longer stops at the live overlay only. On every candle rollover it now
-mirrors the closed O/H/L/C tuple into the canonical dataset table for that
-`exchange + symbol + timeframe`, while still persisting one row per
+hydrates the authoritative closed raw candle through the exchange client and
+upserts `OHLCV + funding_rate + open_interest + RSI` into the canonical dataset
+table for that `exchange + symbol + timeframe`, while still persisting one row per
 `(exchange, symbol)` into
 `market_watch_live(exchange, symbol, realtime_symbol, last_price, last_price_ts, candles_json, updated_at)`.
 `candles_json` keeps the last closed candle for each configured timeframe, so
 the watcher still exposes a compact live overlay without turning every incoming
-realtime price tick into a database write. Only the closed candle is mirrored
-into the authoritative raw table; volume/turnover/funding/open-interest/RSI and
-derived columns remain owned by ingest/repair/feature paths.
+realtime price tick into a database write. The hot path still does not run the
+full-table `compute_features` SQL pass on every minute rollover, so derived
+feature columns remain owned by ingest/repair/feature workflows.
 
 On service startup the data-service also purges legacy `market_watch` rows from
 `dataset_jobs`, because the watcher no longer belongs to the queue model and
