@@ -135,11 +135,12 @@ public sealed class MarketSettings
     /// budget expires without rows the gateway returns 503 SERVICE_BUSY
     /// rather than a "pending" success.
     /// </summary>
-    public int ChartInflightWaitSeconds { get; init; } = 45;
+    public int ChartInflightWaitSeconds { get; init; } = 15;
 
     /// <summary>
     /// Polling interval (milliseconds) used by the chart endpoint while
-    /// waiting on an inflight ingest.
+    /// waiting on an inflight ingest. Data-service is now push-driven, so
+    /// keep this short — most ingest hits return within a few hundred ms.
     /// </summary>
-    public int ChartInflightPollMs { get; init; } = 750;
+    public int ChartInflightPollMs { get; init; } = 150;
 }

@@ -8,7 +8,11 @@ namespace GatewayService.API.Market;
 /// <inheritdoc />
 public sealed class DataServiceClient : IDataServiceClient
 {
-    private static readonly TimeSpan IngestJobPollDelay = TimeSpan.FromMilliseconds(500);
+    // Data-service is now push-driven (JobDispatchChannel) so a queued ingest
+    // typically completes in well under 500 ms for hot tables. Poll at 50 ms
+    // so the gateway returns the freshly-ingested rows immediately instead
+    // of holding the request open for half a second per cycle.
+    private static readonly TimeSpan IngestJobPollDelay = TimeSpan.FromMilliseconds(50);
 
     private readonly IKafkaRequestClient _kafka;
     private readonly MarketSettings      _settings;

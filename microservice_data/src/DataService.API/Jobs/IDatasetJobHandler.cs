@@ -139,9 +139,14 @@ public sealed class JobContext
         }
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken);
+        // 2 s default — was 500 ms. The cancel button has a "few seconds"
+        // budget anyway, and the previous interval hammered the DB pool with
+        // a cheap-but-frequent SELECT on every running ingest job. Bigger
+        // jobs that benefit from snappier cancellation can still override
+        // it explicitly via the parameter.
         var monitorTask = MonitorCancelRequestedAsync(
             linkedCts,
-            pollInterval ?? TimeSpan.FromMilliseconds(500));
+            pollInterval ?? TimeSpan.FromSeconds(2));
 
         try
         {

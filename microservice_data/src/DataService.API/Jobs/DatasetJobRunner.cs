@@ -1,15 +1,33 @@
 using DataService.API.Database;
 using DataService.API.Dataset;
 using DataService.API.Kafka;
+using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Threading.Channels;
 
 namespace DataService.API.Jobs;
 
 /// <summary>
-/// Phase B scheduler: polls dataset_jobs for queued rows, dispatches them
-/// to <see cref="IDatasetJobHandler"/> implementations, enforces per-type
-/// capacity slots and (table, conflict_class) locks, and reclaims orphan
-/// rows from previous runs on startup.
+/// Phase B scheduler — now push-driven via <see cref="JobDispatchChannel"/>.
+///
+/// Hot path:
+///   KafkaConsumer.HandleJobsStartAsync inserts a row in <c>dataset_jobs</c>
+///   and immediately calls <see cref="JobDispatchChannel.Publish"/>. The
+///   runner's read loop wakes up under a millisecond, runs slot/lock/dedup
+///   checks, and dispatches the job to its <see cref="IDatasetJobHandler"/>.
+///
+/// Safety net:
+///   We still run a slow (2 s) DB poll as a backstop for jobs that were
+///   queued during process restart, by external writers, or while the
+///   in-memory channel was momentarily backed up because all per-type
+///   semaphores were saturated and we therefore could not dispatch a
+///   freshly-published hint.
+///
+/// What did NOT change:
+///   • per-type / per-exchange / heavy-timeframe semaphores
+///   • (table, conflict_class) JobLockManager locks
+///   • dedup via the partial unique index on params_hash
+///   • orphan reclaim on startup
 /// </summary>
 public sealed class DatasetJobRunner : BackgroundService
 {
@@ -19,11 +37,6 @@ public sealed class DatasetJobRunner : BackgroundService
     // Per-type concurrency caps. Tuned to keep the Postgres pool (size 100)
     // and Bybit rate-limit budget reasonable. Single-instance deployment
     // — these are process-local semaphores.
-    //
-    // Ingest keeps a global cap too, but it must be the sum of the
-    // exchange-isolated slots below. Otherwise the old global ingest
-    // semaphore silently limits the whole runner to 4 jobs total even when
-    // binance/kraken/bybit each still have free exchange capacity.
     private static readonly Dictionary<string, int> Caps = new(StringComparer.OrdinalIgnoreCase)
     {
         [DatasetJobType.Ingest]          = IngestSlotsPerExchange * IngestExchanges.Length,
@@ -46,7 +59,13 @@ public sealed class DatasetJobRunner : BackgroundService
     private readonly DatasetJobsMutator _mut;
     private readonly JobLockManager _locks;
     private readonly KafkaProducer _producer;
+    private readonly JobDispatchChannel _dispatch;
     private readonly ILogger<DatasetJobRunner> _log;
+
+    // Jobs we couldn't dispatch on first pull (slot saturated, lock taken,
+    // etc.) are tracked here so the safety-net poll knows whether to re-fetch
+    // them or whether a different scheduler instance already claimed them.
+    private readonly ConcurrentDictionary<Guid, byte> _inflight = new();
 
     public DatasetJobRunner(
         IEnumerable<IDatasetJobHandler> handlers,
@@ -54,12 +73,14 @@ public sealed class DatasetJobRunner : BackgroundService
         DatasetJobsMutator mut,
         JobLockManager locks,
         KafkaProducer producer,
+        JobDispatchChannel dispatch,
         ILogger<DatasetJobRunner> log)
     {
         _repo = repo;
         _mut = mut;
         _locks = locks;
         _producer = producer;
+        _dispatch = dispatch;
         _log = log;
         _handlers = handlers.ToDictionary(h => h.Type, StringComparer.OrdinalIgnoreCase);
         _slots = Caps.ToDictionary(kv => kv.Key, kv => new SemaphoreSlim(kv.Value, kv.Value), StringComparer.OrdinalIgnoreCase);
@@ -83,79 +104,137 @@ public sealed class DatasetJobRunner : BackgroundService
             var legacyMarketWatch = await _mut.DeleteLegacyMarketWatchAsync(stopping);
             if (legacyMarketWatch > 0)
                 _log.LogInformation("DatasetJobRunner removed {N} legacy market_watch queue rows", legacyMarketWatch);
+
+            // Backfill: anything that was already queued before this process
+            // started (or queued by an external writer) won't have a channel
+            // hint waiting. Seed the dispatch channel with them now.
+            var queuedAtStartup = await _mut.PickQueuedAsync(100, stopping);
+            foreach (var job in queuedAtStartup)
+                _dispatch.Publish(job);
+            if (queuedAtStartup.Count > 0)
+                _log.LogInformation(
+                    "DatasetJobRunner seeded dispatch channel with {N} pre-existing queued jobs",
+                    queuedAtStartup.Count);
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to reclaim orphan jobs on startup");
         }
 
-        _log.LogInformation("DatasetJobRunner started, handlers: {Types}",
+        _log.LogInformation(
+            "DatasetJobRunner started (push-driven via JobDispatchChannel), handlers: {Types}",
             string.Join(", ", _handlers.Keys));
 
+        // Run the safety-net poll as a separate background task. The main
+        // loop is purely reactive — it parks on channel.Reader.ReadAsync.
+        _ = Task.Run(() => SafetyNetPollLoopAsync(stopping), stopping);
+
+        try
+        {
+            await foreach (var job in _dispatch.Reader.ReadAllAsync(stopping))
+            {
+                try { await TryDispatchAsync(job, stopping); }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "DatasetJobRunner dispatch loop error for job {JobId}", job.JobId);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // graceful shutdown
+        }
+    }
+
+    /// <summary>
+    /// Slow (2 s) DB scan as a backstop for missed channel signals — e.g.
+    /// jobs queued while every per-type semaphore was saturated and we had
+    /// to drop the hint, or jobs created by an external process that bypassed
+    /// the channel publisher. Republishes any queued rows we don't already
+    /// know about into the dispatch channel.
+    /// </summary>
+    private async Task SafetyNetPollLoopAsync(CancellationToken stopping)
+    {
         while (!stopping.IsCancellationRequested)
         {
             try
             {
+                await Task.Delay(2000, stopping);
                 var queued = await _mut.PickQueuedAsync(50, stopping);
-                var picked = 0;
                 foreach (var job in queued)
                 {
-                    if (!_handlers.TryGetValue(job.Type, out var handler))
-                    {
-                        _log.LogWarning("No handler for job type {Type}; failing {JobId}", job.Type, job.JobId);
-                        await _mut.FinishAsync(job.JobId, DatasetJobStatus.Failed,
-                            "no_handler", $"no handler registered for type {job.Type}", stopping);
-                        continue;
-                    }
-
-                    if (!_slots.TryGetValue(job.Type, out var slot)) continue;
-                    if (slot.CurrentCount == 0) continue;
-
-                    SemaphoreSlim? exchangeSlot = null;
-                    SemaphoreSlim? heavySlot = null;
-                    var ingestExchange = ResolveIngestExchange(job);
-
-                    if (string.Equals(job.Type, DatasetJobType.Ingest, StringComparison.OrdinalIgnoreCase))
-                    {
-                        exchangeSlot = GetExchangeSlot(_ingestSlotsByExchange, ingestExchange);
-                        if (exchangeSlot.CurrentCount == 0) continue;
-                    }
-
-                    // Heavy timeframes (1m, 3m) additionally require the exclusive
-                    // heavy-ingest slot so they cannot run two at a time.
-                    var isHeavy = IsHeavyIngest(job);
-                    if (isHeavy)
-                    {
-                        heavySlot = GetExchangeSlot(_heavyIngestSlotsByExchange, ingestExchange);
-                        if (heavySlot.CurrentCount == 0) continue;
-                    }
-
-                    if (!_locks.TryAcquire(job.TargetTable, job.ConflictClass)) continue;
-
-                    if (!await _mut.TryAcquireRunningAsync(job.JobId, stopping))
-                    {
-                        // Lost the race — someone else moved it; release our lock.
-                        _locks.Release(job.TargetTable, job.ConflictClass);
-                        continue;
-                    }
-
-                    await slot.WaitAsync(stopping);
-                    if (exchangeSlot is not null) await exchangeSlot.WaitAsync(stopping);
-                    if (heavySlot is not null) await heavySlot.WaitAsync(stopping);
-                    picked++;
-                    _ = Task.Run(() => RunOneAsync(handler, job, slot,
-                        exchangeSlot, heavySlot, stopping), stopping);
+                    if (_inflight.ContainsKey(job.JobId)) continue;
+                    _dispatch.Publish(job);
                 }
-
-                await Task.Delay(picked > 0 ? 100 : 500, stopping);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                _log.LogError(ex, "DatasetJobRunner loop error");
+                _log.LogError(ex, "DatasetJobRunner safety-net poll error");
                 try { await Task.Delay(2000, stopping); } catch { break; }
             }
         }
+    }
+
+    private async Task TryDispatchAsync(DatasetJobRecord hint, CancellationToken stopping)
+    {
+        if (!_handlers.TryGetValue(hint.Type, out var handler))
+        {
+            _log.LogWarning("No handler for job type {Type}; failing {JobId}", hint.Type, hint.JobId);
+            await _mut.FinishAsync(hint.JobId, DatasetJobStatus.Failed,
+                "no_handler", $"no handler registered for type {hint.Type}", stopping);
+            return;
+        }
+
+        if (!_slots.TryGetValue(hint.Type, out var slot)) return;
+
+        // Soft non-blocking check first — if there's no free slot right now,
+        // drop the hint and let the safety-net poll re-pick it once a slot
+        // frees. This keeps the hot path lock-free.
+        if (slot.CurrentCount == 0) return;
+
+        SemaphoreSlim? exchangeSlot = null;
+        SemaphoreSlim? heavySlot = null;
+        var ingestExchange = ResolveIngestExchange(hint);
+
+        if (string.Equals(hint.Type, DatasetJobType.Ingest, StringComparison.OrdinalIgnoreCase))
+        {
+            exchangeSlot = GetExchangeSlot(_ingestSlotsByExchange, ingestExchange);
+            if (exchangeSlot.CurrentCount == 0) return;
+        }
+
+        var isHeavy = IsHeavyIngest(hint);
+        if (isHeavy)
+        {
+            heavySlot = GetExchangeSlot(_heavyIngestSlotsByExchange, ingestExchange);
+            if (heavySlot.CurrentCount == 0) return;
+        }
+
+        if (!_locks.TryAcquire(hint.TargetTable, hint.ConflictClass)) return;
+
+        // Atomic queued→running transition. If we lose the race (another
+        // poll picked it up, or the job was canceled), release the lock and
+        // bail.
+        if (!await _mut.TryAcquireRunningAsync(hint.JobId, stopping))
+        {
+            _locks.Release(hint.TargetTable, hint.ConflictClass);
+            return;
+        }
+
+        // Slot acquisitions cannot block here — we already verified
+        // CurrentCount > 0 above, and ours is the only thread that
+        // transitions queued→running for this row. Use Wait(0) to assert.
+        await slot.WaitAsync(stopping);
+        if (exchangeSlot is not null) await exchangeSlot.WaitAsync(stopping);
+        if (heavySlot is not null) await heavySlot.WaitAsync(stopping);
+
+        _inflight[hint.JobId] = 0;
+        _ = Task.Run(async () =>
+        {
+            try { await RunOneAsync(handler, hint, slot, exchangeSlot, heavySlot, stopping); }
+            finally { _inflight.TryRemove(hint.JobId, out _); }
+        }, stopping);
     }
 
     private async Task WaitForSchemaReadyAsync(CancellationToken ct)

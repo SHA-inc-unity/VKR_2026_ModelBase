@@ -27,6 +27,8 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly MarketWatcherRuntimeState  _marketWatcher;
     private readonly MarketDataClientFactory    _markets;
     private readonly MinioClaimCheckService     _minio;
+    private readonly Jobs.JobDispatchChannel    _jobDispatch;
+    private readonly Jobs.JobDispatchChannel    _jobDispatch;
     // Browser-facing origin для presigned URL'ов, которые получает admin
     // и в итоге показывает в браузере (CSV/ZIP экспорт, anomaly report).
     // По умолчанию — внешний вход infra-nginx на host-порте 8501; путь
@@ -87,6 +89,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         MarketWatcherRuntimeState marketWatcher,
         MarketDataClientFactory markets,
         MinioClaimCheckService minio,
+        Jobs.JobDispatchChannel jobDispatch,
         ILogger<KafkaConsumerService> log)
     {
         _producer                = producer;
@@ -96,6 +99,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         _marketWatcher           = marketWatcher;
         _markets                 = markets;
         _minio                   = minio;
+        _jobDispatch             = jobDispatch;
         _browserDownloadBaseUrl  = opts.Value.Minio.PublicDownloadBaseUrl;
         _internalDownloadBaseUrl = opts.Value.Minio.Endpoint;
         _log                     = log;

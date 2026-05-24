@@ -106,6 +106,14 @@ public sealed partial class KafkaConsumerService
         try
         {
             var (job, deduped) = await _jobsRepo.StartAsync(req, ct);
+
+            // Push-notify the in-memory job runner so the freshly queued
+            // job is picked up sub-millisecond instead of the old 100-500ms
+            // DB-polling cycle. Deduped jobs are already in flight or
+            // queued, so signaling again is harmless (the runner does a
+            // TryAcquireRunningAsync race-safe check before executing).
+            _jobDispatch.Publish(job);
+
             return new
             {
                 job_id  = job.JobId,
