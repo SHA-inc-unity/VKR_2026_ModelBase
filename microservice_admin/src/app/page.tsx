@@ -273,6 +273,7 @@ export default function DashboardPage() {
       tables: Array<string | {
         table_name: string;
         rows?: number;
+        rows_known?: boolean;
         coverage_pct?: number;
         date_from?: string | null;
         date_to?: string | null;
