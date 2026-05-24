@@ -269,7 +269,7 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         // ── upsert ─────────────────────────────────────────────
         var stageUp = await ctx.StartStageAsync("upsert");
         await ctx.ReportAsync("upsert", 70, $"writing {rows.Count} rows");
-        var written = await _repo.BulkUpsertAsync(table, rows, ctx.CancellationToken);
+        var written = await ctx.RunCancelableAsync(token => _repo.BulkUpsertAsync(table, rows, token));
         await ctx.EndStageAsync(stageUp, written);
         await ctx.ReportAsync(
             "upsert",
@@ -283,7 +283,7 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         // ── compute_features ───────────────────────────────────
         var stageFeat = await ctx.StartStageAsync("compute_features");
         await ctx.ReportAsync("compute_features", 90, "computing feature columns");
-        var feat = await _repo.ComputeAndUpdateFeaturesAsync(table, ctx.CancellationToken);
+        var feat = await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesAsync(table, token));
         await ctx.EndStageAsync(stageFeat, feat);
         await ctx.ReportAsync(
             "done",
@@ -352,7 +352,7 @@ public sealed class ComputeFeaturesJobHandler : IDatasetJobHandler
             ?? throw new ArgumentException("table required");
         var stage = await ctx.StartStageAsync("compute_features");
         await ctx.ReportAsync("compute_features", 5, $"computing on {table}");
-        var n = await _repo.ComputeAndUpdateFeaturesAsync(table, ctx.CancellationToken);
+        var n = await ctx.RunCancelableAsync(token => _repo.ComputeAndUpdateFeaturesAsync(table, token));
         await ctx.EndStageAsync(stage, n);
         await ctx.ReportAsync("done", 100, $"{n} rows updated", completed: n);
     }

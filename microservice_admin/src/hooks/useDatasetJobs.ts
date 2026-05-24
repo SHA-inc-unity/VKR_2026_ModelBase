@@ -33,6 +33,7 @@ export interface DatasetJobView {
   job_id: string;
   type: DatasetJobFeedType;
   status: DatasetJobStatus;
+  cancel_requested?: boolean | null;
   progress: number;          // overall job progress
   stage_progress?: number | null;
   stage?: string | null;
@@ -60,6 +61,7 @@ type DatasetJobWire = {
   job_id: string;
   type: DatasetJobFeedType;
   status: DatasetJobStatus;
+  cancel_requested?: boolean | null;
   progress?: number;
   overall_progress?: number;
   stage_progress?: number | null;
@@ -199,6 +201,9 @@ function mergeJobWire(job: DatasetJobWire, deferRebuild = false): void {
     job_id: job.job_id,
     type: job.type,
     status: job.status,
+    cancel_requested: hasOwn(job, 'cancel_requested')
+      ? (typeof job.cancel_requested === 'boolean' ? job.cancel_requested : null)
+      : (prev?.cancel_requested ?? null),
     progress: overallProgress,
     stage_progress: stageProgress,
     stage: hasOwn(job, 'stage') ? (job.stage ?? null) : (prev?.stage ?? null),
@@ -348,6 +353,7 @@ export function seedQueuedJob(args: {
     job_id: jobId,
     type,
     status: 'queued',
+    cancel_requested: false,
     progress: 0,
     stage: null,
     detail: null,
@@ -413,7 +419,19 @@ export async function cancelJob(jobId: string): Promise<boolean> {
       { job_id: jobId },
       { timeoutMs: 10_000 },
     ) as { ok?: boolean; error?: string };
-    return Boolean(resp?.ok);
+    const ok = Boolean(resp?.ok);
+    if (ok) {
+      const current = _jobs.get(jobId);
+      if (current && !current.finished) {
+        _jobs.set(jobId, {
+          ...current,
+          cancel_requested: true,
+          last_update_ms: Date.now(),
+        });
+        rebuildSnapshot();
+      }
+    }
+    return ok;
   } catch {
     return false;
   }

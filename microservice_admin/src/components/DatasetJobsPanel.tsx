@@ -69,6 +69,9 @@ function getStageSummary(job: DatasetJobView): string | null {
 }
 
 function getJobNote(job: DatasetJobView): string | null {
+  if (job.cancel_requested && !job.finished) {
+    return 'Отмена запрошена; ждём остановки текущего этапа';
+  }
   if (job.status === 'queued') return 'Ожидает планировщика';
   if (job.status === 'running') return job.detail ?? 'Job выполняется во владельце сервиса';
   if (job.status === 'succeeded' && job.type === 'ingest') {
@@ -99,6 +102,7 @@ export default function DatasetJobsPanel(): JSX.Element | null {
       <div className="space-y-2">
       {jobs.map((j, index) => {
         const isRunning = j.status === 'running' || j.status === 'queued';
+        const cancelRequested = Boolean(j.cancel_requested) && !j.finished;
         const isError = j.status === 'failed';
         const overallPct = Math.max(0, Math.min(100, j.progress ?? 0));
         const stagePct = typeof j.stage_progress === 'number'
@@ -180,9 +184,12 @@ export default function DatasetJobsPanel(): JSX.Element | null {
               {isRunning ? (
                 <button
                   type="button"
-                  onClick={() => { void cancelJob(j.job_id); }}
-                  className="rounded-md border border-destructive/25 bg-destructive/10 px-2.5 py-1 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/15"
-                >Отменить</button>
+                  onClick={() => { if (!cancelRequested) void cancelJob(j.job_id); }}
+                  disabled={cancelRequested}
+                  className={`rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${cancelRequested
+                    ? 'cursor-default border-border bg-muted/40 text-muted-foreground'
+                    : 'border-destructive/25 bg-destructive/10 text-destructive hover:bg-destructive/15'}`}
+                >{cancelRequested ? 'Отмена...' : 'Отменить'}</button>
               ) : null}
               {j.finished ? (
                 <button

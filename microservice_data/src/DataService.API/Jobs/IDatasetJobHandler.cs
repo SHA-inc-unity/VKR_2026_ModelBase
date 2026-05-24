@@ -125,6 +125,60 @@ public sealed class JobContext
         return await _mut.IsCancelRequestedAsync(Job.JobId, CancellationToken);
     }
 
+    /// <summary>
+    /// Runs a long operation with a linked cancellation token that is tripped
+    /// as soon as the job-level cancel flag appears in the database.
+    /// </summary>
+    public async Task<T> RunCancelableAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        TimeSpan? pollInterval = null)
+    {
+        if (await IsCancelRequestedAsync())
+        {
+            throw new OperationCanceledException(CancellationToken);
+        }
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken);
+        var monitorTask = MonitorCancelRequestedAsync(
+            linkedCts,
+            pollInterval ?? TimeSpan.FromMilliseconds(500));
+
+        try
+        {
+            return await operation(linkedCts.Token);
+        }
+        finally
+        {
+            if (!linkedCts.IsCancellationRequested)
+            {
+                linkedCts.Cancel();
+            }
+
+            try { await monitorTask; }
+            catch (OperationCanceledException) { }
+        }
+    }
+
+    private async Task MonitorCancelRequestedAsync(CancellationTokenSource linkedCts, TimeSpan interval)
+    {
+        try
+        {
+            while (!linkedCts.IsCancellationRequested)
+            {
+                if (await IsCancelRequestedAsync())
+                {
+                    linkedCts.Cancel();
+                    break;
+                }
+
+                await Task.Delay(interval, linkedCts.Token);
+            }
+        }
+        catch (OperationCanceledException) when (linkedCts.IsCancellationRequested || CancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
     public Task<Guid> AddSubtaskAsync(int idx, string label, string? targetTable, long total) =>
         _mut.AddSubtaskAsync(Job.JobId, idx, label, targetTable, total, CancellationToken);
 

@@ -388,6 +388,14 @@ and `...jobs.list`. This lets admin render an honest current-stage bar for
 `fetch_klines` / `fetch_oi` page progress while still showing the overall
 pipeline percent separately.
 
+**Cooperative cancel for long SQL stages**. `cmd.data.dataset.jobs.cancel`
+still sets only `cancel_requested=true` in the DB, but `JobContext` now
+polls that flag while monolithic repository operations run under a linked
+token. This makes long `upsert` / `compute_features` SQL passes abortable
+without waiting for the whole stage to finish, which was the root cause of
+operator-visible "job hangs and cancel button does nothing" during
+`compute_features`.
+
 **Active-job dedup (single source of truth)**. Two callers must agree
 on the uniqueness rule for active jobs, otherwise inserts fail at runtime
 and the Kafka caller sees only a generic timeout:

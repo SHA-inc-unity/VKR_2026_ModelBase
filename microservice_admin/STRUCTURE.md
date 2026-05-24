@@ -47,6 +47,10 @@
   счётчик текущей стадии, stage-bar остаётся indeterminate/live вместо
   подмены pipeline-процентом. Для ingest `succeeded` + `completed=0`
   показывает нормальный no-op текст `Новых строк не потребовалось`.
+  Принятая `jobs.cancel` теперь видна сразу: local store держит
+  `cancel_requested`, note переключается на ожидание остановки текущего
+  stage, а кнопка становится disabled `Отмена...`, чтобы оператор не видел
+  немой повторный клик.
 - `src/hooks/useDatasetJobsFeed.ts` — тонкая client-only синхронизация
   dataset jobs store: подписывает страницу на
   `EVT_DATA_DATASET_JOB_PROGRESS` / `...COMPLETED`, делает mount-time
