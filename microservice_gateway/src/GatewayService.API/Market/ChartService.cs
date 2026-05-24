@@ -8,12 +8,19 @@ namespace GatewayService.API.Market;
 /// <inheritdoc />
 public class ChartService : IChartService
 {
-    private enum HydrationTriggerResult
+    private enum SyncHydrationDisposition
     {
-        Started,
-        AlreadyInProgress,
+        RowsReady,
+        KeepExistingRows,
+        Pending,
         Failed,
     }
+
+    private sealed record SyncHydrationResult(
+        SyncHydrationDisposition Disposition,
+        RowsFetchResult? Rows = null,
+        string? PendingReason = null,
+        string? Error = null);
 
     // Cache key patterns:
     //   market:chart:{symbol}:{bybitInterval}:{limit}:v1
@@ -121,27 +128,75 @@ public class ChartService : IChartService
         {
             var initialEndMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var initialStartMs = initialEndMs - (long)limit * tfInfo.StepMs * _settings.IngestWindowMultiplier;
-            var triggerResult = await TryTriggerWindowHydrationAsync(
-                ingestKey, symbolUpper, tfInfo, limit, initialStartMs, initialEndMs, ct);
+            var hydrationResult = await TryHydrateWindowSynchronouslyAsync(
+                ingestKey,
+                symbolUpper,
+                timeframe,
+                tfInfo,
+                limit,
+                initialStartMs,
+                initialEndMs,
+                fallbackRows: null,
+                ct);
 
-            if (triggerResult == HydrationTriggerResult.Failed)
+            return hydrationResult.Disposition switch
             {
-                return ServiceResult<ChartResponse>.Fail(
-                    "SERVICE_BUSY: Unable to start chart hydration right now");
-            }
-
-            var pendingReason = triggerResult == HydrationTriggerResult.Started
-                ? "No data available locally; ingest triggered"
-                : "Ingest already in progress for this symbol/timeframe";
-
-            return ServiceResult<ChartResponse>.Ok(BuildPendingResponse(
-                symbolUpper, timeframe, limit, pendingReason));
+                SyncHydrationDisposition.RowsReady => ServiceResult<ChartResponse>.Ok(
+                    await BuildChartResponseAsync(
+                        symbolUpper,
+                        timeframe,
+                        limit,
+                        tfInfo,
+                        hydrationResult.Rows!,
+                        ct)),
+                SyncHydrationDisposition.Pending => ServiceResult<ChartResponse>.Ok(
+                    BuildPendingResponse(
+                        symbolUpper,
+                        timeframe,
+                        limit,
+                        hydrationResult.PendingReason ?? "Chart hydration is still in progress")),
+                SyncHydrationDisposition.Failed => ServiceResult<ChartResponse>.Fail(
+                    hydrationResult.Error ?? "SERVICE_BUSY: Unable to hydrate chart right now"),
+                _ => ServiceResult<ChartResponse>.Ok(
+                    BuildPendingResponse(
+                        symbolUpper,
+                        timeframe,
+                        limit,
+                        "Chart hydration is still in progress")),
+            };
         }
 
         // ── 5. Determine time window ──────────────────────────────────────────
 
         var endMs   = latestRows.Rows[^1].TimestampMs;
         var startMs = endMs - (long)(limit - 1) * tfInfo.StepMs;
+        var rowsForResponse = latestRows;
+
+        if (NeedsHydration(rowsForResponse, limit))
+        {
+            var hydrationResult = await TryHydrateWindowSynchronouslyAsync(
+                ingestKey,
+                symbolUpper,
+                timeframe,
+                tfInfo,
+                limit,
+                startMs,
+                endMs,
+                rowsForResponse,
+                ct);
+
+            if (hydrationResult.Disposition == SyncHydrationDisposition.Failed)
+            {
+                return ServiceResult<ChartResponse>.Fail(
+                    hydrationResult.Error ?? "SERVICE_BUSY: Unable to hydrate chart right now");
+            }
+
+            if (hydrationResult.Disposition == SyncHydrationDisposition.RowsReady &&
+                hydrationResult.Rows is not null)
+            {
+                rowsForResponse = hydrationResult.Rows;
+            }
+        }
 
         // ── 7. Build response ─────────────────────────────────────────────────
 
@@ -151,10 +206,7 @@ public class ChartService : IChartService
                 timeframe,
                 limit,
                 tfInfo,
-                ingestKey,
-                startMs,
-                endMs,
-                latestRows,
+                rowsForResponse,
                 ct));
     }
 
@@ -163,22 +215,9 @@ public class ChartService : IChartService
         string timeframe,
         int limit,
         TimeframeInfo tfInfo,
-        string ingestKey,
-        long startMs,
-        long endMs,
         RowsFetchResult rowsResult,
         CancellationToken ct)
     {
-        if (rowsResult.Rows.Count > 0)
-        {
-            var initialCoverage = (double)rowsResult.Rows.Count / limit;
-            if (initialCoverage < _settings.FullCoverageThreshold)
-            {
-                _ = await TryTriggerWindowHydrationAsync(
-                    ingestKey, symbol, tfInfo, limit, startMs, endMs, ct);
-            }
-        }
-
         var candles = rowsResult.Rows
             .OrderBy(r => r.TimestampMs)
             .Select(r => new CandleDto(r.TimestampMs, r.Open, r.High, r.Low, r.Close,
@@ -319,7 +358,177 @@ public class ChartService : IChartService
         };
     }
 
+    private bool NeedsHydration(RowsFetchResult rowsResult, int limit)
+    {
+        return rowsResult.HasRows && (double)rowsResult.Rows.Count / limit < _settings.FullCoverageThreshold;
+    }
+
+    private async Task<SyncHydrationResult> TryHydrateWindowSynchronouslyAsync(
+        string ingestKey,
+        string symbol,
+        string timeframe,
+        TimeframeInfo tfInfo,
+        int limit,
+        long startMs,
+        long endMs,
+        RowsFetchResult? fallbackRows,
+        CancellationToken ct)
+    {
+        var lockAcquired = await _cache.SetIfNotExistsAsync(
+            ingestKey,
+            IngestInProgress,
+            TimeSpan.FromSeconds(_settings.IngestLockTtlSeconds),
+            ct);
+
+        if (!lockAcquired)
+        {
+            _log.LogDebug(
+                "Chart hydration already in progress for {Symbol}/{Interval}",
+                symbol,
+                tfInfo.BybitInterval);
+
+            return fallbackRows is { HasRows: true }
+                ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
+                : new SyncHydrationResult(
+                    SyncHydrationDisposition.Pending,
+                    PendingReason: "Ingest already in progress for this symbol/timeframe");
+        }
+
+        var keepLock = false;
+        var setErrorCooldown = false;
+
+        try
+        {
+            var correlationId = Activity.Current?.Id ?? "n/a";
+            _log.LogInformation(
+                "Running synchronous chart hydration for {Symbol}/{Interval} [{StartMs}..{EndMs}] limit={Limit} correlationId={CorrelationId}",
+                symbol,
+                tfInfo.BybitInterval,
+                startMs,
+                endMs,
+                limit,
+                correlationId);
+
+            var ingestResult = await _data.IngestAsync(
+                symbol,
+                tfInfo.BybitInterval,
+                startMs,
+                endMs,
+                ct);
+
+            if (ingestResult.IsInProgress)
+            {
+                keepLock = true;
+
+                return fallbackRows is { HasRows: true }
+                    ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
+                    : new SyncHydrationResult(
+                        SyncHydrationDisposition.Pending,
+                        PendingReason: BuildHydrationPendingReason(ingestResult));
+            }
+
+            if (ingestResult.IsFailure)
+            {
+                setErrorCooldown = true;
+                return new SyncHydrationResult(
+                    SyncHydrationDisposition.Failed,
+                    Error: BuildIngestFailureError(symbol, timeframe, limit, ingestResult));
+            }
+
+            var tableName = string.IsNullOrWhiteSpace(ingestResult.TableName)
+                ? BuildTableName(symbol, tfInfo.BybitInterval)
+                : ingestResult.TableName;
+            var hydratedRows = await _data.GetRowsAsync(tableName, startMs, endMs, limit, ct);
+
+            if (hydratedRows.IsFailure)
+            {
+                return new SyncHydrationResult(
+                    SyncHydrationDisposition.Failed,
+                    Error: BuildRowsFailureError(symbol, timeframe, limit, hydratedRows, "rows"));
+            }
+
+            if (hydratedRows.IsClaimCheck)
+            {
+                return fallbackRows is { HasRows: true }
+                    ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
+                    : new SyncHydrationResult(
+                        SyncHydrationDisposition.Pending,
+                        PendingReason: "Data payload too large; use a smaller limit or wait for streaming path");
+            }
+
+            if (hydratedRows.IsEmpty)
+            {
+                return fallbackRows is { HasRows: true }
+                    ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
+                    : new SyncHydrationResult(
+                        SyncHydrationDisposition.Pending,
+                        PendingReason: "Chart hydration completed but candles are not visible yet");
+            }
+
+            if (NeedsHydration(hydratedRows, limit))
+            {
+                var refreshedRows = await _data.GetRowsAsync(tableName, startMs, endMs, limit, ct);
+
+                if (refreshedRows.IsFailure)
+                {
+                    return new SyncHydrationResult(
+                        SyncHydrationDisposition.Failed,
+                        Error: BuildRowsFailureError(symbol, timeframe, limit, refreshedRows, "rows"));
+                }
+
+                if (refreshedRows.HasRows)
+                {
+                    hydratedRows = refreshedRows;
+                }
+            }
+
+            return new SyncHydrationResult(SyncHydrationDisposition.RowsReady, hydratedRows);
+        }
+        catch (Exception ex)
+        {
+            setErrorCooldown = true;
+            _log.LogError(ex,
+                "Synchronous chart hydration FAILED for {Symbol}/{Interval} [{StartMs}..{EndMs}]",
+                symbol,
+                tfInfo.BybitInterval,
+                startMs,
+                endMs);
+            return new SyncHydrationResult(
+                SyncHydrationDisposition.Failed,
+                Error: "SERVICE_BUSY: Unable to hydrate chart right now");
+        }
+        finally
+        {
+            if (keepLock)
+            {
+            }
+            else if (setErrorCooldown)
+            {
+                await _cache.SetAsync(
+                    ingestKey,
+                    IngestErrorCooldown,
+                    TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
+                    CancellationToken.None);
+            }
+            else
+            {
+                await _cache.RemoveAsync(ingestKey);
+            }
+        }
+    }
+
     private ServiceResult<ChartResponse> BuildRowsFailureResult(
+        string symbol,
+        string timeframe,
+        int limit,
+        RowsFetchResult rowsResult,
+        string operation)
+    {
+        return ServiceResult<ChartResponse>.Fail(
+            BuildRowsFailureError(symbol, timeframe, limit, rowsResult, operation));
+    }
+
+    private string BuildRowsFailureError(
         string symbol,
         string timeframe,
         int limit,
@@ -341,93 +550,48 @@ public class ChartService : IChartService
             errorCode,
             errorDetail);
 
-        return ServiceResult<ChartResponse>.Fail($"{errorCode}: {errorDetail}");
+        return $"{errorCode}: {errorDetail}";
     }
 
-    private async Task<HydrationTriggerResult> TryTriggerWindowHydrationAsync(
-        string ingestKey,
+    private string BuildIngestFailureError(
         string symbol,
-        TimeframeInfo tfInfo,
+        string timeframe,
         int limit,
-        long startMs,
-        long endMs,
-        CancellationToken ct)
+        IngestResult ingestResult)
     {
-        var lockAcquired = await _cache.SetIfNotExistsAsync(
-            ingestKey, IngestInProgress,
-            TimeSpan.FromSeconds(_settings.IngestLockTtlSeconds), ct);
+        var errorCode = string.IsNullOrWhiteSpace(ingestResult.ErrorCode)
+            ? "SERVICE_BUSY"
+            : ingestResult.ErrorCode;
+        var errorDetail = string.IsNullOrWhiteSpace(ingestResult.ErrorDetail)
+            ? ingestResult.Error ?? $"chart hydration failed for {symbol}/{timeframe} limit={limit}"
+            : ingestResult.ErrorDetail;
 
-        if (!lockAcquired)
-        {
-            _log.LogDebug("Background ingest already locked for {Symbol}/{Interval}",
-                symbol, tfInfo.BybitInterval);
-            return HydrationTriggerResult.AlreadyInProgress;
-        }
+        _log.LogWarning(
+            "Chart hydration failed for {Symbol}/{Timeframe} limit={Limit}: {Code} {Detail}",
+            symbol,
+            timeframe,
+            limit,
+            errorCode,
+            errorDetail);
 
-        try
-        {
-            var correlationId = Activity.Current?.Id ?? "n/a";
-            _log.LogInformation(
-                "Scheduling chart window hydration for {Symbol}/{Interval} [{StartMs}..{EndMs}] "
-                + "limit={Limit} correlationId={CorrelationId}",
-                symbol, tfInfo.BybitInterval, startMs, endMs, limit, correlationId);
+        return $"{errorCode}: {errorDetail}";
+    }
 
-            TriggerIngestInBackground(ingestKey, symbol, tfInfo, limit, startMs, endMs);
-            return HydrationTriggerResult.Started;
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex,
-                "Background ingest scheduling FAILED for {Symbol}/{Interval} [{StartMs}..{EndMs}]",
-                symbol, tfInfo.BybitInterval, startMs, endMs);
+    private static string BuildHydrationPendingReason(IngestResult ingestResult)
+    {
+        return string.IsNullOrWhiteSpace(ingestResult.ErrorDetail)
+            ? "Chart hydration is still in progress"
+            : ingestResult.ErrorDetail!;
+    }
 
-            await _cache.SetAsync(
-                ingestKey,
-                IngestErrorCooldown,
-                TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
-                CancellationToken.None);
-
-            return HydrationTriggerResult.Failed;
-        }
+    private static string BuildTableName(string symbol, string bybitInterval)
+    {
+        return $"{symbol.ToLowerInvariant()}_{bybitInterval}";
     }
 
     private string BuildCacheKey(string symbol, TimeframeInfo tfInfo, int limit)
     {
         return string.Format(ChartKeyFmt, symbol, tfInfo.BybitInterval, limit);
-    }
-
-    private void TriggerIngestInBackground(
-        string ingestKey, string symbol, TimeframeInfo tfInfo, int limit, long startMs, long endMs)
-    {
-        var correlationId = Activity.Current?.Id ?? "n/a";
-
-        _log.LogInformation(
-            "Triggering background ingest for {Symbol}/{Interval} [{StartMs}..{EndMs}] "
-            + "limit={Limit} correlationId={CorrelationId}",
-            symbol, tfInfo.BybitInterval, startMs, endMs, limit, correlationId);
-
-        _data.FireAndForgetIngest(
-            symbol, tfInfo.BybitInterval, startMs, endMs,
-            onComplete: () =>
-            {
-                _log.LogInformation(
-                    "Background ingest completed for {Symbol}/{Interval} correlationId={CorrelationId}",
-                    symbol, tfInfo.BybitInterval, correlationId);
-                _ = _cache.RemoveAsync(ingestKey);
-            },
-            onError: ex =>
-            {
-                _log.LogError(ex,
-                    "Background ingest FAILED for {Symbol}/{Interval} [{StartMs}..{EndMs}] "
-                    + "correlationId={CorrelationId}",
-                    symbol, tfInfo.BybitInterval, startMs, endMs, correlationId);
-
-                _ = _cache.SetAsync(
-                    ingestKey,
-                    IngestErrorCooldown,
-                    TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
-                    CancellationToken.None);
-            });
     }
 
     private TimeSpan CacheTtlFor(TimeframeInfo tfInfo, bool fullCoverage)

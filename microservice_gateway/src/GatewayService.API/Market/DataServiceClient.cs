@@ -210,12 +210,14 @@ public sealed class DataServiceClient : IDataServiceClient
                 requestTimeout,
                 ct);
 
-            if (TryGetError(startReply, out var startError))
+            if (TryGetReplyError(startReply, out var startError))
             {
+                var errorCode = NormalizeIngestErrorCode(startError.Code, "SERVICE_BUSY");
+                var errorDetail = BuildReplyErrorDetail(startError);
                 _log.LogError(
-                    "Ingest job start failed for {Symbol}/{Interval}: {Error}",
-                    symbol, bybitInterval, startError);
-                return IngestResult.Fail(startError, tableName);
+                    "Ingest job start failed for {Symbol}/{Interval}: code={Code} detail={Detail}",
+                    symbol, bybitInterval, errorCode, errorDetail);
+                return IngestResult.FailWithCode(errorCode, errorDetail, tableName);
             }
 
             var jobId = TryGetString(startReply, "job_id");
@@ -230,7 +232,10 @@ public sealed class DataServiceClient : IDataServiceClient
                 _log.LogError(
                     "Ingest job start returned no job_id for {Symbol}/{Interval}",
                     symbol, bybitInterval);
-                return IngestResult.Fail("ingest_job_id_missing", tableName);
+                return IngestResult.FailWithCode(
+                    "DATA_SOURCE_UNAVAILABLE",
+                    "ingest_job_id_missing",
+                    tableName);
             }
 
             var deduped = startReply.ValueKind == JsonValueKind.Object &&
@@ -251,16 +256,22 @@ public sealed class DataServiceClient : IDataServiceClient
         catch (TimeoutException ex)
         {
             _log.LogWarning(ex,
-                "Queued ingest timed out for {Symbol}/{Interval}",
+                "Queued ingest start timed out for {Symbol}/{Interval}",
                 symbol, bybitInterval);
-            return IngestResult.Fail("ingest_timeout");
+            return IngestResult.FailWithCode(
+                "DOWNSTREAM_TIMEOUT",
+                $"ingest start timed out for {tableName} [{startMs}..{endMs}]",
+                tableName);
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex,
                 "Ingest Kafka request failed for {Symbol}/{Interval}",
                 symbol, bybitInterval);
-            return IngestResult.Fail(ex.Message);
+            return IngestResult.FailWithCode(
+                "DATA_SOURCE_UNAVAILABLE",
+                $"ingest failed for {tableName} [{startMs}..{endMs}]: {ex.Message}",
+                tableName);
         }
     }
 
@@ -318,18 +329,43 @@ public sealed class DataServiceClient : IDataServiceClient
             var remaining = totalTimeout - stopwatch.Elapsed;
             var effectiveTimeout = remaining < requestTimeout ? remaining : requestTimeout;
 
-            var jobReply = await _kafka.RequestAsync(
-                DataTopics.CmdDataDatasetJobsGet,
-                new { job_id = jobId },
-                effectiveTimeout,
-                ct);
-
-            if (TryGetError(jobReply, out var jobError))
+            JsonElement jobReply;
+            try
             {
+                jobReply = await _kafka.RequestAsync(
+                    DataTopics.CmdDataDatasetJobsGet,
+                    new { job_id = jobId },
+                    effectiveTimeout,
+                    ct);
+            }
+            catch (TimeoutException ex)
+            {
+                _log.LogWarning(ex,
+                    "Queued ingest job {JobId} status polling timed out",
+                    jobId);
+                return IngestResult.InProgress(
+                    fallbackTableName,
+                    errorDetail: $"ingest job {jobId} is still running");
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Queued ingest job {JobId} status polling failed",
+                    jobId);
+                return IngestResult.FailWithCode(
+                    "DATA_SOURCE_UNAVAILABLE",
+                    $"ingest status polling failed for job {jobId}: {ex.Message}",
+                    fallbackTableName);
+            }
+
+            if (TryGetReplyError(jobReply, out var jobReplyError))
+            {
+                var errorCode = NormalizeIngestErrorCode(jobReplyError.Code, "DATA_SOURCE_UNAVAILABLE");
+                var errorDetail = BuildReplyErrorDetail(jobReplyError);
                 _log.LogError(
-                    "Queued ingest job {JobId} failed to load status: {Error}",
-                    jobId, jobError);
-                return IngestResult.Fail(jobError, fallbackTableName);
+                    "Queued ingest job {JobId} failed to load status: code={Code} detail={Detail}",
+                    jobId, errorCode, errorDetail);
+                return IngestResult.FailWithCode(errorCode, errorDetail, fallbackTableName);
             }
 
             if (!TryGetNestedJob(jobReply, out var job))
@@ -337,7 +373,10 @@ public sealed class DataServiceClient : IDataServiceClient
                 _log.LogError(
                     "Queued ingest job {JobId} returned invalid payload",
                     jobId);
-                return IngestResult.Fail("ingest_job_payload_invalid", fallbackTableName);
+                return IngestResult.FailWithCode(
+                    "DATA_SOURCE_UNAVAILABLE",
+                    "ingest_job_payload_invalid",
+                    fallbackTableName);
             }
 
             var status = TryGetString(job, "status") ?? string.Empty;
@@ -357,10 +396,13 @@ public sealed class DataServiceClient : IDataServiceClient
                 case "canceled":
                 {
                     var error = BuildJobFailure(job, status);
+                    var errorCode = NormalizeIngestErrorCode(
+                        TryGetString(job, "error_code"),
+                        "SERVICE_BUSY");
                     _log.LogWarning(
                         "Queued ingest job {JobId} finished with status={Status}: {Error}",
                         jobId, status, error);
-                    return IngestResult.Fail(error, tableName);
+                    return IngestResult.FailWithCode(errorCode, error, tableName);
                 }
             }
 
@@ -371,7 +413,9 @@ public sealed class DataServiceClient : IDataServiceClient
 
         _log.LogWarning("Queued ingest job {JobId} exceeded timeout {TimeoutMs}ms",
             jobId, (int)totalTimeout.TotalMilliseconds);
-        return IngestResult.Fail("ingest_timeout", fallbackTableName);
+        return IngestResult.InProgress(
+            fallbackTableName,
+            errorDetail: $"ingest job {jobId} is still running");
     }
 
     // ── Parsers ───────────────────────────────────────────────────────────
@@ -439,6 +483,20 @@ public sealed class DataServiceClient : IDataServiceClient
             return error.Code!;
 
         return $"{error.Code}: {error.Detail}";
+    }
+
+    private static string NormalizeIngestErrorCode(string? errorCode, string fallbackCode)
+    {
+        if (string.IsNullOrWhiteSpace(errorCode))
+            return fallbackCode;
+
+        return errorCode.Trim().ToUpperInvariant() switch
+        {
+            "DOWNSTREAM_TIMEOUT" => "DOWNSTREAM_TIMEOUT",
+            "DATA_SOURCE_UNAVAILABLE" => "DATA_SOURCE_UNAVAILABLE",
+            "SERVICE_BUSY" => "SERVICE_BUSY",
+            _ => fallbackCode,
+        };
     }
 
     private static string BuildJobFailure(JsonElement job, string fallbackStatus)

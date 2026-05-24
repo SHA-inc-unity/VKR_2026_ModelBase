@@ -70,17 +70,42 @@ public sealed record RowsFetchResult(
 /// <summary>
 /// Outcome of a synchronous ingest request.
 /// </summary>
+public enum IngestResultStatus
+{
+    Success,
+    InProgress,
+    Failure,
+}
+
 public sealed record IngestResult(
-    bool Success,
+    IngestResultStatus Status,
     string TableName,
     int RowsIngested,
-    string? Error = null)
+    string? ErrorCode = null,
+    string? ErrorDetail = null)
 {
+    public bool Success => Status == IngestResultStatus.Success;
+    public bool IsInProgress => Status == IngestResultStatus.InProgress;
+    public bool IsFailure => Status == IngestResultStatus.Failure;
+    public string? Error => !string.IsNullOrWhiteSpace(ErrorDetail) ? ErrorDetail : ErrorCode;
+
     public static IngestResult Ok(string tableName, int rowsIngested) =>
-        new(true, tableName, rowsIngested, null);
+        new(IngestResultStatus.Success, tableName, rowsIngested);
+
+    public static IngestResult InProgress(
+        string? tableName = null,
+        string? errorCode = "DOWNSTREAM_TIMEOUT",
+        string? errorDetail = null) =>
+        new(IngestResultStatus.InProgress, tableName ?? string.Empty, 0, errorCode, errorDetail);
 
     public static IngestResult Fail(string? error, string? tableName = null) =>
-        new(false, tableName ?? string.Empty, 0, error);
+        new(IngestResultStatus.Failure, tableName ?? string.Empty, 0, null, error);
+
+    public static IngestResult FailWithCode(
+        string errorCode,
+        string? errorDetail = null,
+        string? tableName = null) =>
+        new(IngestResultStatus.Failure, tableName ?? string.Empty, 0, errorCode, errorDetail);
 }
 
 /// <summary>

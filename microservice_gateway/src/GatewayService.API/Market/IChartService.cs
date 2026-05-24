@@ -4,8 +4,9 @@ using GatewayService.API.DTOs.Responses;
 namespace GatewayService.API.Market;
 
 /// <summary>
-/// Validates chart requests, coordinates data-service calls, triggers
-/// background ingests when data is missing, and applies cache policy.
+/// Validates chart requests, coordinates data-service calls, tries a bounded
+/// synchronous hydrate when chart windows are missing or incomplete, and
+/// applies cache policy.
 /// </summary>
 public interface IChartService
 {
@@ -22,7 +23,7 @@ public interface IChartService
     /// - "INVALID_LIMIT"     → count not in CandleCountGrid        → 400
     /// - "DATA_SOURCE_UNAVAILABLE" → data-service replied with an error → 503
     /// - "DOWNSTREAM_TIMEOUT"      → data-service timed out             → 503
-    /// - "SERVICE_BUSY"            → hydrate path cannot be started     → 503
+    /// - "SERVICE_BUSY"            → hydrate path failed/cooldown       → 503
     /// </summary>
     Task<ServiceResult<ChartResponse>> GetChartAsync(
         string symbol, string timeframe, int limit, CancellationToken ct = default);

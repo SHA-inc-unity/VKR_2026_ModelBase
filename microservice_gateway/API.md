@@ -1301,9 +1301,10 @@ GET /api/v1/market/config
 5. Читает latest-window rows из data-service через Kafka (`cmd.data.dataset.latest_rows`).
 6. Если data-service вернул explicit error/timeout на `latest_rows` или `rows`, gateway отвечает `503`, а не маскирует это под `pending`.
 7. Если data-service вернул `claim_check`, gateway отвечает `status = "pending"` и не запускает ложный ingest retry.
-8. Если локальных rows нет, gateway ставит ingest lock, запускает background lazy hydrate через `cmd.data.dataset.jobs.start`/`get` и сразу отвечает `status = "pending"`.
-9. Если rows есть, но окно неполное, gateway отдаёт `status = "partial"` и параллельно дозапускает background hydrate через тот же `DatasetJobRunner` (cap `4`, per-table serialization по `target_table`).
-10. Для успешного ответа gateway выставляет weak `ETag`, `Last-Modified` и status-aware `Cache-Control`; повторный запрос с совпавшим `If-None-Match` получает `304 Not Modified`.
+8. Если локальных rows нет, gateway ставит ingest lock, запускает queued ingest через `cmd.data.dataset.jobs.start`/`get`, bounded-ждёт terminal/in-progress результат и перечитывает rows в том же HTTP-запросе.
+9. Если rows есть, но окно неполное, gateway делает тот же bounded sync hydrate и ещё один reread после ingest completion, стараясь вернуть `status = "ok"` в этом же ответе; если rows всё ещё неполные, отдаёт `status = "partial"`.
+10. `status = "pending"` остаётся только для реально transient сценариев: ingest lock уже занят, queued ingest всё ещё выполняется после wait budget, либо data-service вернул `claim_check`.
+11. Для успешного ответа gateway выставляет weak `ETag`, `Last-Modified` и status-aware `Cache-Control`; повторный запрос с совпавшим `If-None-Match` получает `304 Not Modified`.
 
 ### Market Chart: request
 
@@ -1321,7 +1322,7 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 | `timeframe` | string | yes | должен входить в `timeframes[].id` из `/api/v1/market/config` |
 | `limit` | number | yes | должен входить в grid для класса выбранного timeframe |
 
-Если `symbol` отсутствует в `/api/v1/market/config`, gateway вернёт `400 INVALID_SYMBOL` и не будет запускать ingest. Если `symbol` валиден, но таблицы/окна ещё нет в Postgres, gateway запускает background lazy hydrate через dataset jobs queue и отвечает `pending`; он не держит HTTP-запрос открытым до конца ingest.
+Если `symbol` отсутствует в `/api/v1/market/config`, gateway вернёт `400 INVALID_SYMBOL` и не будет запускать ingest. Если `symbol` валиден, но таблицы/окна ещё нет в Postgres, gateway сначала пытается bounded sync hydrate через dataset jobs queue и reread rows в том же HTTP-запросе. `pending` вернётся только если ingest уже выполняется другим запросом, всё ещё идёт после wait budget или data-service отдал `claim_check`.
 
 ### Market Chart: success response example (`status = "ok"`)
 
@@ -1411,7 +1412,7 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 ### Market Chart: HTTP caching
 
 - `status=ok`: route отдаёт short public cache + weak `ETag`; повторный conditional GET может вернуться как `304 Not Modified`.
-- `status=partial`: route тоже cacheable, но только на очень короткое окно (`max-age=3`), чтобы сгладить thundering herd во время lazy hydrate.
+- `status=partial`: route тоже cacheable, но только на очень короткое окно (`max-age=3`), чтобы сгладить thundering herd во время bounded hydrate/reread.
 - `status=pending`: route cacheable на `1s`; это intentionally короткий edge/browser buffer для burst refresh.
 - `Last-Modified` берётся из `meta.toMs`, если в ответе есть хотя бы одна свеча.
 
@@ -1421,8 +1422,8 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 - сначала всегда использовать `/api/v1/market/config`;
 - частые запросы одного и того же latest-window, например `ETHUSDT + 15m + 100`, gateway кэширует через short in-memory hot cache + distributed cache;
 - меньший `limit` теперь может обслуживаться из уже прогретого большего cached window того же timeframe class, например `50` из ранее cached `200`, без нового похода в Kafka/data-service;
-- `pending` и `partial` — это штатные продуктовые состояния, а не hard error; `pending` теперь означает только реальный background hydrate, уже занятый ingest-lock или `claim_check`, а не downstream transport failure;
-- lazy hydrate идёт через `cmd.data.dataset.jobs.start/get`, поэтому соблюдает общий ingest queue cap `4` и per-table сериализацию внутри data-service, но выполняется в background относительно HTTP-request;
+- `pending` и `partial` — это штатные продуктовые состояния, а не hard error; `pending` теперь означает только реально занятый ingest-lock, queued ingest, который ещё идёт после bounded wait budget, или `claim_check`, а не downstream transport failure;
+- chart hydrate идёт через `cmd.data.dataset.jobs.start/get`, поэтому соблюдает общий ingest queue cap `4` и per-table сериализацию внутри data-service; когда lock свободен, gateway старается дождаться ingest и reread rows в том же HTTP-request, а не сразу отдавать `pending`;
 - для browser/mobile polling выгодно посылать `If-None-Match` с последним chart `ETag`: при неизменившемся latest window gateway вернёт `304` без повторной передачи candles;
 - если data-service вернул `claim_check` для слишком большого payload, gateway сейчас **не** скачивает claim-check объект напрямую, а отдаёт `pending`-подобный retry scenario. Поэтому для UI безопаснее уменьшить `limit`, если этот кейс повторяется;
 - если data-service `latest_rows` / `rows` вернул explicit error или timeout, gateway теперь отдаёт structured `503`, чтобы UI не зацикливался в вечном `pending`.
@@ -1464,7 +1465,7 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 
 - `DATA_SOURCE_UNAVAILABLE`: data-service ответил explicit error на `latest_rows` / `rows`;
 - `DOWNSTREAM_TIMEOUT`: Kafka/data-service timeout на chart rows path;
-- `SERVICE_BUSY`: chart ingest находится в error cooldown или gateway не смог безопасно запустить новый background hydrate.
+- `SERVICE_BUSY`: chart ingest находится в error cooldown или bounded hydrate завершился terminal failure.
 
 Для frontend/mobile это retryable hard error, а не `pending`: показывать transient error/backoff, а не endless loading skeleton.
 
@@ -1717,7 +1718,7 @@ Authorization: Bearer <access-token>
 | `dashboard.meta.degradedSections` не пустой | рендерить доступные карточки, а не падать целым экраном |
 | `news.degraded == true` | empty state «новости временно недоступны» |
 | `notifications.degraded == true` | empty state «уведомления временно недоступны» |
-| `market/chart.status == pending` | skeleton + retry; обычно это означает, что lazy hydrate ещё не завершился или уже выполняется другим запросом |
+| `market/chart.status == pending` | skeleton + retry; обычно это означает, что queued ingest ещё не завершился в bounded wait budget, уже выполняется другим запросом или data-service вернул `claim_check` |
 | `market/chart.status == partial` | график на частичных данных + non-blocking retry |
 
 ---

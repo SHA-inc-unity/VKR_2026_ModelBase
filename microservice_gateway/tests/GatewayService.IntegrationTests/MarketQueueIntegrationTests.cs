@@ -204,11 +204,11 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
     private int _getLatestWindowCallCount;
     public int GetLatestWindowCallCount => _getLatestWindowCallCount;
 
-    public async Task<CoverageResult?> GetCoverageAsync(
+    public Task<CoverageResult?> GetCoverageAsync(
         string symbol, string bybitInterval, CancellationToken ct = default)
-        => null;
+        => Task.FromResult<CoverageResult?>(null);
 
-    public async Task<RowsResult> GetLatestWindowRowsAsync(
+    public async Task<RowsFetchResult> GetLatestWindowRowsAsync(
         string symbol,
         string bybitInterval,
         long stepMs,
@@ -217,12 +217,12 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
     {
         Interlocked.Increment(ref _getLatestWindowCallCount);
         await Task.Delay(200, ct); // deliberate delay so concurrent requests coalesce
-        return RowsResult.Empty; // no latest rows → ChartService returns pending (no rows path)
+        return RowsFetchResult.Empty; // no latest rows → ChartService returns pending (no rows path)
     }
 
-    public Task<RowsResult> GetRowsAsync(
+    public Task<RowsFetchResult> GetRowsAsync(
         string tableName, long startMs, long endMs, int limit, CancellationToken ct = default)
-        => Task.FromResult(RowsResult.Empty);
+        => Task.FromResult(RowsFetchResult.Empty);
 
     public Task<IngestResult> IngestAsync(
         string symbol, string bybitInterval, long startMs, long endMs, CancellationToken ct = default)
