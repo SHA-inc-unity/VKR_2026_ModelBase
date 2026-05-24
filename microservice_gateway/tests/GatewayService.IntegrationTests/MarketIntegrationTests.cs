@@ -345,18 +345,34 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
     public async Task Chart_response_has_status_field()
     {
         var response = await _client.GetAsync("/api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200");
-        var body     = await response.Content.ReadFromJsonAsync<JsonElement>();
 
-        body.TryGetProperty("status", out var status).Should().BeTrue();
-        status.GetString().Should().BeOneOf("ok", "partial", "pending");
+        // The chart endpoint either succeeds with ok/partial, or fails with
+        // 503 SERVICE_BUSY / DATA_SOURCE_UNAVAILABLE when ingest cannot
+        // complete in time. "pending" is no longer a valid response state.
+        if (response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            body.TryGetProperty("status", out var status).Should().BeTrue();
+            status.GetString().Should().BeOneOf("ok", "partial");
+        }
+        else
+        {
+            response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        }
     }
 
     [Fact]
     public async Task Chart_response_has_meta_section()
     {
         var response = await _client.GetAsync("/api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200");
-        var body     = await response.Content.ReadFromJsonAsync<JsonElement>();
 
+        if (!response.IsSuccessStatusCode)
+        {
+            response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            return;
+        }
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         var meta = body.GetProperty("meta");
         meta.GetProperty("requested").GetInt32().Should().Be(200);
         meta.TryGetProperty("coverage", out _).Should().BeTrue();

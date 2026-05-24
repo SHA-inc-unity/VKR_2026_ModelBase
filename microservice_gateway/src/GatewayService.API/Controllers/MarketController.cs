@@ -244,8 +244,10 @@ public sealed class MarketController : ControllerBase
     /// Returns OHLCV candlestick data.
     ///
     /// If data is not yet available (first request for a symbol/timeframe),
-    /// the response will have status="pending" and a retry_after_ms hint.
-    /// The background ingest is triggered automatically.
+    /// the gateway blocks until the data-service finishes its synchronous
+    /// ingest. If the ingest does not complete within the budget the
+    /// response is a 503 SERVICE_BUSY — the client never sees a "pending"
+    /// status.
     ///
     /// If partial data is available, status="partial" with whatever candles
     /// are present. The client should retry after retry_after_ms.
@@ -256,7 +258,7 @@ public sealed class MarketController : ControllerBase
     /// Number of candles to return. Must be one of the values from /config
     /// candle_counts for the chosen timeframe class.
     /// </param>
-    /// <response code="200">Chart response (status may be ok / partial / pending).</response>
+    /// <response code="200">Chart response (status is "ok" or "partial").</response>
     /// <response code="400">Invalid symbol, timeframe, or limit.</response>
     /// <response code="503">Downstream chart data is temporarily unavailable.</response>
     [HttpGet("chart")]
@@ -360,7 +362,6 @@ public sealed class MarketController : ControllerBase
                     _ => 10,
                 },
             "partial" => 3,
-            "pending" => 1,
             _ => 3,
         };
 
@@ -368,7 +369,6 @@ public sealed class MarketController : ControllerBase
         {
             "ok" => Math.Max(maxAge * 3, 30),
             "partial" => 12,
-            "pending" => 4,
             _ => 12,
         };
 

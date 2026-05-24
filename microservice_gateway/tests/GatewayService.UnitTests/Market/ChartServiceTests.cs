@@ -26,6 +26,10 @@ public sealed class ChartServiceTests
         QueueTotalConcurrency      = 10,
         QueueHeavyConcurrency      = 3,
         QueueMaxWaitSeconds        = 5,
+        // Tight wait budgets so tests do not block on the inflight-ingest
+        // polling loop (production defaults are 45s × 750ms).
+        ChartInflightWaitSeconds   = 1,
+        ChartInflightPollMs        = 50,
     };
 
     // ── Builders ──────────────────────────────────────────────────────────
@@ -165,11 +169,12 @@ public sealed class ChartServiceTests
     [Fact]
     public async Task Valid_limit_for_heavy_timeframe_passes_validation()
     {
-        // No data and ingest not configured — request still validates and falls back to pending
+        // No data + ingest stuck "in progress" → backend waits then returns
+        // a SERVICE_BUSY failure rather than a fake "pending" success.
         var sut = CreateSut();
         var result = await sut.GetChartAsync("BTCUSDT", "5m", 200);
-        result.IsSuccess.Should().BeTrue();
-        result.Value!.Status.Should().Be("pending");
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().StartWith("SERVICE_BUSY:");
     }
 
     // ── Cache hit ─────────────────────────────────────────────────────────
@@ -298,7 +303,7 @@ public sealed class ChartServiceTests
     }
 
     [Fact]
-    public async Task No_latest_window_returns_pending_when_sync_ingest_is_still_running()
+    public async Task No_latest_window_returns_service_busy_when_sync_ingest_is_still_running()
     {
         var dataMock = new Mock<IDataServiceClient>();
         dataMock.Setup(d => d.GetLatestWindowRowsAsync(
@@ -308,26 +313,34 @@ public sealed class ChartServiceTests
                 "BTCUSDT", "5", It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(IngestResult.InProgress(errorDetail: "ingest job 42 is still running"));
 
-        var sut = CreateSut(data: dataMock.Object);
+        // Tight budget so the test does not hang waiting for ingest to finish.
+        var settings = DefaultSettings();
+
+        var sut = CreateSut(data: dataMock.Object, settings: settings);
         var result = await sut.GetChartAsync("BTCUSDT", "5m", 200);
 
-        result.IsSuccess.Should().BeTrue();
-        result.Value!.Status.Should().Be("pending");
-        dataMock.Verify(d => d.GetRowsAsync(
-            It.IsAny<string>(), It.IsAny<long>(), It.IsAny<long>(), It.IsAny<int>(),
-            It.IsAny<IReadOnlyList<string>?>(), It.IsAny<CancellationToken>()), Times.Never);
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().StartWith("SERVICE_BUSY:");
     }
 
     [Fact]
-    public async Task Ingest_in_progress_returns_pending_without_triggering_new_ingest()
+    public async Task Ingest_in_progress_waits_and_returns_service_busy_when_rows_never_arrive()
     {
         var dataMock = new Mock<IDataServiceClient>();
+        // Latest window remains empty for the full polling budget — emulate a
+        // long-running ingest that we eventually give up on.
+        dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+                "BTCUSDT", "5", 300_000L, 200, It.IsAny<IReadOnlyList<string>?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RowsFetchResult.Empty);
+
         var sut = CreateSut(cache: CacheWithIngestLock(), data: dataMock.Object);
 
         var result = await sut.GetChartAsync("BTCUSDT", "5m", 200);
 
-        result.IsSuccess.Should().BeTrue();
-        result.Value!.Status.Should().Be("pending");
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().StartWith("SERVICE_BUSY:");
+        // The gateway must NOT kick off a duplicate ingest while another one
+        // is already in flight (that is the whole point of the ingest lock).
         dataMock.Verify(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()), Times.Never);
         dataMock.Verify(d => d.FireAndForgetIngest(It.IsAny<string>(), It.IsAny<string>(),
@@ -336,7 +349,7 @@ public sealed class ChartServiceTests
     }
 
     [Fact]
-    public async Task Latest_window_claim_check_returns_pending_without_triggering_ingest()
+    public async Task Latest_window_claim_check_returns_data_source_unavailable()
     {
         var dataMock = new Mock<IDataServiceClient>();
         dataMock.Setup(d => d.GetLatestWindowRowsAsync(
@@ -346,8 +359,8 @@ public sealed class ChartServiceTests
         var sut = CreateSut(data: dataMock.Object);
         var result = await sut.GetChartAsync("BTCUSDT", "5m", 200);
 
-        result.IsSuccess.Should().BeTrue();
-        result.Value!.Status.Should().Be("pending");
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().StartWith("DATA_SOURCE_UNAVAILABLE:");
         dataMock.Verify(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()), Times.Never);
     }

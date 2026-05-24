@@ -12,15 +12,20 @@ public class ChartService : IChartService
     {
         RowsReady,
         KeepExistingRows,
-        Pending,
         Failed,
     }
 
     private sealed record SyncHydrationResult(
         SyncHydrationDisposition Disposition,
         RowsFetchResult? Rows = null,
-        string? PendingReason = null,
         string? Error = null);
+
+    // ── Synchronous wait policy ───────────────────────────────────────────
+    // The backend no longer emits a "pending" status. Instead, when ingest is
+    // already in flight (or starts during this request) we block and poll the
+    // data-service for the latest window until either rows arrive, the budget
+    // is exhausted, or the cooldown lock signals a failed ingest. After the
+    // budget we return SERVICE_BUSY so the controller emits a clean 503.
 
     // Cache key patterns:
     //   market:chart:{symbol}:{bybitInterval}:{limit}:v1
@@ -96,11 +101,26 @@ public class ChartService : IChartService
 
         if (ingestActive is not null)
         {
-            var hint = ingestActive == IngestErrorCooldown
-                ? "Previous ingest attempt failed; a retry will happen after the cooldown"
-                : "Ingest already in progress for this symbol/timeframe";
-            return ServiceResult<ChartResponse>.Ok(
-                BuildPendingResponse(symbolUpper, timeframe, limit, hint));
+            // Another request is already hydrating this symbol/timeframe.
+            // Block here and poll the latest window until rows arrive or we
+            // exhaust the budget; never return "pending" to the client.
+            var waited = await WaitForInflightIngestAsync(
+                ingestKey, symbolUpper, tfInfo, limit, ct);
+
+            if (waited.IsFailure)
+            {
+                return BuildRowsFailureResult(symbolUpper, timeframe, limit, waited, "latest_rows");
+            }
+
+            if (waited.HasRows)
+            {
+                return ServiceResult<ChartResponse>.Ok(
+                    await BuildChartResponseAsync(
+                        symbolUpper, timeframe, limit, tfInfo, waited, ct));
+            }
+
+            return ServiceResult<ChartResponse>.Fail(
+                "SERVICE_BUSY: Chart ingest is still running for this symbol/timeframe; try again shortly");
         }
 
         // ── 4. Query latest fixed-width window ───────────────────────────────
@@ -120,9 +140,11 @@ public class ChartService : IChartService
 
         if (latestRows.IsClaimCheck)
         {
-            return ServiceResult<ChartResponse>.Ok(
-                BuildPendingResponse(symbolUpper, timeframe, limit,
-                    "Data payload too large; use a smaller limit or wait for streaming path"));
+            // The window exists upstream but is too large to fit a Kafka
+            // message — there is nothing we can do server-side to recover,
+            // so surface a real failure instead of a fake "pending".
+            return ServiceResult<ChartResponse>.Fail(
+                "DATA_SOURCE_UNAVAILABLE: Chart payload exceeds Kafka size limit; use a smaller limit");
         }
 
         if (latestRows.IsEmpty)
@@ -150,20 +172,10 @@ public class ChartService : IChartService
                         tfInfo,
                         hydrationResult.Rows!,
                         ct)),
-                SyncHydrationDisposition.Pending => ServiceResult<ChartResponse>.Ok(
-                    BuildPendingResponse(
-                        symbolUpper,
-                        timeframe,
-                        limit,
-                        hydrationResult.PendingReason ?? "Chart hydration is still in progress")),
                 SyncHydrationDisposition.Failed => ServiceResult<ChartResponse>.Fail(
                     hydrationResult.Error ?? "SERVICE_BUSY: Unable to hydrate chart right now"),
-                _ => ServiceResult<ChartResponse>.Ok(
-                    BuildPendingResponse(
-                        symbolUpper,
-                        timeframe,
-                        limit,
-                        "Chart hydration is still in progress")),
+                _ => ServiceResult<ChartResponse>.Fail(
+                    "SERVICE_BUSY: Chart hydration did not complete in time; try again shortly"),
             };
         }
 
@@ -339,24 +351,79 @@ public class ChartService : IChartService
         };
     }
 
-    private static ChartResponse BuildPendingResponse(
-        string symbol, string timeframe, int limit, string reason)
+    /// <summary>
+    /// Polls the latest fixed-width window while another in-flight ingest
+    /// completes. Returns the first non-empty / failure result, or an Empty
+    /// result if the budget expires before rows show up.
+    /// Honours the per-attempt cancellation token and respects the
+    /// "error_cooldown" lock value as an early exit (no rows will arrive).
+    /// </summary>
+    private async Task<RowsFetchResult> WaitForInflightIngestAsync(
+        string ingestKey,
+        string symbol,
+        TimeframeInfo tfInfo,
+        int limit,
+        CancellationToken ct)
     {
-        return new ChartResponse
+        var maxWaitSeconds = Math.Max(1, _settings.ChartInflightWaitSeconds);
+        var pollIntervalMs = Math.Max(50, _settings.ChartInflightPollMs);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(maxWaitSeconds);
+        var attempt = 0;
+
+        while (!ct.IsCancellationRequested && DateTime.UtcNow < deadline)
         {
-            Symbol    = symbol,
-            Timeframe = timeframe,
-            Limit     = limit,
-            Candles   = [],
-            Meta = new ChartMetaDto
+            attempt++;
+            await Task.Delay(pollIntervalMs, ct);
+
+            // If the holder marked the lock as failed, stop waiting early.
+            var lockValue = await _cache.GetAsync<string>(ingestKey, ct);
+            if (lockValue == IngestErrorCooldown)
             {
-                Requested = limit,
-                Available = 0,
-                Coverage  = "pending",
-            },
-            Status       = "pending",
-            RetryAfterMs = 5_000,
-        };
+                return RowsFetchResult.Fail(
+                    "SERVICE_BUSY",
+                    "Previous ingest attempt failed; retry after the cooldown window");
+            }
+
+            var rows = await _data.GetLatestWindowRowsAsync(
+                symbol,
+                tfInfo.BybitInterval,
+                tfInfo.StepMs,
+                limit,
+                DataServiceClient.ChartProjectionColumns,
+                ct);
+
+            if (rows.IsFailure)
+            {
+                return rows;
+            }
+
+            if (rows.HasRows)
+            {
+                _log.LogDebug(
+                    "Inflight chart ingest produced rows for {Symbol}/{Interval} after {Attempts} polls",
+                    symbol, tfInfo.BybitInterval, attempt);
+                return rows;
+            }
+
+            // ClaimCheck or Empty → keep polling until budget runs out, with
+            // the ClaimCheck case finally bubbling up only if it never resolves.
+            if (rows.IsClaimCheck)
+            {
+                return RowsFetchResult.Fail(
+                    "DATA_SOURCE_UNAVAILABLE",
+                    "Chart payload exceeds Kafka size limit; use a smaller limit");
+            }
+
+            // Lock disappeared and we still have no rows → the holder either
+            // succeeded with a different window or gave up. Try one more
+            // poll cycle to be safe, then exit.
+            if (lockValue is null && attempt > 1)
+            {
+                break;
+            }
+        }
+
+        return RowsFetchResult.Empty;
     }
 
     private bool NeedsHydration(RowsFetchResult rowsResult, int limit)
@@ -388,11 +455,31 @@ public class ChartService : IChartService
                 symbol,
                 tfInfo.BybitInterval);
 
-            return fallbackRows is { HasRows: true }
-                ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
-                : new SyncHydrationResult(
-                    SyncHydrationDisposition.Pending,
-                    PendingReason: "Ingest already in progress for this symbol/timeframe");
+            if (fallbackRows is { HasRows: true })
+            {
+                return new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows);
+            }
+
+            // Another caller already owns the ingest lock — wait for rows
+            // synchronously rather than telling the client to come back later.
+            var waitedRows = await WaitForInflightIngestAsync(
+                ingestKey, symbol, tfInfo, limit, ct);
+
+            if (waitedRows.IsFailure)
+            {
+                return new SyncHydrationResult(
+                    SyncHydrationDisposition.Failed,
+                    Error: BuildRowsFailureError(symbol, timeframe, limit, waitedRows, "latest_rows"));
+            }
+
+            if (waitedRows.HasRows)
+            {
+                return new SyncHydrationResult(SyncHydrationDisposition.RowsReady, waitedRows);
+            }
+
+            return new SyncHydrationResult(
+                SyncHydrationDisposition.Failed,
+                Error: "SERVICE_BUSY: Chart ingest is still running for this symbol/timeframe; try again shortly");
         }
 
         var keepLock = false;
@@ -419,13 +506,36 @@ public class ChartService : IChartService
 
             if (ingestResult.IsInProgress)
             {
+                // The data-service kicked off an async ingest job and the
+                // Kafka request returned before it completed. Keep our
+                // ingest-lock alive (so concurrent callers wait) and poll
+                // the latest window until either rows show up or we run
+                // out of budget. We never return "pending" to the client.
                 keepLock = true;
 
-                return fallbackRows is { HasRows: true }
-                    ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
-                    : new SyncHydrationResult(
-                        SyncHydrationDisposition.Pending,
-                        PendingReason: BuildHydrationPendingReason(ingestResult));
+                if (fallbackRows is { HasRows: true })
+                {
+                    return new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows);
+                }
+
+                var waitedRows = await WaitForInflightIngestAsync(
+                    ingestKey, symbol, tfInfo, limit, ct);
+
+                if (waitedRows.IsFailure)
+                {
+                    return new SyncHydrationResult(
+                        SyncHydrationDisposition.Failed,
+                        Error: BuildRowsFailureError(symbol, timeframe, limit, waitedRows, "latest_rows"));
+                }
+
+                if (waitedRows.HasRows)
+                {
+                    return new SyncHydrationResult(SyncHydrationDisposition.RowsReady, waitedRows);
+                }
+
+                return new SyncHydrationResult(
+                    SyncHydrationDisposition.Failed,
+                    Error: $"SERVICE_BUSY: {BuildHydrationPendingReason(ingestResult)}");
             }
 
             if (ingestResult.IsFailure)
@@ -452,20 +562,44 @@ public class ChartService : IChartService
 
             if (hydratedRows.IsClaimCheck)
             {
-                return fallbackRows is { HasRows: true }
-                    ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
-                    : new SyncHydrationResult(
-                        SyncHydrationDisposition.Pending,
-                        PendingReason: "Data payload too large; use a smaller limit or wait for streaming path");
+                if (fallbackRows is { HasRows: true })
+                {
+                    return new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows);
+                }
+
+                return new SyncHydrationResult(
+                    SyncHydrationDisposition.Failed,
+                    Error: "DATA_SOURCE_UNAVAILABLE: Chart payload exceeds Kafka size limit; use a smaller limit");
             }
 
             if (hydratedRows.IsEmpty)
             {
-                return fallbackRows is { HasRows: true }
-                    ? new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows)
-                    : new SyncHydrationResult(
-                        SyncHydrationDisposition.Pending,
-                        PendingReason: "Chart hydration completed but candles are not visible yet");
+                if (fallbackRows is { HasRows: true })
+                {
+                    return new SyncHydrationResult(SyncHydrationDisposition.KeepExistingRows, fallbackRows);
+                }
+
+                // Ingest call succeeded but the window we asked for is still
+                // empty — give the data-service a few more polling cycles
+                // before deciding it's a real failure.
+                var waitedRows = await WaitForInflightIngestAsync(
+                    ingestKey, symbol, tfInfo, limit, ct);
+
+                if (waitedRows.IsFailure)
+                {
+                    return new SyncHydrationResult(
+                        SyncHydrationDisposition.Failed,
+                        Error: BuildRowsFailureError(symbol, timeframe, limit, waitedRows, "latest_rows"));
+                }
+
+                if (waitedRows.HasRows)
+                {
+                    return new SyncHydrationResult(SyncHydrationDisposition.RowsReady, waitedRows);
+                }
+
+                return new SyncHydrationResult(
+                    SyncHydrationDisposition.Failed,
+                    Error: "SERVICE_BUSY: Chart hydration completed but candles are not visible yet; try again shortly");
             }
 
             if (NeedsHydration(hydratedRows, limit))

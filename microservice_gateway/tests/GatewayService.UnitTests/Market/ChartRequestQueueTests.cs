@@ -36,6 +36,8 @@ public sealed class ChartRequestQueueTests
         QueueTotalConcurrency      = totalConcurrency,
         QueueHeavyConcurrency      = heavyConcurrency,
         QueueMaxWaitSeconds        = maxWaitSeconds,
+        ChartInflightWaitSeconds   = 1,
+        ChartInflightPollMs        = 50,
     };
 
     private static IMarketCacheService EmptyCache()
@@ -71,7 +73,8 @@ public sealed class ChartRequestQueueTests
             .ReturnsAsync(false); // lock not acquired → no background ingest
 
         var dataMock = new Mock<IDataServiceClient>();
-        // Coverage: non-existent so ChartService will return pending (no rows path)
+        // Coverage: non-existent so ChartService will fall through the no-rows
+        // path and return a SERVICE_BUSY failure (no "pending" status anymore).
         dataMock
             .Setup(d => d.GetCoverageAsync(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))

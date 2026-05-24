@@ -130,6 +130,8 @@ public sealed class MarketQueueContainer : IDisposable
             QueueTotalConcurrency      = 10,
             QueueHeavyConcurrency      = 3,
             QueueMaxWaitSeconds        = 5,
+            ChartInflightWaitSeconds   = 1,
+            ChartInflightPollMs        = 50,
         };
 
         var services = new ServiceCollection();
@@ -218,7 +220,18 @@ public sealed class FakeDelayedDataServiceClient : IDataServiceClient
     {
         Interlocked.Increment(ref _getLatestWindowCallCount);
         await Task.Delay(200, ct); // deliberate delay so concurrent requests coalesce
-        return RowsFetchResult.Empty; // no latest rows → ChartService returns pending (no rows path)
+
+        // Return a full window of synthetic candles so the chart pipeline
+        // produces a successful response — the test is about queue coalescing,
+        // not about the SERVICE_BUSY fallback.
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var rows = Enumerable.Range(0, limit)
+            .Select(i => new CandleRow(
+                TimestampMs: nowMs - (long)(limit - 1 - i) * stepMs,
+                Open: 40000m, High: 41000m, Low: 39000m, Close: 40500m,
+                Volume: 100m, Turnover: 4_050_000m))
+            .ToArray();
+        return RowsFetchResult.From(rows);
     }
 
     public Task<RowsFetchResult> GetRowsAsync(

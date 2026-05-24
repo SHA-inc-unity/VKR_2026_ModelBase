@@ -128,4 +128,18 @@ public sealed class MarketSettings
     /// Does not affect the downstream Kafka timeout.
     /// </summary>
     public int QueueMaxWaitSeconds { get; init; } = 5;
+
+    /// <summary>
+    /// Maximum time (seconds) the chart endpoint will block while another
+    /// ingest is in flight, polling the latest window for rows. When this
+    /// budget expires without rows the gateway returns 503 SERVICE_BUSY
+    /// rather than a "pending" success.
+    /// </summary>
+    public int ChartInflightWaitSeconds { get; init; } = 45;
+
+    /// <summary>
+    /// Polling interval (milliseconds) used by the chart endpoint while
+    /// waiting on an inflight ingest.
+    /// </summary>
+    public int ChartInflightPollMs { get; init; } = 750;
 }
