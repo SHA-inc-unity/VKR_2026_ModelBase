@@ -20,6 +20,9 @@ public interface IChartService
     /// - "INVALID_SYMBOL"    → symbol not in the known-symbol list → 400
     /// - "INVALID_TIMEFRAME" → timeframe id not in TimeframeMap    → 400
     /// - "INVALID_LIMIT"     → count not in CandleCountGrid        → 400
+    /// - "DATA_SOURCE_UNAVAILABLE" → data-service replied with an error → 503
+    /// - "DOWNSTREAM_TIMEOUT"      → data-service timed out             → 503
+    /// - "SERVICE_BUSY"            → hydrate path cannot be started     → 503
     /// </summary>
     Task<ServiceResult<ChartResponse>> GetChartAsync(
         string symbol, string timeframe, int limit, CancellationToken ct = default);

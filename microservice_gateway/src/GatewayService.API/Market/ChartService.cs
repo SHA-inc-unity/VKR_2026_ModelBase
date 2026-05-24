@@ -8,6 +8,13 @@ namespace GatewayService.API.Market;
 /// <inheritdoc />
 public class ChartService : IChartService
 {
+    private enum HydrationTriggerResult
+    {
+        Started,
+        AlreadyInProgress,
+        Failed,
+    }
+
     // Cache key patterns:
     //   market:chart:{symbol}:{bybitInterval}:{limit}:v1
     //   market:ingest-lock:{symbol}:{bybitInterval}
@@ -74,6 +81,12 @@ public class ChartService : IChartService
 
         var ingestKey    = string.Format(IngestLockFmt, symbolUpper, tfInfo.BybitInterval);
         var ingestActive = await _cache.GetAsync<string>(ingestKey, ct);
+        if (ingestActive == IngestErrorCooldown)
+        {
+            return ServiceResult<ChartResponse>.Fail(
+                "SERVICE_BUSY: Previous ingest attempt failed; retry after the cooldown window");
+        }
+
         if (ingestActive is not null)
         {
             var hint = ingestActive == IngestErrorCooldown
@@ -92,6 +105,11 @@ public class ChartService : IChartService
             limit,
             ct);
 
+        if (latestRows.IsFailure)
+        {
+            return BuildRowsFailureResult(symbolUpper, timeframe, limit, latestRows, "latest_rows");
+        }
+
         if (latestRows.IsClaimCheck)
         {
             return ServiceResult<ChartResponse>.Ok(
@@ -99,15 +117,25 @@ public class ChartService : IChartService
                     "Data payload too large; use a smaller limit or wait for streaming path"));
         }
 
-        if (latestRows.Rows.Count == 0)
+        if (latestRows.IsEmpty)
         {
             var initialEndMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var initialStartMs = initialEndMs - (long)limit * tfInfo.StepMs * _settings.IngestWindowMultiplier;
-            await TryTriggerWindowHydrationAsync(
+            var triggerResult = await TryTriggerWindowHydrationAsync(
                 ingestKey, symbolUpper, tfInfo, limit, initialStartMs, initialEndMs, ct);
 
+            if (triggerResult == HydrationTriggerResult.Failed)
+            {
+                return ServiceResult<ChartResponse>.Fail(
+                    "SERVICE_BUSY: Unable to start chart hydration right now");
+            }
+
+            var pendingReason = triggerResult == HydrationTriggerResult.Started
+                ? "No data available locally; ingest triggered"
+                : "Ingest already in progress for this symbol/timeframe";
+
             return ServiceResult<ChartResponse>.Ok(BuildPendingResponse(
-                symbolUpper, timeframe, limit, "No data available locally; ingest triggered"));
+                symbolUpper, timeframe, limit, pendingReason));
         }
 
         // ── 5. Determine time window ──────────────────────────────────────────
@@ -138,7 +166,7 @@ public class ChartService : IChartService
         string ingestKey,
         long startMs,
         long endMs,
-        RowsResult rowsResult,
+        RowsFetchResult rowsResult,
         CancellationToken ct)
     {
         if (rowsResult.Rows.Count > 0)
@@ -146,7 +174,7 @@ public class ChartService : IChartService
             var initialCoverage = (double)rowsResult.Rows.Count / limit;
             if (initialCoverage < _settings.FullCoverageThreshold)
             {
-                await TryTriggerWindowHydrationAsync(
+                _ = await TryTriggerWindowHydrationAsync(
                     ingestKey, symbol, tfInfo, limit, startMs, endMs, ct);
             }
         }
@@ -291,7 +319,32 @@ public class ChartService : IChartService
         };
     }
 
-    private async Task<bool> TryTriggerWindowHydrationAsync(
+    private ServiceResult<ChartResponse> BuildRowsFailureResult(
+        string symbol,
+        string timeframe,
+        int limit,
+        RowsFetchResult rowsResult,
+        string operation)
+    {
+        var errorCode = string.IsNullOrWhiteSpace(rowsResult.ErrorCode)
+            ? "DATA_SOURCE_UNAVAILABLE"
+            : rowsResult.ErrorCode;
+        var errorDetail = string.IsNullOrWhiteSpace(rowsResult.ErrorDetail)
+            ? $"data-service {operation} failed for {symbol}/{timeframe} limit={limit}"
+            : rowsResult.ErrorDetail;
+
+        _log.LogWarning(
+            "Chart request failed for {Symbol}/{Timeframe} limit={Limit}: {Code} {Detail}",
+            symbol,
+            timeframe,
+            limit,
+            errorCode,
+            errorDetail);
+
+        return ServiceResult<ChartResponse>.Fail($"{errorCode}: {errorDetail}");
+    }
+
+    private async Task<HydrationTriggerResult> TryTriggerWindowHydrationAsync(
         string ingestKey,
         string symbol,
         TimeframeInfo tfInfo,
@@ -308,7 +361,7 @@ public class ChartService : IChartService
         {
             _log.LogDebug("Background ingest already locked for {Symbol}/{Interval}",
                 symbol, tfInfo.BybitInterval);
-            return false;
+            return HydrationTriggerResult.AlreadyInProgress;
         }
 
         try
@@ -320,7 +373,7 @@ public class ChartService : IChartService
                 symbol, tfInfo.BybitInterval, startMs, endMs, limit, correlationId);
 
             TriggerIngestInBackground(ingestKey, symbol, tfInfo, limit, startMs, endMs);
-            return true;
+            return HydrationTriggerResult.Started;
         }
         catch (Exception ex)
         {
@@ -334,7 +387,7 @@ public class ChartService : IChartService
                 TimeSpan.FromSeconds(_settings.IngestErrorCooldownSeconds),
                 CancellationToken.None);
 
-            return false;
+            return HydrationTriggerResult.Failed;
         }
     }
 

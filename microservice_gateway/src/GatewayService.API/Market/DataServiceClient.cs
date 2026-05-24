@@ -54,7 +54,7 @@ public sealed class DataServiceClient : IDataServiceClient
     }
 
     /// <inheritdoc />
-    public async Task<RowsResult> GetLatestWindowRowsAsync(
+    public async Task<RowsFetchResult> GetLatestWindowRowsAsync(
         string symbol,
         string bybitInterval,
         long stepMs,
@@ -72,13 +72,16 @@ public sealed class DataServiceClient : IDataServiceClient
                 timeout,
                 ct);
 
-            if (reply.ValueKind == JsonValueKind.Object &&
-                reply.TryGetProperty("error", out var errEl))
+            if (TryGetReplyError(reply, out var replyError))
             {
                 _log.LogWarning(
-                    "data-service latest_rows error for {Table} stepMs={StepMs} limit={Limit}: {Error}",
-                    tableName, stepMs, limit, errEl.GetString());
-                return RowsResult.Empty;
+                    "data-service latest_rows error for {Table} stepMs={StepMs} limit={Limit}: code={Code} detail={Detail}",
+                    tableName,
+                    stepMs,
+                    limit,
+                    replyError.Code ?? "n/a",
+                    replyError.Detail ?? "unknown error");
+                return RowsFetchResult.Fail("DATA_SOURCE_UNAVAILABLE", BuildReplyErrorDetail(replyError));
             }
 
             if (reply.ValueKind == JsonValueKind.Object &&
@@ -87,29 +90,33 @@ public sealed class DataServiceClient : IDataServiceClient
                 _log.LogWarning(
                     "data-service latest_rows returned a claim-check for {Table} stepMs={StepMs} limit={Limit}",
                     tableName, stepMs, limit);
-                return RowsResult.ClaimCheck;
+                return RowsFetchResult.ClaimCheck;
             }
 
-            return RowsResult.From(ParseRows(reply));
+            return RowsFetchResult.From(ParseRows(reply));
         }
         catch (TimeoutException ex)
         {
             _log.LogWarning(ex,
                 "Latest window Kafka request timed out for {Table} stepMs={StepMs} limit={Limit}",
                 tableName, stepMs, limit);
-            return RowsResult.Empty;
+            return RowsFetchResult.Fail(
+                "DOWNSTREAM_TIMEOUT",
+                $"latest_rows timed out for {tableName} stepMs={stepMs} limit={limit}");
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex,
                 "Latest window Kafka request failed for {Table} stepMs={StepMs} limit={Limit}",
                 tableName, stepMs, limit);
-            return RowsResult.Empty;
+            return RowsFetchResult.Fail(
+                "DATA_SOURCE_UNAVAILABLE",
+                $"latest_rows failed for {tableName} stepMs={stepMs} limit={limit}: {ex.Message}");
         }
     }
 
     /// <inheritdoc />
-    public async Task<RowsResult> GetRowsAsync(
+    public async Task<RowsFetchResult> GetRowsAsync(
         string tableName, long startMs, long endMs, int limit, CancellationToken ct = default)
     {
         var timeout = TimeSpan.FromSeconds(_settings.KafkaTimeoutSeconds);
@@ -121,13 +128,17 @@ public sealed class DataServiceClient : IDataServiceClient
                 timeout,
                 ct);
 
-            if (reply.ValueKind == JsonValueKind.Object &&
-                reply.TryGetProperty("error", out var errEl))
+            if (TryGetReplyError(reply, out var replyError))
             {
                 _log.LogWarning(
-                    "data-service rows error for {Table} [{Start}..{End}] limit={Limit}: {Error}",
-                    tableName, startMs, endMs, limit, errEl.GetString());
-                return RowsResult.Empty;
+                    "data-service rows error for {Table} [{Start}..{End}] limit={Limit}: code={Code} detail={Detail}",
+                    tableName,
+                    startMs,
+                    endMs,
+                    limit,
+                    replyError.Code ?? "n/a",
+                    replyError.Detail ?? "unknown error");
+                return RowsFetchResult.Fail("DATA_SOURCE_UNAVAILABLE", BuildReplyErrorDetail(replyError));
             }
 
             if (reply.ValueKind == JsonValueKind.Object &&
@@ -140,24 +151,28 @@ public sealed class DataServiceClient : IDataServiceClient
                     "data-service rows returned a claim-check for {Table} [{Start}..{End}] " +
                     "limit={Limit} — payload too large; client should reduce limit",
                     tableName, startMs, endMs, limit);
-                return RowsResult.ClaimCheck;
+                return RowsFetchResult.ClaimCheck;
             }
 
-            return RowsResult.From(ParseRows(reply));
+            return RowsFetchResult.From(ParseRows(reply));
         }
         catch (TimeoutException ex)
         {
             _log.LogWarning(ex,
                 "Rows Kafka request timed out for {Table} [{Start}..{End}] limit={Limit}",
                 tableName, startMs, endMs, limit);
-            return RowsResult.Empty;
+            return RowsFetchResult.Fail(
+                "DOWNSTREAM_TIMEOUT",
+                $"rows timed out for {tableName} [{startMs}..{endMs}] limit={limit}");
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex,
                 "Rows Kafka request failed for {Table} [{Start}..{End}] limit={Limit}",
                 tableName, startMs, endMs, limit);
-            return RowsResult.Empty;
+            return RowsFetchResult.Fail(
+                "DATA_SOURCE_UNAVAILABLE",
+                $"rows failed for {tableName} [{startMs}..{endMs}] limit={limit}: {ex.Message}");
         }
     }
 
@@ -396,6 +411,36 @@ public sealed class DataServiceClient : IDataServiceClient
         return true;
     }
 
+    private static bool TryGetReplyError(JsonElement el, out ReplyError error)
+    {
+        error = default;
+        if (el.ValueKind != JsonValueKind.Object ||
+            !el.TryGetProperty("error", out var errEl))
+        {
+            return false;
+        }
+
+        error = new ReplyError(
+            TryGetString(el, "code"),
+            errEl.ValueKind switch
+            {
+                JsonValueKind.String => errEl.GetString(),
+                _ => errEl.ToString(),
+            });
+        return true;
+    }
+
+    private static string BuildReplyErrorDetail(ReplyError error)
+    {
+        if (string.IsNullOrWhiteSpace(error.Code))
+            return error.Detail ?? "unknown error";
+
+        if (string.IsNullOrWhiteSpace(error.Detail))
+            return error.Code!;
+
+        return $"{error.Code}: {error.Detail}";
+    }
+
     private static string BuildJobFailure(JsonElement job, string fallbackStatus)
     {
         var errorCode = TryGetString(job, "error_code");
@@ -508,4 +553,6 @@ public sealed class DataServiceClient : IDataServiceClient
             return s;
         return 0;
     }
+
+    private readonly record struct ReplyError(string? Code, string? Detail);
 }

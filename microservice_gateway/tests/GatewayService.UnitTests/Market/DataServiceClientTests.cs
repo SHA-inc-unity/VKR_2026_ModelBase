@@ -130,4 +130,5 @@ public sealed class DataServiceClientTests
         result.TableName.Should().Be("ethusdt_15");
         result.Error.Should().Be("Bybit rate limit exceeded");
     }
+
 }

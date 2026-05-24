@@ -258,9 +258,11 @@ public sealed class MarketController : ControllerBase
     /// </param>
     /// <response code="200">Chart response (status may be ok / partial / pending).</response>
     /// <response code="400">Invalid symbol, timeframe, or limit.</response>
+    /// <response code="503">Downstream chart data is temporarily unavailable.</response>
     [HttpGet("chart")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> GetChart(
         [FromQuery] string symbol,
         [FromQuery] string timeframe,
@@ -272,7 +274,21 @@ public sealed class MarketController : ControllerBase
         var result = await _chart.GetChartAsync(symbol, timeframe, limit, ct);
 
         if (!result.IsSuccess)
-            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid request", correlationId));
+        {
+            var error = result.Error ?? "Invalid request";
+            var errorCode = GetChartErrorCode(error);
+            if (IsChartServiceUnavailableCode(errorCode))
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                    ErrorResponse.ServiceUnavailable("market_chart", correlationId) with
+                    {
+                        Code = errorCode,
+                        Detail = GetChartErrorDetail(error),
+                    });
+            }
+
+            return BadRequest(ErrorResponse.BadRequest(error, correlationId));
+        }
 
         if (result.Value is null)
         {
@@ -298,6 +314,37 @@ public sealed class MarketController : ControllerBase
         }
 
         return Ok(result.Value);
+    }
+
+    private static bool IsChartServiceUnavailableCode(string? errorCode)
+    {
+        return errorCode is "DATA_SOURCE_UNAVAILABLE" or "DOWNSTREAM_TIMEOUT" or "SERVICE_BUSY";
+    }
+
+    private static string? GetChartErrorCode(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+            return null;
+
+        var separatorIndex = error.IndexOf(':');
+        if (separatorIndex <= 0)
+            return null;
+
+        var candidate = error[..separatorIndex].Trim();
+        return string.IsNullOrWhiteSpace(candidate)
+            ? null
+            : candidate.ToUpperInvariant();
+    }
+
+    private static string GetChartErrorDetail(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+            return "The 'market_chart' service is temporarily unavailable.";
+
+        var separatorIndex = error.IndexOf(':');
+        return separatorIndex < 0
+            ? error
+            : error[(separatorIndex + 1)..].Trim();
     }
 
     private void ApplyChartHttpCaching(ChartResponse response)

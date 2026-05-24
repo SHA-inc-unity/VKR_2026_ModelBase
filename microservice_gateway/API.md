@@ -1298,12 +1298,12 @@ GET /api/v1/market/config
 2. Проверяет layered hot cache: сначала короткий per-instance memory cache, затем distributed cache по ключу `(symbol, timeframe, limit)`.
 3. Если exact cache miss, пытается reuse-ить bigger cached window из того же timeframe class и нарезать из него меньший `limit` без нового Kafka round-trip.
 4. Проверяет ingest lock.
-5. Читает coverage и rows из data-service.
-6. Если символ известен gateway, но локального окна не хватает, gateway создаёт `ingest` job через `cmd.data.dataset.jobs.start` и синхронно ждёт terminal status через `cmd.data.dataset.jobs.get`.
-7. Этот lazy hydrate попадает в тот же `DatasetJobRunner`, что и admin queue: максимум 4 одновременных ingest job-а, при этом две job для одного `target_table` одновременно не исполняются.
-8. Если ingest lock уже занят другим запросом, queued job завершился ошибкой/timeout или data-service ответил `claim_check`, gateway возвращает fallback-состояние `partial` или `pending`.
-9. Для успешного ответа gateway выставляет weak `ETag`, `Last-Modified` и status-aware `Cache-Control`; повторный запрос с совпавшим `If-None-Match` получает `304 Not Modified`.
-10. Возвращает одно из состояний: `ok`, `partial`, `pending`.
+5. Читает latest-window rows из data-service через Kafka (`cmd.data.dataset.latest_rows`).
+6. Если data-service вернул explicit error/timeout на `latest_rows` или `rows`, gateway отвечает `503`, а не маскирует это под `pending`.
+7. Если data-service вернул `claim_check`, gateway отвечает `status = "pending"` и не запускает ложный ingest retry.
+8. Если локальных rows нет, gateway ставит ingest lock, запускает background lazy hydrate через `cmd.data.dataset.jobs.start`/`get` и сразу отвечает `status = "pending"`.
+9. Если rows есть, но окно неполное, gateway отдаёт `status = "partial"` и параллельно дозапускает background hydrate через тот же `DatasetJobRunner` (cap `4`, per-table serialization по `target_table`).
+10. Для успешного ответа gateway выставляет weak `ETag`, `Last-Modified` и status-aware `Cache-Control`; повторный запрос с совпавшим `If-None-Match` получает `304 Not Modified`.
 
 ### Market Chart: request
 
@@ -1321,7 +1321,7 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 | `timeframe` | string | yes | должен входить в `timeframes[].id` из `/api/v1/market/config` |
 | `limit` | number | yes | должен входить в grid для класса выбранного timeframe |
 
-Если `symbol` отсутствует в `/api/v1/market/config`, gateway вернёт `400 INVALID_SYMBOL` и не будет запускать ingest. Если `symbol` валиден, но таблицы/окна ещё нет в Postgres, gateway сначала попробует лениво гидрировать нужную часть датасета через dataset jobs queue, а уже потом ответить графиком.
+Если `symbol` отсутствует в `/api/v1/market/config`, gateway вернёт `400 INVALID_SYMBOL` и не будет запускать ingest. Если `symbol` валиден, но таблицы/окна ещё нет в Postgres, gateway запускает background lazy hydrate через dataset jobs queue и отвечает `pending`; он не держит HTTP-запрос открытым до конца ingest.
 
 ### Market Chart: success response example (`status = "ok"`)
 
@@ -1421,10 +1421,11 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 - сначала всегда использовать `/api/v1/market/config`;
 - частые запросы одного и того же latest-window, например `ETHUSDT + 15m + 100`, gateway кэширует через short in-memory hot cache + distributed cache;
 - меньший `limit` теперь может обслуживаться из уже прогретого большего cached window того же timeframe class, например `50` из ранее cached `200`, без нового похода в Kafka/data-service;
-- `pending` и `partial` — это штатные продуктовые состояния, а не hard error; теперь они означают, что текущий запрос не смог сам закончить lazy hydrate окна;
-- lazy hydrate больше не обходит dataset jobs: он идёт через `cmd.data.dataset.jobs.start/get`, поэтому соблюдает общий ingest queue cap `4` и per-table сериализацию внутри data-service;
+- `pending` и `partial` — это штатные продуктовые состояния, а не hard error; `pending` теперь означает только реальный background hydrate, уже занятый ingest-lock или `claim_check`, а не downstream transport failure;
+- lazy hydrate идёт через `cmd.data.dataset.jobs.start/get`, поэтому соблюдает общий ingest queue cap `4` и per-table сериализацию внутри data-service, но выполняется в background относительно HTTP-request;
 - для browser/mobile polling выгодно посылать `If-None-Match` с последним chart `ETag`: при неизменившемся latest window gateway вернёт `304` без повторной передачи candles;
-- если data-service вернул `claim_check` для слишком большого payload, gateway сейчас **не** скачивает claim-check объект напрямую, а отдаёт `pending`-подобный retry scenario. Поэтому для UI безопаснее уменьшить `limit`, если этот кейс повторяется.
+- если data-service вернул `claim_check` для слишком большого payload, gateway сейчас **не** скачивает claim-check объект напрямую, а отдаёт `pending`-подобный retry scenario. Поэтому для UI безопаснее уменьшить `limit`, если этот кейс повторяется;
+- если data-service `latest_rows` / `rows` вернул explicit error или timeout, gateway теперь отдаёт structured `503`, чтобы UI не зацикливался в вечном `pending`.
 
 ### Market Chart: errors
 
@@ -1445,6 +1446,27 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 - неизвестный `symbol`;
 - неизвестный `timeframe`;
 - `limit` не входит в server-authoritative grid.
+
+#### 503 Service Unavailable
+
+```json
+{
+  "status": 503,
+  "title": "Service Unavailable",
+  "code": "DATA_SOURCE_UNAVAILABLE",
+  "detail": "pg_42P01: relation \"btcusdt_5\" does not exist",
+  "correlationId": "2de4b66e-8b79-4a3e-b3a1-7e5d65f89e74",
+  "timestamp": "2026-05-24T09:10:00Z"
+}
+```
+
+Типовые причины:
+
+- `DATA_SOURCE_UNAVAILABLE`: data-service ответил explicit error на `latest_rows` / `rows`;
+- `DOWNSTREAM_TIMEOUT`: Kafka/data-service timeout на chart rows path;
+- `SERVICE_BUSY`: chart ingest находится в error cooldown или gateway не смог безопасно запустить новый background hydrate.
+
+Для frontend/mobile это retryable hard error, а не `pending`: показывать transient error/backoff, а не endless loading skeleton.
 
 ---
 

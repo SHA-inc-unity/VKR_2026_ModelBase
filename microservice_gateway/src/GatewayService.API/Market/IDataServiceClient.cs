@@ -28,22 +28,43 @@ public sealed record CandleRow(
 
 /// <summary>
 /// Outcome of a <see cref="IDataServiceClient.GetRowsAsync"/> call.
-/// Distinguishes between a successful payload, an empty result, and a
+/// Distinguishes between a successful payload, an empty result, a
 /// claim-check response (data exists but was offloaded to the object store
-/// because it exceeded the Kafka message-size limit).
+/// because it exceeded the Kafka message-size limit), and an explicit
+/// downstream failure.
 /// </summary>
-public sealed record RowsResult(
-    IReadOnlyList<CandleRow> Rows,
-    bool IsClaimCheck = false)
+public enum RowsFetchResultStatus
 {
+    Success,
+    Empty,
+    ClaimCheck,
+    Failure,
+}
+
+public sealed record RowsFetchResult(
+    RowsFetchResultStatus Status,
+    IReadOnlyList<CandleRow> Rows,
+    string? ErrorCode = null,
+    string? ErrorDetail = null)
+{
+    public bool HasRows => Rows.Count > 0;
+    public bool IsEmpty => Status == RowsFetchResultStatus.Empty;
+    public bool IsClaimCheck => Status == RowsFetchResultStatus.ClaimCheck;
+    public bool IsFailure => Status == RowsFetchResultStatus.Failure;
+
     /// <summary>Empty result — no rows and not a claim-check.</summary>
-    public static readonly RowsResult Empty = new([], false);
+    public static readonly RowsFetchResult Empty = new(RowsFetchResultStatus.Empty, Array.Empty<CandleRow>());
 
     /// <summary>Claim-check result — data exists upstream but is too large for Kafka.</summary>
-    public static readonly RowsResult ClaimCheck = new([], true);
+    public static readonly RowsFetchResult ClaimCheck = new(RowsFetchResultStatus.ClaimCheck, Array.Empty<CandleRow>());
 
     /// <summary>Creates a successful rows result.</summary>
-    public static RowsResult From(IReadOnlyList<CandleRow> rows) => new(rows, false);
+    public static RowsFetchResult From(IReadOnlyList<CandleRow> rows) =>
+        rows.Count == 0 ? Empty : new(RowsFetchResultStatus.Success, rows);
+
+    /// <summary>Creates an explicit downstream failure result.</summary>
+    public static RowsFetchResult Fail(string errorCode, string? errorDetail = null) =>
+        new(RowsFetchResultStatus.Failure, Array.Empty<CandleRow>(), errorCode, errorDetail);
 }
 
 /// <summary>
@@ -80,7 +101,7 @@ public interface IDataServiceClient
     /// Fetches the newest fixed-width chart window anchored at the latest
     /// stored candle for the given symbol/timeframe.
     /// </summary>
-    Task<RowsResult> GetLatestWindowRowsAsync(
+    Task<RowsFetchResult> GetLatestWindowRowsAsync(
         string symbol,
         string bybitInterval,
         long stepMs,
@@ -91,10 +112,10 @@ public interface IDataServiceClient
     /// Fetches OHLCV rows from the given table for the specified time range.
     /// The <paramref name="limit"/> parameter caps the data-service response so the
     /// payload stays under the Kafka message-size threshold.
-    /// Returns a <see cref="RowsResult"/> whose <see cref="RowsResult.IsClaimCheck"/>
+    /// Returns a <see cref="RowsFetchResult"/> whose <see cref="RowsFetchResult.IsClaimCheck"/>
     /// is true when the data-service offloaded the response to the object store.
     /// </summary>
-    Task<RowsResult> GetRowsAsync(
+    Task<RowsFetchResult> GetRowsAsync(
         string tableName, long startMs, long endMs, int limit, CancellationToken ct = default);
 
     /// <summary>
