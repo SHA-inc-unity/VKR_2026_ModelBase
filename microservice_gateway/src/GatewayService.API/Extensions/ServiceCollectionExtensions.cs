@@ -7,6 +7,7 @@ using GatewayService.API.Clients.Market;
 using GatewayService.API.Clients.News;
 using GatewayService.API.Clients.Notifications;
 using GatewayService.API.Clients.Portfolio;
+using GatewayService.API.Clients.Social;
 using GatewayService.API.Frontend;
 using GatewayService.API.Kafka;
 using GatewayService.API.Market;
@@ -115,6 +116,24 @@ public static class ServiceCollectionExtensions
         services.AddTransient<INewsServiceClient, NewsServiceClient>();
         services.AddTransient<INotificationsServiceClient, NotificationsServiceClient>();
 
+        // Real HTTP proxy clients for social-stack microservices.
+        services.AddHttpClient<ISocialServiceClient, SocialServiceClient>((sp, c) =>
+        {
+            c.BaseAddress = BuildDownstreamUri(configuration, "DownstreamServices:Social:BaseUrl", "SOCIAL_SERVICE_URL", "http://social_service_api:5000");
+            c.Timeout = TimeSpan.FromSeconds(15);
+        });
+        services.AddHttpClient<INewsHttpProxyClient, NewsHttpProxyClient>((sp, c) =>
+        {
+            c.BaseAddress = BuildDownstreamUri(configuration, "DownstreamServices:News:BaseUrl", "NEWS_SERVICE_URL", "http://news_service_api:5000");
+            c.Timeout = TimeSpan.FromSeconds(15);
+        });
+        services.AddHttpClient<INotificationsHttpProxyClient, NotificationsHttpProxyClient>((sp, c) =>
+        {
+            c.BaseAddress = BuildDownstreamUri(configuration, "DownstreamServices:Notifications:BaseUrl", "NOTIFICATION_SERVICE_URL", "http://notification_service_api:5000");
+            // SSE is long-lived; we use a generous timeout. The actual request uses HttpCompletionOption.ResponseHeadersRead.
+            c.Timeout = TimeSpan.FromMinutes(30);
+        });
+
         // Aggregators
         services.AddScoped<IBootstrapAggregator, BootstrapAggregator>();
         services.AddScoped<IDashboardAggregator, DashboardAggregator>();
@@ -154,6 +173,24 @@ public static class ServiceCollectionExtensions
         services.AddControllers();
 
         return services;
+    }
+
+    private static Uri BuildDownstreamUri(IConfiguration configuration, string settingsPath, string envName, string fallback)
+    {
+        var raw = configuration[settingsPath]
+            ?? configuration[envName]
+            ?? fallback;
+
+        if (!raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            && !raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            raw = $"http://{raw}";
+        }
+        if (!raw.EndsWith('/'))
+        {
+            raw += "/";
+        }
+        return new Uri(raw, UriKind.Absolute);
     }
 
     private static Uri BuildAccountServiceUri(IConfiguration configuration)

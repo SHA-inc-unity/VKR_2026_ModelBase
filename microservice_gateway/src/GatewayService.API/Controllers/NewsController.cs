@@ -1,62 +1,73 @@
 using GatewayService.API.Clients.News;
-using GatewayService.API.DTOs.Responses;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace GatewayService.API.Controllers;
 
 /// <summary>
-/// News feed — publicly accessible.
+/// News feed proxy — forwards to microservice_news. Publicly accessible.
 /// </summary>
 [ApiController]
 [Route("api/news")]
+[AllowAnonymous]
 public sealed class NewsController : ControllerBase
 {
-    private readonly INewsServiceClient _news;
+    private readonly INewsHttpProxyClient _news;
 
-    public NewsController(INewsServiceClient news) => _news = news;
+    public NewsController(INewsHttpProxyClient news) => _news = news;
 
-    /// <summary>Returns the latest news items.</summary>
-    /// <param name="limit">Max number of items to return (default 20, max 100).</param>
     [HttpGet]
-    [AllowAnonymous]
-    public async Task<IActionResult> GetList([FromQuery] int limit = 20, [FromQuery] string? tag = null, CancellationToken ct = default)
+    public async Task<IActionResult> List(
+        [FromQuery] string? symbol,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 30,
+        CancellationToken ct = default)
     {
-        var response = await BuildResponseAsync(limit, tag, ct);
+        var query = BuildQuery(symbol, page, pageSize);
+        var resp = await _news.ForwardAsync(HttpMethod.Get, "api/news", query, ct: ct);
         Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=300";
-        return Ok(response);
+        return new ContentResult
+        {
+            StatusCode = resp.StatusCode,
+            Content = resp.Content,
+            ContentType = resp.ContentType,
+        };
     }
 
     [HttpGet("home")]
-    [AllowAnonymous]
-    public async Task<IActionResult> GetHome([FromQuery] int limit = 3, [FromQuery] string? tag = null, CancellationToken ct = default)
+    public async Task<IActionResult> Home([FromQuery] int limit = 3, CancellationToken ct = default)
     {
-        var response = await BuildResponseAsync(limit, tag, ct);
+        var query = $"page=1&pageSize={Math.Clamp(limit, 1, 100)}";
+        var resp = await _news.ForwardAsync(HttpMethod.Get, "api/news", query, ct: ct);
         Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=300";
-        return Ok(response);
+        return new ContentResult
+        {
+            StatusCode = resp.StatusCode,
+            Content = resp.Content,
+            ContentType = resp.ContentType,
+        };
     }
 
-    private async Task<NewsListResponse> BuildResponseAsync(int limit, string? tag, CancellationToken ct)
+    [HttpGet("{id:guid}")]
+    public async Task<IActionResult> Get(Guid id, CancellationToken ct)
     {
-        limit = Math.Clamp(limit, 1, 100);
-        var normalizedTag = string.IsNullOrWhiteSpace(tag) ? null : tag.Trim();
-        var result = await _news.GetLatestAsync(limit, ct);
-        IEnumerable<NewsItemDto> items = result.IsSuccess ? result.Value ?? [] : [];
-
-        if (!string.IsNullOrWhiteSpace(normalizedTag))
+        var resp = await _news.ForwardAsync(HttpMethod.Get, $"api/news/{id}", ct: ct);
+        return new ContentResult
         {
-            items = items.Where(item => item.Tags.Contains(normalizedTag, StringComparer.OrdinalIgnoreCase));
-        }
-
-        var materializedItems = items.OrderByDescending(item => item.PublishedAt).Take(limit).ToArray();
-
-        var response = new NewsListResponse
-        {
-            Items = materializedItems,
-            Total = materializedItems.Length,
-            Degraded = !result.IsSuccess
+            StatusCode = resp.StatusCode,
+            Content = resp.Content,
+            ContentType = resp.ContentType,
         };
+    }
 
-        return response;
+    private static string BuildQuery(string? symbol, int page, int pageSize)
+    {
+        var parts = new List<string>
+        {
+            $"page={Math.Max(1, page)}",
+            $"pageSize={Math.Clamp(pageSize, 1, 100)}",
+        };
+        if (!string.IsNullOrWhiteSpace(symbol)) parts.Add($"symbol={Uri.EscapeDataString(symbol)}");
+        return string.Join('&', parts);
     }
 }

@@ -8,6 +8,7 @@ public sealed class DownstreamServicesSettings
     public ServiceEndpointSettings Market { get; init; } = new();
     public ServiceEndpointSettings News { get; init; } = new();
     public ServiceEndpointSettings Notifications { get; init; } = new();
+    public ServiceEndpointSettings Social { get; init; } = new();
 }
 
 public sealed class ServiceEndpointSettings
