@@ -12,6 +12,12 @@ public sealed class MarketSettings
     /// <summary>Bybit REST base URL used for symbol discovery.</summary>
     public string BybitBaseUrl { get; init; } = "https://api.bybit.com";
 
+    /// <summary>CoinGecko REST base URL used for canonical global market stats.</summary>
+    public string CoinGeckoBaseUrl { get; init; } = "https://api.coingecko.com/api/v3";
+
+    /// <summary>Alternative.me base URL used for the Fear &amp; Greed index.</summary>
+    public string FearGreedBaseUrl { get; init; } = "https://api.alternative.me";
+
     /// <summary>Default symbol returned in config and used as chart default.</summary>
     public string DefaultSymbol { get; init; } = "BTCUSDT";
 
@@ -40,6 +46,9 @@ public sealed class MarketSettings
 
     /// <summary>How long to cache the linear market snapshot / ticker feed (seconds).</summary>
     public int SnapshotCacheTtlSeconds { get; init; } = 30;
+
+    /// <summary>How long to cache the canonical global overview payload (seconds).</summary>
+    public int GlobalOverviewCacheTtlSeconds { get; init; } = 180;
 
     /// <summary>
     /// Per-instance in-memory hot cache TTL (seconds) layered on top of the

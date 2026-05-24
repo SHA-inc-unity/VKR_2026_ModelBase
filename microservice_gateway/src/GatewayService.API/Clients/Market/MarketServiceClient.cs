@@ -11,6 +11,7 @@ namespace GatewayService.API.Clients.Market;
 public sealed class MarketServiceClient : IMarketServiceClient
 {
     private const string SnapshotCacheKey = "market:snapshot:linear:v1";
+    private const string CanonicalOverviewCacheKey = "market:overview:canonical:v2";
     private const string SnapshotSource = "bybit-linear-tickers";
     private const string RealtimeSource = "market-watch-live";
     private const string SnapshotFallbackSource = "snapshot-fallback";
@@ -39,20 +40,24 @@ public sealed class MarketServiceClient : IMarketServiceClient
         _logger = logger;
     }
 
-    public async Task<ServiceResult<MarketOverviewDto>> GetOverviewAsync(CancellationToken ct = default)
+
+public async Task<ServiceResult<MarketOverviewDto>> GetOverviewAsync(CancellationToken ct = default)
+{
+    var canonical = await LoadCanonicalOverviewAsync(ct);
+    if (canonical.TotalMarketCapUsd is null || canonical.BtcDominance is null || canonical.Volume24hUsd is null)
     {
-        var snapshot = await LoadSnapshotAsync(ct);
-        return ServiceResult<MarketOverviewDto>.Ok(new MarketOverviewDto
-        {
-            BtcDominance = snapshot.TotalMarketCapProxy > 0
-                ? DecimalRound(snapshot.BtcMarketCapProxy / snapshot.TotalMarketCapProxy * 100m)
-                : 0,
-            TotalMarketCapUsd = DecimalRound(snapshot.TotalMarketCapProxy),
-            Volume24hUsd = DecimalRound(snapshot.TotalVolume24hUsd),
-        });
+        return ServiceResult<MarketOverviewDto>.Fail("Canonical global market overview is unavailable");
     }
 
-    public async Task<ServiceResult<IReadOnlyList<TrendingAssetDto>>> GetTrendingAsync(int limit = 10, CancellationToken ct = default)
+    return ServiceResult<MarketOverviewDto>.Ok(new MarketOverviewDto
+    {
+        BtcDominance = canonical.BtcDominance.Value,
+        TotalMarketCapUsd = canonical.TotalMarketCapUsd.Value,
+        Volume24hUsd = canonical.Volume24hUsd.Value,
+    });
+}
+
+public async Task<ServiceResult<IReadOnlyList<TrendingAssetDto>>> GetTrendingAsync(int limit = 10, CancellationToken ct = default)
     {
         var snapshot = await LoadSnapshotAsync(ct);
         var items = snapshot.Items
@@ -70,70 +75,181 @@ public sealed class MarketServiceClient : IMarketServiceClient
         return ServiceResult<IReadOnlyList<TrendingAssetDto>>.Ok(items);
     }
 
-    public async Task<ServiceResult<PublicMarketOverviewResponse>> GetPublicOverviewAsync(int trendingLimit = 5, CancellationToken ct = default)
+
+public async Task<ServiceResult<PublicMarketOverviewResponse>> GetPublicOverviewAsync(int trendingLimit = 5, CancellationToken ct = default)
+{
+    var snapshotTask = LoadSnapshotAsync(ct);
+    var canonicalTask = LoadCanonicalOverviewAsync(ct);
+    await Task.WhenAll(snapshotTask, canonicalTask);
+
+    var snapshot = await snapshotTask;
+    var canonical = await canonicalTask;
+
+    var overviewDegradedFields = new HashSet<string>(canonical.DegradedFields, StringComparer.OrdinalIgnoreCase);
+    var degradedFields = new HashSet<string>(overviewDegradedFields, StringComparer.OrdinalIgnoreCase);
+    if (snapshot.DegradedFields.Count > 0)
     {
-        var config = await _marketConfig.GetConfigAsync(ct);
-        var snapshot = await LoadSnapshotAsync(ct);
-        var (fearGreedValue, fearGreedLabel, fearGreedDegraded) = ComputeFearGreed(snapshot.Items);
-        var totalMarketCap = snapshot.TotalMarketCapProxy > 0
-            ? DecimalRound(snapshot.TotalMarketCapProxy)
-            : (decimal?)null;
-        var totalVolume24h = snapshot.TotalVolume24hUsd > 0
-            ? DecimalRound(snapshot.TotalVolume24hUsd)
-            : (decimal?)null;
-        var btcDominance = totalMarketCap is > 0 && snapshot.BtcMarketCapProxy > 0
-            ? DecimalRound(snapshot.BtcMarketCapProxy / snapshot.TotalMarketCapProxy * 100m)
-            : (decimal?)null;
-
-        var degradedFields = new HashSet<string>(snapshot.DegradedFields, StringComparer.OrdinalIgnoreCase);
-        if (totalMarketCap is null)
-        {
-            degradedFields.Add("totalMarketCap");
-        }
-
-        if (totalVolume24h is null)
-        {
-            degradedFields.Add("volume24h");
-        }
-
-        if (btcDominance is null)
-        {
-            degradedFields.Add("btcDominance");
-        }
-
-        if (fearGreedDegraded)
-        {
-            degradedFields.Add("fearGreed");
-        }
-
-        return ServiceResult<PublicMarketOverviewResponse>.Ok(new PublicMarketOverviewResponse
-        {
-            MarketOverview = new PublicMarketOverviewDto
-            {
-                TotalMarketCap = totalMarketCap,
-                BtcDominance = btcDominance,
-                Volume24h = totalVolume24h,
-                ActiveAssets = config.Symbols.Count,
-                FearGreedValue = fearGreedDegraded ? null : fearGreedValue,
-                FearGreedLabel = fearGreedDegraded ? null : fearGreedLabel,
-            },
-            TrendingAssets = snapshot.Items
-                .OrderByDescending(item => item.TrendingScore)
-                .ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase)
-                .Take(Math.Max(1, trendingLimit))
-                .Select(item => item.Symbol)
-                .ToArray(),
-            Meta = new FrontendResponseMetaDto
-            {
-                GeneratedAt = DateTimeOffset.UtcNow,
-                UpdatedAt = snapshot.UpdatedAt,
-                DegradedFields = degradedFields.ToArray(),
-                DegradedSections = degradedFields.Count == 0 ? [] : ["marketOverview"],
-            }
-        });
+        degradedFields.UnionWith(snapshot.DegradedFields.Select(field => $"trending.{field}"));
     }
 
-    public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
+    var degradedSections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    if (overviewDegradedFields.Count > 0)
+    {
+        degradedSections.Add("marketOverview");
+    }
+
+    if (snapshot.DegradedFields.Count > 0)
+    {
+        degradedSections.Add("trendingAssets");
+    }
+
+    return ServiceResult<PublicMarketOverviewResponse>.Ok(new PublicMarketOverviewResponse
+    {
+        MarketOverview = new PublicMarketOverviewDto
+        {
+            TotalMarketCap = canonical.TotalMarketCapUsd,
+            BtcDominance = canonical.BtcDominance,
+            Volume24h = canonical.Volume24hUsd,
+            ActiveAssets = canonical.ActiveAssets,
+            FearGreedValue = canonical.FearGreedValue,
+            FearGreedLabel = canonical.FearGreedLabel,
+        },
+        TrendingAssets = snapshot.Items
+            .OrderByDescending(item => item.TrendingScore)
+            .ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase)
+            .Take(Math.Max(1, trendingLimit))
+            .Select(item => item.Symbol)
+            .ToArray(),
+        Meta = new FrontendResponseMetaDto
+        {
+            GeneratedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = ResolveCompositeUpdatedAt(canonical.UpdatedAt, snapshot.UpdatedAt),
+            DegradedFields = degradedFields.ToArray(),
+            DegradedSections = degradedSections.ToArray(),
+        }
+    });
+}
+
+private async Task<CanonicalOverviewEnvelope> LoadCanonicalOverviewAsync(CancellationToken ct)
+{
+    return await _cache.GetOrCreateAsync(
+        CanonicalOverviewCacheKey,
+        TimeSpan.FromSeconds(Math.Max(30, _settings.GlobalOverviewCacheTtlSeconds)),
+        async () =>
+        {
+            var marketTask = TryFetchCoinGeckoGlobalAsync(ct);
+            var fearGreedTask = TryFetchFearGreedAsync(ct);
+            await Task.WhenAll(marketTask, fearGreedTask);
+
+            var market = await marketTask;
+            var fearGreed = await fearGreedTask;
+            var degradedFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (market?.TotalMarketCapUsd is null) degradedFields.Add("totalMarketCap");
+            if (market?.Volume24hUsd is null) degradedFields.Add("volume24h");
+            if (market?.BtcDominance is null) degradedFields.Add("btcDominance");
+            if (market?.ActiveAssets is null) degradedFields.Add("activeAssets");
+            if (fearGreed?.Value is null) degradedFields.Add("fearGreedValue");
+            if (string.IsNullOrWhiteSpace(fearGreed?.Label)) degradedFields.Add("fearGreedLabel");
+
+            return new CanonicalOverviewEnvelope(
+                TotalMarketCapUsd: market?.TotalMarketCapUsd,
+                BtcDominance: market?.BtcDominance,
+                Volume24hUsd: market?.Volume24hUsd,
+                ActiveAssets: market?.ActiveAssets,
+                FearGreedValue: fearGreed?.Value,
+                FearGreedLabel: fearGreed?.Label,
+                UpdatedAt: ResolveCompositeUpdatedAt(market?.UpdatedAt, fearGreed?.UpdatedAt),
+                DegradedFields: degradedFields.ToArray());
+        },
+        ct);
+}
+
+private async Task<CoinGeckoGlobalSnapshot?> TryFetchCoinGeckoGlobalAsync(CancellationToken ct)
+{
+    var url = $"{_settings.CoinGeckoBaseUrl.TrimEnd('/')}/global";
+    try
+    {
+        using var http = _httpClientFactory.CreateClient(nameof(MarketServiceClient));
+        using var response = await http.GetAsync(url, ct);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+        if (!doc.RootElement.TryGetProperty("data", out var data))
+        {
+            throw new InvalidOperationException("CoinGecko global endpoint returned no data payload");
+        }
+
+        var updatedAt = TryGetUnixSeconds(data, "updated_at") ?? DateTimeOffset.UtcNow;
+        var totalMarketCap = TryGetNestedDecimal(data, "total_market_cap", "usd");
+        var totalVolume24h = TryGetNestedDecimal(data, "total_volume", "usd");
+        var btcDominance = TryGetNestedDecimal(data, "market_cap_percentage", "btc");
+        var activeAssets = TryGetInt32(data, "active_cryptocurrencies");
+
+        return new CoinGeckoGlobalSnapshot(
+            TotalMarketCapUsd: totalMarketCap > 0 ? DecimalRound(totalMarketCap.Value) : null,
+            BtcDominance: btcDominance >= 0 ? DecimalRound(btcDominance.Value) : null,
+            Volume24hUsd: totalVolume24h > 0 ? DecimalRound(totalVolume24h.Value) : null,
+            ActiveAssets: activeAssets > 0 ? activeAssets : null,
+            UpdatedAt: updatedAt);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogWarning(ex, "Failed to fetch canonical global market stats from CoinGecko");
+        return null;
+    }
+}
+
+private async Task<FearGreedSnapshot?> TryFetchFearGreedAsync(CancellationToken ct)
+{
+    var url = $"{_settings.FearGreedBaseUrl.TrimEnd('/')}/fng/?limit=1&format=json";
+    try
+    {
+        using var http = _httpClientFactory.CreateClient(nameof(MarketServiceClient));
+        using var response = await http.GetAsync(url, ct);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+        if (!doc.RootElement.TryGetProperty("data", out var data)
+            || data.ValueKind != JsonValueKind.Array
+            || data.GetArrayLength() == 0)
+        {
+            throw new InvalidOperationException("Fear & Greed endpoint returned no data rows");
+        }
+
+        var current = data[0];
+        var value = TryGetInt32(current, "value");
+        var label = GetString(current, "value_classification")?.Trim();
+        var updatedAt = TryGetUnixSeconds(current, "timestamp") ?? DateTimeOffset.UtcNow;
+
+        return new FearGreedSnapshot(
+            Value: value > 0 ? value : null,
+            Label: string.IsNullOrWhiteSpace(label) ? null : label,
+            UpdatedAt: updatedAt);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogWarning(ex, "Failed to fetch canonical fear and greed index");
+        return null;
+    }
+}
+
+private static DateTimeOffset? ResolveCompositeUpdatedAt(params DateTimeOffset?[] values)
+{
+    var available = values.Where(value => value.HasValue).Select(value => value!.Value).ToArray();
+    if (available.Length == 0)
+    {
+        return null;
+    }
+
+    return available.Min();
+}
+
+public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         int page = 1,
         int pageSize = 25,
         string? search = null,
@@ -707,6 +823,51 @@ public sealed class MarketServiceClient : IMarketServiceClient
         };
     }
 
+
+    private static int TryGetInt32(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var property))
+        {
+            return 0;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.Number when property.TryGetInt32(out var numberValue) => numberValue,
+            JsonValueKind.Number when property.TryGetInt64(out var longValue) => (int)longValue,
+            JsonValueKind.String when int.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var stringValue) => stringValue,
+            _ => 0,
+        };
+    }
+
+    private static decimal? TryGetNestedDecimal(JsonElement item, string container, string propertyName)
+    {
+        if (!item.TryGetProperty(container, out var containerEl) || containerEl.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var value = GetDecimal(containerEl, propertyName);
+        return value > 0 ? value : null;
+    }
+
+    private static DateTimeOffset? TryGetUnixSeconds(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var property))
+        {
+            return null;
+        }
+
+        long seconds = property.ValueKind switch
+        {
+            JsonValueKind.Number when property.TryGetInt64(out var numberValue) => numberValue,
+            JsonValueKind.String when long.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var stringValue) => stringValue,
+            _ => 0,
+        };
+
+        return seconds > 0 ? DateTimeOffset.FromUnixTimeSeconds(seconds) : null;
+    }
+
     private async Task<IReadOnlyList<RealtimeWatcherRow>> LoadRealtimeRowsAsync(string? exchange, CancellationToken ct)
     {
         var timeout = TimeSpan.FromSeconds(_settings.KafkaTimeoutSeconds);
@@ -909,6 +1070,28 @@ public sealed class MarketServiceClient : IMarketServiceClient
     }
 
     private static decimal DecimalRound(decimal value) => decimal.Round(value, 6, MidpointRounding.AwayFromZero);
+
+    private sealed record CanonicalOverviewEnvelope(
+        decimal? TotalMarketCapUsd,
+        decimal? BtcDominance,
+        decimal? Volume24hUsd,
+        int? ActiveAssets,
+        int? FearGreedValue,
+        string? FearGreedLabel,
+        DateTimeOffset? UpdatedAt,
+        IReadOnlyList<string> DegradedFields);
+
+    private sealed record CoinGeckoGlobalSnapshot(
+        decimal? TotalMarketCapUsd,
+        decimal? BtcDominance,
+        decimal? Volume24hUsd,
+        int? ActiveAssets,
+        DateTimeOffset UpdatedAt);
+
+    private sealed record FearGreedSnapshot(
+        int? Value,
+        string? Label,
+        DateTimeOffset UpdatedAt);
 
     private sealed record SnapshotEnvelope(
         IReadOnlyList<SnapshotTicker> Items,

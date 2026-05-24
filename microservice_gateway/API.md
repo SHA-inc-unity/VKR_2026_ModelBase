@@ -841,16 +841,13 @@ GET /api/dashboard
 
 ### Market Overview: how it works
 
-Gateway читает cached snapshot из `IMarketServiceClient`, который поверх Bybit linear tickers собирает list-ready universe и из него выводит home metrics.
+Gateway теперь разделяет `marketOverview` и `trendingAssets` по источникам:
 
-Текущая семантика intentionally pragmatic:
+- `marketOverview.totalMarketCap`, `marketOverview.volume24h`, `marketOverview.btcDominance`, `marketOverview.activeAssets` приходят из canonical global market feed (`CoinGecko /global`), а не из gateway snapshot universe;
+- `marketOverview.fearGreedValue` / `marketOverview.fearGreedLabel` приходят из внешнего Fear & Greed feed (`alternative.me/fng`), а не из gateway-local breadth heuristic;
+- `trendingAssets` по-прежнему ранжируются по gateway snapshot universe и `TrendingScore`, который учитывает magnitude 24h change и liquidity proxy.
 
-- `totalMarketCap` = proxy-агрегат по snapshot universe, где per-symbol `marketCap` выводится из `openInterestValue`, а при его отсутствии — из `turnover24h`;
-- `btcDominance` считается как доля `BTCUSDT` внутри того же proxy market-cap universe;
-- `fearGreedValue` / `fearGreedLabel` — gateway-level heuristic по breadth и average 24h change, а не внешний индекс;
-- `trendingAssets` ранжируются по gateway-derived `TrendingScore`, который учитывает magnitude 24h change и liquidity proxy.
-
-Если snapshot не может вычислить конкретную метрику, gateway теперь не подставляет transport-stable `0` только ради shape-consistency. Вместо этого числовое поле может быть `null`, а причина отражается в `meta.degradedFields`.
+Если canonical global feeds недоступны, gateway не подставляет placeholder-нули ради shape-consistency: overview-поля могут быть `null`, а причина отражается в `meta.degradedFields` и `meta.degradedSections`.
 
 ### Market Overview: request
 
@@ -885,10 +882,11 @@ GET /api/v1/market/overview
 ### Market Overview: frontend behavior
 
 - считать этот endpoint public source of truth для home screen overview;
-- воспринимать market numbers как snapshot-derived proxies, а не как canonical multi-exchange market-cap feed;
-- использовать `meta.updatedAt` как timestamp последнего snapshot refresh, а `meta.generatedAt` как время ответа gateway;
+- воспринимать `marketOverview` как canonical global market snapshot, а `trendingAssets` — как gateway-local discovery feed;
+- использовать `meta.updatedAt` как timestamp самого старого источника, участвующего в ответе, а `meta.generatedAt` как время ответа gateway;
 - `meta.degradedFields` и `meta.degradedSections` использовать как warning, а не как hard-fail trigger;
-- если snapshot деградировал, поля вроде `totalMarketCap`, `volume24h`, `btcDominance`, `fearGreedValue`, `fearGreedLabel` могут быть `null` вместо placeholder-нуля;
+- если canonical overview feed деградировал, поля вроде `totalMarketCap`, `volume24h`, `btcDominance`, `activeAssets`, `fearGreedValue`, `fearGreedLabel` могут быть `null` вместо placeholder-нуля;
+- если snapshot деградировал только для trending, gateway помечает это как `trendingAssets` degradation и префиксует такие поля в `meta.degradedFields` как `trending.*`;
 - frontend cache должен учитывать route-level freshness policy `max-age=30, stale-while-revalidate=120`.
 
 ---
