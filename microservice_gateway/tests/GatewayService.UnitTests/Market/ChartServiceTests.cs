@@ -180,6 +180,72 @@ public sealed class ChartServiceTests
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Fact]
+    public async Task Larger_cached_window_can_satisfy_smaller_limit_without_kafka_calls()
+    {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var stepMs = 300_000L;
+        var cachedCandles = BuildRows(nowMs, 200, stepMs)
+            .Select(row => new CandleDto(
+                row.TimestampMs,
+                row.Open,
+                row.High,
+                row.Low,
+                row.Close,
+                row.Volume,
+                row.Turnover))
+            .ToArray();
+
+        var cached = new ChartResponse
+        {
+            Symbol = "BTCUSDT",
+            Timeframe = "5m",
+            Limit = 200,
+            Status = "ok",
+            Candles = cachedCandles,
+            Meta = new ChartMetaDto
+            {
+                Requested = 200,
+                Available = 200,
+                FromMs = cachedCandles[0].T,
+                ToMs = cachedCandles[^1].T,
+                Coverage = "full",
+            },
+        };
+
+        var cacheMock = new Mock<IMarketCacheService>();
+        cacheMock.Setup(c => c.GetAsync<ChartResponse>(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string key, CancellationToken _) =>
+                key.EndsWith(":200:v1", StringComparison.Ordinal) ? cached : null);
+        cacheMock.Setup(c => c.GetAsync<string>(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string?)null);
+        cacheMock.Setup(c => c.SetAsync(
+                It.IsAny<string>(),
+                It.IsAny<ChartResponse>(),
+                It.IsAny<TimeSpan>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var dataMock = new Mock<IDataServiceClient>();
+        var sut = CreateSut(cache: cacheMock.Object, data: dataMock.Object);
+
+        var result = await sut.GetChartAsync("BTCUSDT", "5m", 50);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value!.Status.Should().Be("ok");
+        result.Value.Candles.Should().HaveCount(50);
+        result.Value.Meta.Requested.Should().Be(50);
+        result.Value.Meta.Available.Should().Be(50);
+
+        cacheMock.Verify(c => c.SetAsync(
+            It.Is<string>(key => key.EndsWith(":50:v1", StringComparison.Ordinal)),
+            It.IsAny<ChartResponse>(),
+            It.IsAny<TimeSpan>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+        dataMock.Verify(d => d.GetCoverageAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     // ── No data → pending ─────────────────────────────────────────────────
 
     [Fact]

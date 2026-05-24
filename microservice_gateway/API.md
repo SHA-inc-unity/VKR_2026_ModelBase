@@ -75,12 +75,13 @@
 | `GET /api/v1/market/tickers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/trending` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/top-movers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
+| `GET /api/v1/market/chart` | status-dependent cache policy: `ok` uses short public cache (`Heavy=10s`, `Medium=30s`, `Light=60s`), `partial=3s`, `pending=1s`; weak `ETag` + `If-None-Match` are enabled |
 | `POST /api/v1/market/quotes/batch` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/v1/market/converter/quote` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/v1/market/convert` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/news` and `GET /api/news/home` | `Cache-Control: public, max-age=30, stale-while-revalidate=300` |
 
-ETag/If-None-Match semantics для этих routes пока не реализованы. Frontend и edge cache должны опираться именно на `Cache-Control` и timestamps в payload.
+ETag/If-None-Match сейчас реализованы только для `GET /api/v1/market/chart`. Остальные public routes по-прежнему опираются на `Cache-Control` и timestamps/snapshot markers внутри payload.
 
 ### Browser CORS rules
 
@@ -1221,13 +1222,15 @@ GET /api/v1/market/config
 ### Market Chart: how it works
 
 1. Gateway валидирует `symbol`, `timeframe`, `limit`.
-2. Проверяет hot-window cache по ключу `(symbol, timeframe, limit)`.
-3. Проверяет ingest lock.
-4. Читает coverage и rows из data-service.
-5. Если символ известен gateway, но локального окна не хватает, gateway создаёт `ingest` job через `cmd.data.dataset.jobs.start` и синхронно ждёт terminal status через `cmd.data.dataset.jobs.get`.
-6. Этот lazy hydrate попадает в тот же `DatasetJobRunner`, что и admin queue: максимум 4 одновременных ingest job-а, при этом две job для одного `target_table` одновременно не исполняются.
-7. Если ingest lock уже занят другим запросом, queued job завершился ошибкой/timeout или data-service ответил `claim_check`, gateway возвращает fallback-состояние `partial` или `pending`.
-8. Возвращает одно из состояний: `ok`, `partial`, `pending`.
+2. Проверяет layered hot cache: сначала короткий per-instance memory cache, затем distributed cache по ключу `(symbol, timeframe, limit)`.
+3. Если exact cache miss, пытается reuse-ить bigger cached window из того же timeframe class и нарезать из него меньший `limit` без нового Kafka round-trip.
+4. Проверяет ingest lock.
+5. Читает coverage и rows из data-service.
+6. Если символ известен gateway, но локального окна не хватает, gateway создаёт `ingest` job через `cmd.data.dataset.jobs.start` и синхронно ждёт terminal status через `cmd.data.dataset.jobs.get`.
+7. Этот lazy hydrate попадает в тот же `DatasetJobRunner`, что и admin queue: максимум 4 одновременных ingest job-а, при этом две job для одного `target_table` одновременно не исполняются.
+8. Если ingest lock уже занят другим запросом, queued job завершился ошибкой/timeout или data-service ответил `claim_check`, gateway возвращает fallback-состояние `partial` или `pending`.
+9. Для успешного ответа gateway выставляет weak `ETag`, `Last-Modified` и status-aware `Cache-Control`; повторный запрос с совпавшим `If-None-Match` получает `304 Not Modified`.
+10. Возвращает одно из состояний: `ok`, `partial`, `pending`.
 
 ### Market Chart: request
 
@@ -1332,13 +1335,22 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 | `partial` | рендерить уже пришедшие свечи и запланировать retry через `retryAfterMs` |
 | `pending` | показать skeleton / loading state и повторить запрос через `retryAfterMs` |
 
+### Market Chart: HTTP caching
+
+- `status=ok`: route отдаёт short public cache + weak `ETag`; повторный conditional GET может вернуться как `304 Not Modified`.
+- `status=partial`: route тоже cacheable, но только на очень короткое окно (`max-age=3`), чтобы сгладить thundering herd во время lazy hydrate.
+- `status=pending`: route cacheable на `1s`; это intentionally короткий edge/browser buffer для burst refresh.
+- `Last-Modified` берётся из `meta.toMs`, если в ответе есть хотя бы одна свеча.
+
 ### Market Chart: important notes
 
 - не пытаться самостоятельно вычислять допустимые `limit`;
 - сначала всегда использовать `/api/v1/market/config`;
-- частые запросы одного и того же latest-window, например `ETHUSDT + 15m + 100`, gateway кэширует по ключу `(symbol, timeframe, limit)`, поэтому repeated refresh обычно уходит без повторного похода в data-service;
+- частые запросы одного и того же latest-window, например `ETHUSDT + 15m + 100`, gateway кэширует через short in-memory hot cache + distributed cache;
+- меньший `limit` теперь может обслуживаться из уже прогретого большего cached window того же timeframe class, например `50` из ранее cached `200`, без нового похода в Kafka/data-service;
 - `pending` и `partial` — это штатные продуктовые состояния, а не hard error; теперь они означают, что текущий запрос не смог сам закончить lazy hydrate окна;
 - lazy hydrate больше не обходит dataset jobs: он идёт через `cmd.data.dataset.jobs.start/get`, поэтому соблюдает общий ingest queue cap `4` и per-table сериализацию внутри data-service;
+- для browser/mobile polling выгодно посылать `If-None-Match` с последним chart `ETag`: при неизменившемся latest window gateway вернёт `304` без повторной передачи candles;
 - если data-service вернул `claim_check` для слишком большого payload, gateway сейчас **не** скачивает claim-check объект напрямую, а отдаёт `pending`-подобный retry scenario. Поэтому для UI безопаснее уменьшить `limit`, если этот кейс повторяется.
 
 ### Market Chart: errors

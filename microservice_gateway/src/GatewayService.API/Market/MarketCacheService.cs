@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
 
 namespace GatewayService.API.Market;
 
@@ -8,17 +10,25 @@ namespace GatewayService.API.Market;
 public sealed class MarketCacheService : IMarketCacheService
 {
     private readonly IDistributedCache _cache;
+    private readonly IMemoryCache _hotCache;
     private readonly ILogger<MarketCacheService> _log;
+    private readonly TimeSpan _hotCacheTtl;
 
     // In-process stampede protection: coalesces concurrent cache-miss
     // requests for the same key into a single factory execution.
     // Key → Lazy<Task<object>>
     private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _inflight = new();
 
-    public MarketCacheService(IDistributedCache cache, ILogger<MarketCacheService> log)
+    public MarketCacheService(
+        IDistributedCache cache,
+        IMemoryCache hotCache,
+        IOptions<MarketSettings> settings,
+        ILogger<MarketCacheService> log)
     {
-        _cache = cache;
-        _log   = log;
+        _cache       = cache;
+        _hotCache    = hotCache;
+        _log         = log;
+        _hotCacheTtl = TimeSpan.FromSeconds(Math.Max(1, settings.Value.LocalHotCacheSeconds));
     }
 
     /// <inheritdoc />
@@ -26,9 +36,17 @@ public sealed class MarketCacheService : IMarketCacheService
     {
         try
         {
+            if (_hotCache.TryGetValue<T>(key, out var hot) && hot is not null)
+                return hot;
+
             var bytes = await _cache.GetAsync(key, ct);
             if (bytes is null) return null;
-            return JsonSerializer.Deserialize<T>(bytes);
+
+            var value = JsonSerializer.Deserialize<T>(bytes);
+            if (value is not null)
+                _hotCache.Set(key, value, _hotCacheTtl);
+
+            return value;
         }
         catch (Exception ex)
         {
@@ -42,6 +60,8 @@ public sealed class MarketCacheService : IMarketCacheService
     {
         try
         {
+            _hotCache.Set(key, value, MemoryTtlFor(ttl));
+
             var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
             await _cache.SetAsync(key, bytes,
                 new DistributedCacheEntryOptions
@@ -75,6 +95,8 @@ public sealed class MarketCacheService : IMarketCacheService
                     AbsoluteExpirationRelativeToNow = ttl,
                 },
                 ct);
+
+            _hotCache.Set(key, value, MemoryTtlFor(ttl));
             return true;
         }
         catch (Exception ex)
@@ -90,6 +112,7 @@ public sealed class MarketCacheService : IMarketCacheService
     {
         try
         {
+            _hotCache.Remove(key);
             await _cache.RemoveAsync(key, ct);
         }
         catch (Exception ex)
@@ -127,5 +150,10 @@ public sealed class MarketCacheService : IMarketCacheService
             // Remove from in-flight map regardless of success or failure
             _inflight.TryRemove(new KeyValuePair<string, Lazy<Task<object>>>(key, lazy));
         }
+    }
+
+    private TimeSpan MemoryTtlFor(TimeSpan ttl)
+    {
+        return ttl <= _hotCacheTtl ? ttl : _hotCacheTtl;
     }
 }

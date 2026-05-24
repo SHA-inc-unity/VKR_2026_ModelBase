@@ -133,6 +133,8 @@ internal sealed class FakeMarketConfigService : IMarketConfigService
 
 internal sealed class FakeChartService : IChartService
 {
+    private static readonly long StableNowMs = DateTimeOffset.Parse("2026-05-24T03:45:00Z").ToUnixTimeMilliseconds();
+
     public Task<ServiceResult<ChartResponse>> GetChartAsync(
         string symbol, string timeframe, int limit, CancellationToken ct = default)
     {
@@ -147,7 +149,7 @@ internal sealed class FakeChartService : IChartService
             !CandleCountGrid.IsValid(limit, tf.Class))
             return Task.FromResult(ServiceResult<ChartResponse>.Fail($"INVALID_LIMIT: {limit}"));
 
-        var now    = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var now    = StableNowMs;
         var candles = Enumerable.Range(0, limit)
             .Select(i => new CandleDto(
                 T:  now - (long)(limit - 1 - i) * tf.StepMs,

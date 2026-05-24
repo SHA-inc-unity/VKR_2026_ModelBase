@@ -41,6 +41,8 @@ public static class ServiceCollectionExtensions
         services.Configure<AdminSettings>(
             configuration.GetSection("Admin"));
 
+        services.AddMemoryCache();
+
         var corsSettings = configuration.GetSection(CorsSettings.SectionName).Get<CorsSettings>() ?? new();
 
         services.AddCors(options =>

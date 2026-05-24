@@ -243,12 +243,14 @@ All `GET /api/v1/market/chart` requests pass through `ChartRequestQueue` — a s
 | --------- | ------ |
 | **Coalescing** | Identical `(symbol, timeframe, limit)` requests that arrive while one is already in-flight share a single downstream call. Only the creator talks to the data service; all other callers wait on the same `TaskCompletionSource`. |
 | **CT isolation** | Each caller passes its own `CancellationToken`. Cancelling one waiter does not affect the creator or other waiters (`WaitAsync(callerCt)` is per-waiter; the creator's `workCts` is independent). |
-| **Hot-window cache** | Latest chart windows are cached by `(symbol, timeframe, limit)`, so repeated requests like `ETHUSDT + 15m + 100` normally return from Redis/memory cache before queue/coalescing allocates new work. |
+| **Layered hot-window cache** | Latest chart windows use a short per-instance memory hot cache in front of the distributed cache, so repeated requests like `ETHUSDT + 15m + 100` usually avoid both Kafka and an extra Redis hop during bursts. |
+| **Cross-limit reuse** | If the exact `(symbol, timeframe, limit)` key is cold, `ChartService` can reuse a larger cached window from the same timeframe class and slice it down to the requested smaller limit. |
 | **Sync lazy hydrate** | For a known symbol/timeframe with a missing or incomplete local window, `ChartService` submits an `ingest` dataset job via `cmd.data.dataset.jobs.start` and waits on `cmd.data.dataset.jobs.get` until terminal status before re-reading rows in the same HTTP request. This reuses the data-service queue with 4 ingest slots instead of bypassing it. |
 | **Per-table ingest serialization** | Because the hydrate path now goes through `dataset_jobs`, two concurrent chart hydrates for the same dataset table cannot execute together: `DatasetJobRunner` keeps the global ingest cap at 4 and serializes active jobs by `target_table`. |
 | **Ingest error cooldown** | If a synchronous or background ingest fails, the ingest lock is replaced with a short error cooldown, so the next request can retry after `IngestErrorCooldownSeconds` instead of waiting for the full lock TTL. |
 | **Claim-check detection** | `DataServiceClient` distinguishes `claim_check` from an empty rows result, so `ChartService` does not trigger a false ingest retry. Direct claim-check fetch is not implemented yet; the client currently gets a retry/pending scenario and should reduce `limit` if needed. |
 | **Window-scoped coverage** | `ChartService` computes coverage over `limit × IngestWindowMultiplier` candles (not the full table) to avoid a permanently-full coverage flag on large datasets. |
+| **HTTP validators** | `GET /api/v1/market/chart` now emits status-aware `Cache-Control`, weak `ETag`, and `Last-Modified`, so browser/mobile pollers can use conditional GET and avoid re-downloading unchanged candle windows. |
 
 **Queue settings** (in `appsettings.json` / `MarketSettings`):
 
@@ -258,6 +260,7 @@ All `GET /api/v1/market/chart` requests pass through `ChartRequestQueue` — a s
 | `QueueHeavyConcurrency` | `3` | Reserved capacity for "heavy" timeframes |
 | `QueueMaxWaitSeconds` | `5` | Hard timeout waiting for the semaphore |
 | `IngestErrorCooldownSeconds` | `30` | How long to pause after an ingest error |
+| `LocalHotCacheSeconds` | `5` | Per-instance memory TTL in front of distributed market cache |
 
 ---
 

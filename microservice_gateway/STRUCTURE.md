@@ -50,13 +50,13 @@
 | Файл | Назначение |
 | ---- | ---------- |
 | `IChartService.cs` | интерфейс chart-сервиса |
-| `ChartService.cs` | ядро: кэш → coverage → sync lazy ingest missing window → rows; при первом запросе по валидному symbol/timeframe пытается синхронно догрузить нужный диапазон и только потом вернуть candles. Lazy hydrate не шлёт прямой `cmd.data.dataset.ingest`, а создаёт queued ingest-job через `DataServiceClient`, поэтому попадает в data-service ingest queue (cap 4, per-table serialization). `pending`/`partial` остаются fallback-состояниями при занятом ingest-lock, timeout/error ingest или `claim_check`; ingest-lock при ошибке переводится в cooldown. |
-| `ChartRequestQueue.cs` | coalescing-декоратор: идентичные `(symbol, timeframe, limit)` запросы разделяют один downstream-вызов; каждый caller имеет независимый `CancellationToken` |
-| `IMarketCacheService.cs` / `MarketCacheService.cs` | Redis-кэш с stampede protection (`SetIfNotExistsAsync`) |
+| `ChartService.cs` | ядро: layered cache → coverage → sync lazy ingest missing window → rows; умеет reuse-ить bigger cached chart window для smaller `limit`, чтобы не ходить в Kafka/data-service на каждый соседний polling size. Lazy hydrate не шлёт прямой `cmd.data.dataset.ingest`, а создаёт queued ingest-job через `DataServiceClient`, поэтому попадает в data-service ingest queue (cap 4, per-table serialization). `pending`/`partial` остаются fallback-состояниями при занятом ingest-lock, timeout/error ingest или `claim_check`; ingest-lock при ошибке переводится в cooldown. |
+| `ChartRequestQueue.cs` | coalescing-декоратор: идентичные `(symbol, timeframe, limit)` запросы разделяют один downstream-вызов; каждый caller имеет независимый `CancellationToken`, а fast-path сначала проверяет hot cache до выделения inflight entry |
+| `IMarketCacheService.cs` / `MarketCacheService.cs` | layered market cache: short per-instance memory hot cache поверх `IDistributedCache` + stampede protection (`SetIfNotExistsAsync`, `GetOrCreateAsync`) |
 | `IMarketConfigService.cs` / `MarketConfigService.cs` | конфиг символов и таймфреймов |
 | `IBybitSymbolProvider.cs` / `BybitSymbolProvider.cs` | получение активных символов с Bybit |
 | `IDataServiceClient.cs` / `DataServiceClient.cs` | Kafka-клиент к data-сервису; различает inline rows и `claim_check`, а lazy hydrate выполняет через `cmd.data.dataset.jobs.start` + polling `cmd.data.dataset.jobs.get` до terminal status. Это направляет chart-triggered ingest в тот же `DatasetJobRunner`, что и admin queue, с общим cap `4` и per-table lock по `target_table`. |
-| `MarketSettings.cs` | strongly-typed конфиг market-блока (queue-поля + `SnapshotCacheTtlSeconds` для public snapshot routes) |
+| `MarketSettings.cs` | strongly-typed конфиг market-блока (queue-поля, `SnapshotCacheTtlSeconds` для public snapshot routes и `LocalHotCacheSeconds` для per-instance market hot cache) |
 | `TimeframeMap.cs` | маппинг таймфреймов ID → Bybit interval |
 | `CandleCountGrid.cs` | валидация и маппинг количества свечей |
 | `DataTopics.cs` | Kafka topic-константы для chart-path: coverage/rows и dataset job control (`jobs.start`, `jobs.get`) |

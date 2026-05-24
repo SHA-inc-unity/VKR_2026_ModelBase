@@ -258,6 +258,35 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
     }
 
     [Fact]
+    public async Task Chart_response_sets_cache_control_and_etag_headers()
+    {
+        var response = await _client.GetAsync("/api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        response.Headers.CacheControl.Should().NotBeNull();
+        response.Headers.CacheControl!.Public.Should().BeTrue();
+        response.Headers.CacheControl.MaxAge.Should().Be(TimeSpan.FromSeconds(10));
+        response.Headers.ETag.Should().NotBeNull();
+        response.Headers.ETag!.IsWeak.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Chart_if_none_match_returns_304_for_same_cached_payload()
+    {
+        using var first = await _client.GetAsync("/api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200");
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        first.Headers.ETag.Should().NotBeNull();
+
+        using var secondRequest = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200");
+        secondRequest.Headers.IfNoneMatch.Add(first.Headers.ETag!);
+
+        using var second = await _client.SendAsync(secondRequest);
+        second.StatusCode.Should().Be(HttpStatusCode.NotModified);
+    }
+
+    [Fact]
     public async Task Chart_valid_request_returns_candles()
     {
         var response = await _client.GetAsync("/api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200");

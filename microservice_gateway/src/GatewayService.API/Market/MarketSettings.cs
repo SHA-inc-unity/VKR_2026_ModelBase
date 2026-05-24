@@ -41,6 +41,12 @@ public sealed class MarketSettings
     /// <summary>How long to cache the linear market snapshot / ticker feed (seconds).</summary>
     public int SnapshotCacheTtlSeconds { get; init; } = 30;
 
+    /// <summary>
+    /// Per-instance in-memory hot cache TTL (seconds) layered on top of the
+    /// distributed cache to reduce Redis round-trips for bursty read traffic.
+    /// </summary>
+    public int LocalHotCacheSeconds { get; init; } = 5;
+
     // ── Kafka timeouts ────────────────────────────────────────────────────
 
     /// <summary>Kafka request timeout for lightweight data operations (seconds).</summary>

@@ -5,6 +5,9 @@ using GatewayService.API.DTOs.Responses;
 using GatewayService.API.Market;
 using GatewayService.API.Middleware;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace GatewayService.API.Controllers;
 
@@ -243,6 +246,74 @@ public sealed class MarketController : ControllerBase
         if (!result.IsSuccess)
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid request", correlationId));
 
+        if (result.Value is null)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                ErrorResponse.ServiceUnavailable("market_chart", correlationId));
+        }
+
+        ApplyChartHttpCaching(result.Value);
+
+        var etag = BuildChartEtag(result.Value);
+        Response.Headers[HeaderNames.ETag] = etag;
+
+        if (result.Value.Meta.ToMs > 0)
+        {
+            Response.Headers[HeaderNames.LastModified] =
+                DateTimeOffset.FromUnixTimeMilliseconds(result.Value.Meta.ToMs).ToString("R");
+        }
+
+        if (Request.Headers.TryGetValue(HeaderNames.IfNoneMatch, out var ifNoneMatch)
+            && ifNoneMatch.Any(value => string.Equals(value, etag, StringComparison.Ordinal)))
+        {
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
         return Ok(result.Value);
+    }
+
+    private void ApplyChartHttpCaching(ChartResponse response)
+    {
+        var maxAge = response.Status switch
+        {
+            "ok" when TimeframeMap.TryGetById(response.Timeframe, out var tfInfo)
+                => tfInfo.Class switch
+                {
+                    TimeframeClass.Heavy => 10,
+                    TimeframeClass.Medium => 30,
+                    TimeframeClass.Light => 60,
+                    _ => 10,
+                },
+            "partial" => 3,
+            "pending" => 1,
+            _ => 3,
+        };
+
+        var staleWhileRevalidate = response.Status switch
+        {
+            "ok" => Math.Max(maxAge * 3, 30),
+            "partial" => 12,
+            "pending" => 4,
+            _ => 12,
+        };
+
+        Response.Headers[HeaderNames.CacheControl] =
+            $"public, max-age={maxAge}, stale-while-revalidate={staleWhileRevalidate}";
+    }
+
+    private static string BuildChartEtag(ChartResponse response)
+    {
+        var seed = string.Join(':',
+            response.Symbol,
+            response.Timeframe,
+            response.Limit,
+            response.Status,
+            response.Meta.Available,
+            response.Meta.FromMs,
+            response.Meta.ToMs,
+            response.RetryAfterMs ?? 0);
+
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(seed));
+        return $"W/\"{System.Convert.ToHexString(hash)}\"";
     }
 }

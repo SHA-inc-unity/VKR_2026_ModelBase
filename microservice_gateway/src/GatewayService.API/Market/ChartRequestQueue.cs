@@ -88,11 +88,12 @@ public sealed class ChartRequestQueue : IChartService
 
         // ── 2. Fast-path cache check (avoids TCS allocation on cache hit) ─
 
-        if (TimeframeMap.TryGetById(timeframe, out var tfInfo))
+        if (TimeframeMap.TryGetById(normalizedTf, out var tfInfo))
         {
             var cacheKey = string.Format(
                 ChartCacheKeyFmt, normalizedSymbol, tfInfo.BybitInterval, limit);
-            var cached = await _cache.GetAsync<ChartResponse>(cacheKey, ct);
+            var cached = await _cache.GetAsync<ChartResponse>(cacheKey, ct)
+                ?? await _inner.TryGetCachedChartAsync(normalizedSymbol, tfInfo, limit, ct);
             if (cached is not null)
             {
                 _log.LogDebug("[queue:cache-hit] {Key}", requestKey);
@@ -175,7 +176,7 @@ public sealed class ChartRequestQueue : IChartService
             _log.LogDebug("[queue:downstream-start] {Key}", requestKey);
 
             var result = await _inner.GetChartAsync(
-                normalizedSymbol, timeframe, limit, workCts.Token);
+                normalizedSymbol, normalizedTf, limit, workCts.Token);
 
             downstreamSw.Stop();
             _log.LogInformation(
