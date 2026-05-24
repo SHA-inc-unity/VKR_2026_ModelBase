@@ -77,6 +77,7 @@
 | `GET /api/v1/market/top-movers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/chart` | status-dependent cache policy: `ok` uses short public cache (`Heavy=10s`, `Medium=30s`, `Light=60s`), `partial=3s`, `pending=1s`; weak `ETag` + `If-None-Match` are enabled |
 | `POST /api/v1/market/quotes/batch` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
+| `GET /api/v1/market/quotes/realtime` | `Cache-Control: public, max-age=1, stale-while-revalidate=2`; watcher-backed live price with snapshot fallback |
 | `GET /api/v1/market/converter/quote` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/v1/market/convert` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/news` and `GET /api/news/home` | `Cache-Control: public, max-age=30, stale-while-revalidate=300` |
@@ -268,6 +269,7 @@ UID в теле запроса не используется как источн
 | GET | `/api/v1/market/trending` | None | curated backend feed для home trending cards |
 | GET | `/api/v1/market/top-movers` | None | pre-ranked backend feed по 24h move |
 | POST | `/api/v1/market/quotes/batch` | None | batch quote refresh по списку symbol-ов |
+| GET | `/api/v1/market/quotes/realtime` | None | live quote refresh через watcher rows с snapshot fallback |
 | GET | `/api/v1/market/converter/quote` | None | quote для asset-to-asset conversion |
 | GET | `/api/v1/market/convert` | None | frontend-compatible converter alias (`from/to/sourceLabel`) |
 | GET | `/api/v1/market/config` | None | конфиг market UI |
@@ -1049,6 +1051,79 @@ Content-Type: application/json
 - endpoint не требует page/sort/search и подходит для widget-level polling;
 - `snapshotId` можно использовать как cheap freshness marker между короткими polling-циклами;
 - route рассчитан на самый короткий public cache среди market snapshot endpoints: `max-age=10, stale-while-revalidate=20`.
+
+---
+
+## GET /api/v1/market/quotes/realtime
+
+### Realtime Quotes: назначение
+
+Возвращает live price для symbol set из watcher-backed `market_watch_live`, но не ломает frontend, если live row временно недоступен: в таком случае gateway возвращает тот же symbol из snapshot path и помечает payload как fallback.
+
+### Realtime Quotes: request
+
+```http
+GET /api/v1/market/quotes/realtime?symbols=BTCUSDT,ETHUSDT&exchange=bybit
+```
+
+Поддерживаются оба варианта:
+
+- `symbols=BTCUSDT,ETHUSDT,...` для batch refresh;
+- `symbol=BTCUSDT` как single-symbol alias.
+
+`exchange` optional. Если передан, gateway пытается выбрать live row именно этой биржи; если live row отсутствует, symbol всё равно может вернуться через snapshot fallback.
+
+### Realtime Quotes: response example
+
+```json
+{
+  "items": [
+    {
+      "symbol": "BTCUSDT",
+      "price": 106712.25,
+      "change24h": 2.5,
+      "high24h": 107200,
+      "low24h": 103800,
+      "volume24h": 1250000000,
+      "exchange": "bybit",
+      "realtimeSymbol": "BTCUSDT",
+      "lagMs": 250,
+      "source": "market-watch-live",
+      "isFallback": false,
+      "updatedAt": "2026-05-24T03:45:12Z"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "price": 210,
+      "change24h": 1.8,
+      "high24h": 214,
+      "low24h": 201,
+      "volume24h": 420000000,
+      "exchange": null,
+      "realtimeSymbol": null,
+      "lagMs": null,
+      "source": "snapshot-fallback",
+      "isFallback": true,
+      "updatedAt": "2026-05-24T03:45:00Z"
+    }
+  ],
+  "missingSymbols": ["DOGEUSDT"],
+  "meta": {
+    "generatedAt": "2026-05-24T03:45:12Z",
+    "updatedAt": "2026-05-24T03:45:12Z",
+    "degradedSections": [],
+    "degradedFields": ["realtimePrice"]
+  }
+}
+```
+
+### Realtime Quotes: frontend behavior
+
+- `source = "market-watch-live"` означает, что `price` пришёл из realtime watcher rows;
+- `source = "snapshot-fallback"` означает, что live row не найден или временно недоступен, поэтому `price` взят из snapshot-backed market path;
+- `lagMs` имеет смысл только для live row и показывает freshness gap между watcher row и текущим временем сервиса;
+- `missingSymbols` остаётся мягким сигналом: symbol не найден ни в live rows, ни в snapshot universe;
+- route выставляет `Cache-Control: public, max-age=1, stale-while-revalidate=2`, чтобы frontend мог делать короткий polling без лишней full-cache miss нагрузки на gateway.
 
 ---
 

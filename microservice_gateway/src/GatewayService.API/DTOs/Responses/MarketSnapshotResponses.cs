@@ -41,6 +41,13 @@ public sealed record MarketBatchQuotesResponse
     public FrontendResponseMetaDto Meta { get; init; } = new();
 }
 
+public sealed record MarketRealtimeQuotesResponse
+{
+    public IReadOnlyList<MarketRealtimeQuoteDto> Items { get; init; } = [];
+    public IReadOnlyList<string> MissingSymbols { get; init; } = [];
+    public FrontendResponseMetaDto Meta { get; init; } = new();
+}
+
 public sealed record MarketQuoteDto
 {
     public string Symbol { get; init; } = string.Empty;
@@ -49,6 +56,22 @@ public sealed record MarketQuoteDto
     public decimal High24h { get; init; }
     public decimal Low24h { get; init; }
     public decimal Volume24h { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
+
+public sealed record MarketRealtimeQuoteDto
+{
+    public string Symbol { get; init; } = string.Empty;
+    public decimal Price { get; init; }
+    public decimal Change24h { get; init; }
+    public decimal High24h { get; init; }
+    public decimal Low24h { get; init; }
+    public decimal Volume24h { get; init; }
+    public string? Exchange { get; init; }
+    public string? RealtimeSymbol { get; init; }
+    public long? LagMs { get; init; }
+    public string Source { get; init; } = string.Empty;
+    public bool IsFallback { get; init; }
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 

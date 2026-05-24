@@ -181,6 +181,7 @@ internal sealed class FakeChartService : IChartService
 internal sealed class FakeMarketServiceClient : IMarketServiceClient
 {
     private static readonly DateTimeOffset UpdatedAt = DateTimeOffset.Parse("2026-05-24T03:45:00Z");
+    private static readonly DateTimeOffset RealtimeUpdatedAt = DateTimeOffset.Parse("2026-05-24T03:45:12Z");
 
     private static readonly MarketTickerItemDto[] Items =
     [
@@ -354,6 +355,105 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
             {
                 GeneratedAt = UpdatedAt,
                 UpdatedAt = UpdatedAt,
+            }
+        }));
+    }
+
+    public Task<ServiceResult<MarketRealtimeQuotesResponse>> GetRealtimeQuotesAsync(IReadOnlyList<string> symbols, string? exchange = null, CancellationToken ct = default)
+    {
+        var requestedSymbols = (symbols ?? [])
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (requestedSymbols.Length == 0)
+        {
+            return Task.FromResult(ServiceResult<MarketRealtimeQuotesResponse>.Fail("At least one symbol is required"));
+        }
+
+        var normalizedExchange = string.IsNullOrWhiteSpace(exchange)
+            ? null
+            : exchange.Trim().ToLowerInvariant();
+
+        var items = new List<MarketRealtimeQuoteDto>(requestedSymbols.Length);
+        foreach (var symbol in requestedSymbols)
+        {
+            var snapshot = Items.FirstOrDefault(item => string.Equals(item.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+            if (snapshot is null)
+            {
+                continue;
+            }
+
+            if (string.Equals(symbol, "BTCUSDT", StringComparison.OrdinalIgnoreCase)
+                && (normalizedExchange is null || normalizedExchange == "bybit"))
+            {
+                items.Add(new MarketRealtimeQuoteDto
+                {
+                    Symbol = symbol,
+                    Price = 106712.25m,
+                    Change24h = snapshot.Change24h,
+                    High24h = snapshot.High24h,
+                    Low24h = snapshot.Low24h,
+                    Volume24h = snapshot.Volume24h,
+                    Exchange = "bybit",
+                    RealtimeSymbol = symbol,
+                    LagMs = 250,
+                    Source = "market-watch-live",
+                    IsFallback = false,
+                    UpdatedAt = RealtimeUpdatedAt,
+                });
+                continue;
+            }
+
+            if (string.Equals(symbol, "ETHUSDT", StringComparison.OrdinalIgnoreCase)
+                && (normalizedExchange is null || normalizedExchange == "bybit"))
+            {
+                items.Add(new MarketRealtimeQuoteDto
+                {
+                    Symbol = symbol,
+                    Price = 4261.75m,
+                    Change24h = snapshot.Change24h,
+                    High24h = snapshot.High24h,
+                    Low24h = snapshot.Low24h,
+                    Volume24h = snapshot.Volume24h,
+                    Exchange = "bybit",
+                    RealtimeSymbol = symbol,
+                    LagMs = 400,
+                    Source = "market-watch-live",
+                    IsFallback = false,
+                    UpdatedAt = RealtimeUpdatedAt,
+                });
+                continue;
+            }
+
+            items.Add(new MarketRealtimeQuoteDto
+            {
+                Symbol = snapshot.Symbol,
+                Price = snapshot.Price,
+                Change24h = snapshot.Change24h,
+                High24h = snapshot.High24h,
+                Low24h = snapshot.Low24h,
+                Volume24h = snapshot.Volume24h,
+                Source = "snapshot-fallback",
+                IsFallback = true,
+                UpdatedAt = snapshot.UpdatedAt,
+            });
+        }
+
+        var missing = requestedSymbols
+            .Where(symbolValue => items.All(item => !string.Equals(item.Symbol, symbolValue, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+
+        return Task.FromResult(ServiceResult<MarketRealtimeQuotesResponse>.Ok(new MarketRealtimeQuotesResponse
+        {
+            Items = items,
+            MissingSymbols = missing,
+            Meta = new FrontendResponseMetaDto
+            {
+                GeneratedAt = RealtimeUpdatedAt,
+                UpdatedAt = items.Count > 0 ? items.Max(static item => item.UpdatedAt) : UpdatedAt,
+                DegradedFields = items.Any(static item => item.IsFallback) ? ["realtimePrice"] : [],
             }
         }));
     }

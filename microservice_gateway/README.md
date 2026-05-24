@@ -86,6 +86,7 @@ API Gateway  :7520 (host) -> :5020 (container)
   ├── GET /api/v1/market/tickers  ← list-ready market snapshot cards
   ├── GET /api/v1/market/trending, /api/v1/market/top-movers ← backend-owned home feeds
   ├── POST /api/v1/market/quotes/batch ← lightweight quote refresh by symbol set
+  ├── GET /api/v1/market/quotes/realtime ← watcher-backed live price with snapshot fallback
   ├── GET /api/v1/market/convert ← frontend-friendly convert alias (`from/to/sourceLabel`)
   ├── GET /api/v1/market/converter/quote ← asset conversion quote from snapshot prices
     ├── GET /api/v1/market/config ← Market config (symbols, timeframes, candle grids)
@@ -123,6 +124,7 @@ Gateway now also exposes a lightweight frontend-contract layer for routes that d
 | GET | `/api/v1/market/trending` | None | Dedicated backend feed for home Trending cards |
 | GET | `/api/v1/market/top-movers` | None | Dedicated backend feed for home Top movers cards |
 | POST | `/api/v1/market/quotes/batch` | None | Lightweight quote refresh for a symbol set |
+| GET | `/api/v1/market/quotes/realtime` | None | Watcher-backed live quote refresh with snapshot fallback and 1-second public cache |
 | GET | `/api/v1/market/convert` | None | Frontend-compatible converter alias using `from/to/sourceLabel` |
 | GET | `/api/v1/market/converter/quote` | None | Asset conversion quote derived from snapshot prices |
 | GET | `/api/v1/market/config` | None | Symbols, timeframes, candle-count grids, defaults |
@@ -264,6 +266,19 @@ All `GET /api/v1/market/chart` requests pass through `ChartRequestQueue` — a s
 
 ---
 
+## Realtime Quotes Path
+
+`GET /api/v1/market/quotes/realtime` closes the remaining gap between snapshot-backed market cards and frontend polling for live price.
+
+| Behaviour | Detail |
+| --------- | ------ |
+| **Live source** | Gateway asks data-service watcher rows (`cmd.data.market_watcher.rows`) for the latest `last_price` per symbol, optionally narrowed by `exchange`. |
+| **Snapshot fallback** | If watcher rows are missing, timed out, or do not contain a requested symbol, gateway still returns the symbol from the snapshot path with `source = snapshot-fallback` and `isFallback = true`. |
+| **Merged payload** | Live rows provide `price`, `exchange`, `realtimeSymbol`, `lagMs`, while 24h stats (`change24h`, `high24h`, `low24h`, `volume24h`) still come from the existing snapshot universe. |
+| **Short HTTP cache** | The route emits `Cache-Control: public, max-age=1, stale-while-revalidate=2`, so multiple clients can poll frequently without turning every request into an origin miss. |
+
+---
+
 ## Deployment Automation
 
 Root-level scripts in [../deploy/](../deploy/) automate gateway deployment and reconciliation.
@@ -341,6 +356,7 @@ tests/
 - [ ] `GET /api/v1/market/overview` → 200 public payload with snapshot-derived metrics, `meta.generatedAt`, `meta.updatedAt`
 - [ ] `GET /api/v1/market/tickers?page=1&pageSize=25` → 200, `items`, `total`, `meta.updatedAt`
 - [ ] `POST /api/v1/market/quotes/batch` → 200, returns `items` and `missingSymbols`
+- [ ] `GET /api/v1/market/quotes/realtime?symbols=BTCUSDT,ETHUSDT&exchange=bybit` → 200, live items expose `source=market-watch-live`, `exchange`, `lagMs`
 - [ ] `GET /api/v1/market/trending?limit=5` and `GET /api/v1/market/top-movers?limit=5` → 200 feed payloads with same ticker card shape
 - [ ] `GET /api/v1/market/convert?from=BTC&to=USDT&amount=1` → 200 quote payload with `sourceLabel`
 - [ ] `GET /api/v1/market/converter/quote?fromAsset=BTC&toAsset=USDT&amount=1` → 200 legacy-compatible quote payload

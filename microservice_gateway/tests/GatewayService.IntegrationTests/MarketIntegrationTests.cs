@@ -189,6 +189,37 @@ public sealed class MarketIntegrationTests : IClassFixture<GatewayTestWebAppFact
         body.GetProperty("missingSymbols").GetArrayLength().Should().Be(0);
     }
 
+    [Fact]
+    public async Task Realtime_quotes_route_returns_live_price_from_market_watcher_surface()
+    {
+        var response = await _client.GetAsync("/api/v1/market/quotes/realtime?symbols=BTCUSDT,ETHUSDT&exchange=bybit");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        response.Headers.CacheControl.Should().NotBeNull();
+        response.Headers.CacheControl!.Public.Should().BeTrue();
+        response.Headers.CacheControl.MaxAge.Should().Be(TimeSpan.FromSeconds(1));
+        body.GetProperty("items").GetArrayLength().Should().Be(2);
+        body.GetProperty("items")[0].GetProperty("source").GetString().Should().Be("market-watch-live");
+        body.GetProperty("items")[0].GetProperty("exchange").GetString().Should().Be("bybit");
+        body.GetProperty("items")[0].GetProperty("lagMs").GetInt64().Should().Be(250);
+        body.GetProperty("items")[0].GetProperty("price").GetDecimal().Should().Be(106712.25m);
+    }
+
+    [Fact]
+    public async Task Realtime_quotes_route_falls_back_to_snapshot_when_live_row_missing()
+    {
+        var response = await _client.GetAsync("/api/v1/market/quotes/realtime?symbol=SOLUSDT");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("items").GetArrayLength().Should().Be(1);
+        body.GetProperty("items")[0].GetProperty("source").GetString().Should().Be("snapshot-fallback");
+        body.GetProperty("items")[0].GetProperty("isFallback").GetBoolean().Should().BeTrue();
+        body.GetProperty("items")[0].GetProperty("price").GetDecimal().Should().Be(210m);
+        body.GetProperty("meta").GetProperty("degradedFields")[0].GetString().Should().Be("realtimePrice");
+    }
+
     // ── GET /api/v1/market/converter/quote ───────────────────────────────
 
     [Fact]

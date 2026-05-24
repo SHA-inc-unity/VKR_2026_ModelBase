@@ -158,6 +158,34 @@ public sealed class MarketController : ControllerBase
         return Ok(result.Value);
     }
 
+    [HttpGet("quotes/realtime")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetRealtimeQuotes(
+        [FromQuery] string? symbols = null,
+        [FromQuery] string? symbol = null,
+        [FromQuery] string? exchange = null,
+        CancellationToken ct = default)
+    {
+        var requestedSymbols = string.IsNullOrWhiteSpace(symbols)
+            ? Array.Empty<string>()
+            : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        if (requestedSymbols.Length == 0 && !string.IsNullOrWhiteSpace(symbol))
+        {
+            requestedSymbols = [symbol.Trim()];
+        }
+
+        var result = await _market.GetRealtimeQuotesAsync(requestedSymbols, exchange, ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid realtime quotes request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=1, stale-while-revalidate=2";
+        return Ok(result.Value);
+    }
+
     [HttpGet("converter/quote")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
