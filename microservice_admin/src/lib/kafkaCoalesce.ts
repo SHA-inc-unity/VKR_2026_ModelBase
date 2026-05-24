@@ -36,6 +36,7 @@ const COALESCE_TTL_MS: Record<string, number> = {
   // Catalogue — refreshed at most every couple of seconds is plenty for UI
   'cmd.data.dataset.list_tables':      2_000,
   'cmd.data.dataset.coverage':         2_000,
+  'cmd.data.dataset.series':           1_000,
   'cmd.data.dataset.constants':       30_000,
   'cmd.data.dataset.table_schema':    10_000,
   // Analitic session metadata — same as coverage

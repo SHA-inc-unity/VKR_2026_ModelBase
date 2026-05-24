@@ -77,6 +77,17 @@ public interface IDataServiceClient
         string symbol, string bybitInterval, CancellationToken ct = default);
 
     /// <summary>
+    /// Fetches the newest fixed-width chart window anchored at the latest
+    /// stored candle for the given symbol/timeframe.
+    /// </summary>
+    Task<RowsResult> GetLatestWindowRowsAsync(
+        string symbol,
+        string bybitInterval,
+        long stepMs,
+        int limit,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Fetches OHLCV rows from the given table for the specified time range.
     /// The <paramref name="limit"/> parameter caps the data-service response so the
     /// payload stays under the Kafka message-size threshold.

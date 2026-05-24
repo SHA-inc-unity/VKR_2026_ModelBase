@@ -308,6 +308,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataDatasetTimestamps  => await HandleTimestampsAsync(payload, ct),
             Topics.CmdDataDatasetMissing     => await HandleFindMissingAsync(payload, ct),
             Topics.CmdDataDatasetRows        => await HandleRowsAsync(payload, replyTo, correlationId, ct),
+            Topics.CmdDataDatasetLatestRows  => await HandleLatestRowsAsync(payload, replyTo, correlationId, ct),
             Topics.CmdDataDatasetExport      => await HandleExportAsync(payload, replyTo, correlationId, ct),
             Topics.CmdDataDatasetExportFull  => await HandleExportFullAsync(payload, ct),
             Topics.CmdDataDatasetSchema      => await HandleTableSchemaAsync(payload, ct),
@@ -321,6 +322,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataDatasetColumnStats     => await HandleColumnStatsAsync(payload, ct),
             Topics.CmdDataDatasetColumnHistogram => await HandleColumnHistogramAsync(payload, ct),
             Topics.CmdDataDatasetBrowse          => await HandleBrowseAsync(payload, ct),
+            Topics.CmdDataDatasetSeries          => await HandleSeriesAsync(payload, ct),
             Topics.CmdDataDatasetComputeFeatures => await HandleComputeFeaturesAsync(payload, ct),
             Topics.CmdDataDatasetDetectAnomalies => await HandleDetectAnomaliesAsync(payload, ct),
             Topics.CmdDataDatasetCleanPreview    => await HandleCleanPreviewAsync(payload, ct),
@@ -551,6 +553,45 @@ public sealed partial class KafkaConsumerService : BackgroundService
 
         var startMs = TryGetInt64(p, "start_ms");
         var endMs   = TryGetInt64(p, "end_ms");
+        var includeRows = !p.TryGetProperty("include_rows", out var includeRowsEl) ||
+            includeRowsEl.ValueKind != JsonValueKind.False;
+
+        if (!includeRows)
+        {
+            var bounds = await _repo.GetBoundsIfExistsAsync(table, ct);
+            if (bounds is null)
+            {
+                return new
+                {
+                    exists       = false,
+                    table_name   = table,
+                    rows         = 0L,
+                    rows_known   = false,
+                    expected     = 0L,
+                    coverage_pct = (double?)null,
+                    gaps         = (long?)null,
+                    min_ts_ms    = (long?)null,
+                    max_ts_ms    = (long?)null,
+                    date_from    = (string?)null,
+                    date_to      = (string?)null,
+                };
+            }
+
+            return new
+            {
+                exists       = true,
+                table_name   = table,
+                rows         = 0L,
+                rows_known   = false,
+                expected     = 0L,
+                coverage_pct = (double?)null,
+                gaps         = (long?)null,
+                min_ts_ms    = bounds.Value.MinTsMs,
+                max_ts_ms    = bounds.Value.MaxTsMs,
+                date_from    = FormatDate(bounds.Value.MinTsMs),
+                date_to      = FormatDate(bounds.Value.MaxTsMs),
+            };
+        }
 
         var cov = await _repo.GetCoverageIfExistsAsync(table, ct);
         if (cov is null)
@@ -653,16 +694,45 @@ public sealed partial class KafkaConsumerService : BackgroundService
         var table   = TryGetString(p, "table");
         var startMs = TryGetInt64(p, "start_ms");
         var endMs   = TryGetInt64(p, "end_ms");
+        var limit   = TryGetInt64(p, "limit");
         if (string.IsNullOrEmpty(table) || startMs is null || endMs is null)
             return new { error = "missing fields: table, start_ms, end_ms" };
 
-        var rows = await _repo.FetchRowsAsync(table, startMs.Value, endMs.Value, ct);
+        var rows = await _repo.FetchRowsAsync(
+            table,
+            startMs.Value,
+            endMs.Value,
+            limit is long requestedLimit ? (int?)requestedLimit : null,
+            ct);
         var json = JsonSerializer.SerializeToUtf8Bytes(new { rows });
         if (json.Length > InlinePayloadLimit)
         {
             var claim = await _minio.PutBytesAsync(json, contentType: "application/json", ct: ct);
             return new { claim_check = claim };
         }
+        return new { rows };
+    }
+
+    private async Task<object> HandleLatestRowsAsync(
+        JsonElement p, string replyTo, string correlationId, CancellationToken ct)
+    {
+        var table  = TryGetString(p, "table");
+        var stepMs = TryGetInt64(p, "step_ms");
+        var limit  = TryGetInt64(p, "limit");
+        if (string.IsNullOrEmpty(table) || stepMs is null || limit is null)
+            return new { error = "missing fields: table, step_ms, limit" };
+
+        if (stepMs.Value <= 0 || limit.Value <= 0)
+            return new { error = "step_ms and limit must be positive" };
+
+        var rows = await _repo.FetchLatestWindowRowsAsync(table, stepMs.Value, (int)limit.Value, ct);
+        var json = JsonSerializer.SerializeToUtf8Bytes(new { rows });
+        if (json.Length > InlinePayloadLimit)
+        {
+            var claim = await _minio.PutBytesAsync(json, contentType: "application/json", ct: ct);
+            return new { claim_check = claim };
+        }
+
         return new { rows };
     }
 
@@ -1586,6 +1656,50 @@ public sealed partial class KafkaConsumerService : BackgroundService
         catch (Exception ex)
         {
             _log.LogError(ex, "column_histogram failed for {Table}.{Column}", table, column);
+            return new { error = ex.Message };
+        }
+    }
+
+    private async Task<object> HandleSeriesAsync(JsonElement payload, CancellationToken ct)
+    {
+        var table = TryGetString(payload, "table");
+        var column = TryGetString(payload, "column");
+        if (string.IsNullOrWhiteSpace(table)) return new { error = "missing field: table" };
+        if (string.IsNullOrWhiteSpace(column)) return new { error = "missing field: column" };
+
+        var maxPoints = (int)(TryGetInt64(payload, "max_points") ?? 600L);
+        var startMs = TryGetInt64(payload, "start_ms");
+        var endMs = TryGetInt64(payload, "end_ms");
+
+        try
+        {
+            var series = await _repo.FetchSeriesAsync(
+                table,
+                column,
+                maxPoints,
+                startMs,
+                endMs,
+                ct);
+
+            return new
+            {
+                table,
+                column,
+                max_points = maxPoints,
+                source_rows = series.SourceRows,
+                start_ms = series.StartMs,
+                end_ms = series.EndMs,
+                downsampled = series.SourceRows > series.Points.Count,
+                points = series.Points,
+            };
+        }
+        catch (ArgumentException ex)
+        {
+            return new { error = ex.Message };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "series failed for {Table}.{Column}", table, column);
             return new { error = ex.Message };
         }
     }

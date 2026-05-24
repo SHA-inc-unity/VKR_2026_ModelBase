@@ -40,6 +40,7 @@ namespace GatewayService.API.Controllers;
 ///   POST /api/admin/dataset/column-stats          → cmd.data.dataset.column_stats
 ///   POST /api/admin/dataset/column-histogram      → cmd.data.dataset.column_histogram
 ///   POST /api/admin/dataset/browse                → cmd.data.dataset.browse
+///   POST /api/admin/dataset/series                → cmd.data.dataset.series
 ///   POST /api/admin/dataset/compute-features      → cmd.data.dataset.compute_features
 ///   POST /api/admin/dataset/detect-anomalies      → cmd.data.dataset.detect_anomalies
 ///   POST /api/admin/dataset/clean-preview         → cmd.data.dataset.clean.preview
@@ -247,6 +248,10 @@ public sealed class AdminController : ControllerBase
     [HttpPost("dataset/browse")]
     public Task<IActionResult> DatasetBrowse([FromBody] JsonElement? body, CancellationToken ct)
         => Forward(AdminTopics.DatasetBrowse, body, ct);
+
+    [HttpPost("dataset/series")]
+    public Task<IActionResult> DatasetSeries([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.DatasetSeries, body, ct);
 
     [HttpPost("dataset/compute-features")]
     public Task<IActionResult> DatasetComputeFeatures([FromBody] JsonElement? body, CancellationToken ct)

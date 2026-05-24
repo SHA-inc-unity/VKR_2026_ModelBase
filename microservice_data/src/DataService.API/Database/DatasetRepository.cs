@@ -201,6 +201,41 @@ public sealed partial class DatasetRepository
     }
 
     /// <summary>
+    /// Returns only the observed [minTsMs, maxTsMs] bounds for a table.
+    /// Uses index-friendly ORDER BY ... LIMIT 1 probes instead of a full COUNT(*).
+    /// Returns null when the table is missing or empty.
+    /// </summary>
+    public async Task<(long MinTsMs, long MaxTsMs)?> GetBoundsIfExistsAsync(
+        string tableName, CancellationToken ct = default)
+    {
+        if (!await TableExistsAsync(tableName, ct)) return null;
+
+        var tbl = Safe(tableName);
+        await using var conn = await _pg.OpenAsync(ct);
+
+        var min = await conn.QueryFirstOrDefaultAsync<DateTime?>(
+            new CommandDefinition(
+                $@"SELECT timestamp_utc AT TIME ZONE 'UTC'
+                   FROM ""{tbl}""
+                   ORDER BY timestamp_utc ASC
+                   LIMIT 1",
+                cancellationToken: ct));
+
+        if (min is null)
+            return null;
+
+        var max = await conn.QueryFirstAsync<DateTime>(
+            new CommandDefinition(
+                $@"SELECT timestamp_utc AT TIME ZONE 'UTC'
+                   FROM ""{tbl}""
+                   ORDER BY timestamp_utc DESC
+                   LIMIT 1",
+                cancellationToken: ct));
+
+        return (ToMs(min.Value), ToMs(max));
+    }
+
+    /// <summary>
     /// Coverage scoped to an explicit [startMs, endMs] window. Returns
     /// <c>(rowsInRange, expectedInRange, gaps)</c>; expected is computed via
     /// <c>generate_series</c> with the supplied step. Returns <c>null</c> if
@@ -265,10 +300,12 @@ public sealed partial class DatasetRepository
     // ── Rows ──────────────────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> FetchRowsAsync(
-        string tableName, long startMs, long endMs, CancellationToken ct = default)
+        string tableName, long startMs, long endMs, int? limit = null, CancellationToken ct = default)
     {
         var tbl = Safe(tableName);
         await using var conn = await _pg.OpenAsync(ct);
+        var limited = limit.GetValueOrDefault();
+        if (limited < 0) limited = 0;
         // SELECT * включает raw (8 колонок) и все feature-колонки (27),
         // плюс синтетическое timestamp_ms для Kafka-границы.
         var rows = await conn.QueryAsync(new CommandDefinition(
@@ -276,16 +313,202 @@ public sealed partial class DatasetRepository
                  (EXTRACT(EPOCH FROM timestamp_utc) * 1000)::bigint AS timestamp_ms
                FROM ""{tbl}""
                WHERE timestamp_utc >= @s AND timestamp_utc <= @e
-               ORDER BY timestamp_utc",
-            new { s = ToUtc(startMs), e = ToUtc(endMs) }, cancellationToken: ct));
-        return rows.Select(r =>
-        {
-            var dict = (IDictionary<string, object?>)r;
-            // timestamp_utc → timestamp_ms (контракт Kafka — unix milliseconds).
-            dict.Remove("timestamp_utc");
-            return (IReadOnlyDictionary<string, object?>)dict.AsReadOnly();
-        }).ToList();
+               ORDER BY timestamp_utc
+               LIMIT CASE WHEN @limit > 0 THEN @limit ELSE 2147483647 END",
+            new { s = ToUtc(startMs), e = ToUtc(endMs), limit = limited }, cancellationToken: ct));
+        return rows.Select(MapRow).ToList();
     }
+
+    /// <summary>
+    /// Returns the latest fixed-width window anchored at the newest timestamp
+    /// in the table. This avoids global COUNT/MIN/MAX scans for chart requests.
+    /// </summary>
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> FetchLatestWindowRowsAsync(
+        string tableName,
+        long stepMs,
+        int limit,
+        CancellationToken ct = default)
+    {
+        if (!await TableExistsAsync(tableName, ct))
+            return [];
+
+        if (stepMs <= 0)
+            throw new ArgumentOutOfRangeException(nameof(stepMs), "stepMs must be positive");
+
+        if (limit < 1)
+            return [];
+
+        var tbl = Safe(tableName);
+        await using var conn = await _pg.OpenAsync(ct);
+
+        var newest = await conn.QueryFirstOrDefaultAsync<DateTime?>(
+            new CommandDefinition(
+                $@"SELECT timestamp_utc
+                   FROM ""{tbl}""
+                   ORDER BY timestamp_utc DESC
+                   LIMIT 1",
+                cancellationToken: ct));
+
+        if (newest is null)
+            return [];
+
+        var endMs = ToMs(newest.Value);
+        var startMs = endMs - (long)(limit - 1) * stepMs;
+        return await FetchRowsAsync(tableName, startMs, endMs, limit, ct);
+    }
+
+    /// <summary>
+    /// Returns a compact time series for a numeric column. When the table has
+    /// more rows than <paramref name="maxPoints"/>, values are aggregated into
+    /// time buckets so the caller gets a stable chart payload instead of raw rows.
+    /// </summary>
+    public async Task<(
+        long SourceRows,
+        long? StartMs,
+        long? EndMs,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> Points)> FetchSeriesAsync(
+            string tableName,
+            string columnName,
+            int maxPoints,
+            long? startMs = null,
+            long? endMs = null,
+            CancellationToken ct = default)
+    {
+        if (!await TableExistsAsync(tableName, ct))
+            return (0L, null, null, []);
+
+        var tbl = Safe(tableName);
+        var col = Safe(columnName);
+        if (maxPoints < 1) maxPoints = 1;
+        if (maxPoints > 4000) maxPoints = 4000;
+
+        await using var conn = await _pg.OpenAsync(ct);
+
+        var rows = await conn.QueryAsync(
+            new CommandDefinition(
+                $@"WITH filtered AS (
+                                                SELECT timestamp_utc, ""{col}""::double precision AS value
+                                                FROM ""{tbl}""
+                                                WHERE ""{col}"" IS NOT NULL
+                          AND (@start_utc IS NULL OR timestamp_utc >= @start_utc)
+                          AND (@end_utc   IS NULL OR timestamp_utc <= @end_utc)
+                    ),
+                    bounds AS (
+                        SELECT
+                            MIN(timestamp_utc) AS min_ts,
+                            MAX(timestamp_utc) AS max_ts,
+                            COUNT(*)::bigint   AS row_count
+                        FROM filtered
+                    ),
+                    bucketed AS (
+                        SELECT
+                            CASE
+                                WHEN b.min_ts IS NULL OR b.max_ts IS NULL OR b.max_ts = b.min_ts THEN 0
+                                ELSE LEAST(
+                                    @bucket_count - 1,
+                                    FLOOR(
+                                        (EXTRACT(EPOCH FROM (f.timestamp_utc - b.min_ts)) * 1000.0)
+                                        / NULLIF(EXTRACT(EPOCH FROM (b.max_ts - b.min_ts)) * 1000.0, 0)
+                                        * @bucket_count
+                                    )::int
+                                )
+                            END AS bucket,
+                            f.timestamp_utc,
+                            f.value,
+                            b.row_count,
+                            b.min_ts,
+                            b.max_ts
+                        FROM filtered f
+                        CROSS JOIN bounds b
+                    ),
+                    aggregated AS (
+                        SELECT
+                            bucket,
+                            MAX(timestamp_utc) AS timestamp_utc,
+                            AVG(value)         AS avg_value,
+                            MIN(value)         AS min_value,
+                            MAX(value)         AS max_value,
+                            COUNT(*)::int      AS sample_count,
+                            MAX(row_count)     AS source_rows,
+                            MAX(min_ts)        AS min_ts,
+                            MAX(max_ts)        AS max_ts
+                        FROM bucketed
+                        GROUP BY bucket
+                    )
+                    SELECT
+                        (EXTRACT(EPOCH FROM timestamp_utc) * 1000)::bigint AS timestamp_ms,
+                        avg_value,
+                        min_value,
+                        max_value,
+                        sample_count,
+                        COALESCE(source_rows, 0)::bigint AS source_rows,
+                        CASE WHEN min_ts IS NULL THEN NULL ELSE (EXTRACT(EPOCH FROM min_ts) * 1000)::bigint END AS series_start_ms,
+                        CASE WHEN max_ts IS NULL THEN NULL ELSE (EXTRACT(EPOCH FROM max_ts) * 1000)::bigint END AS series_end_ms
+                    FROM aggregated
+                    ORDER BY bucket",
+                new
+                {
+                    start_utc = startMs is long s ? (DateTime?)ToUtc(s) : null,
+                    end_utc = endMs is long e ? (DateTime?)ToUtc(e) : null,
+                    bucket_count = maxPoints,
+                },
+                cancellationToken: ct));
+
+        long sourceRows = 0;
+        long? seriesStartMs = null;
+        long? seriesEndMs = null;
+        var points = new List<IReadOnlyDictionary<string, object?>>();
+
+        foreach (IDictionary<string, object?> raw in rows)
+        {
+            sourceRows = Math.Max(sourceRows, ToLong(raw.TryGetValue("source_rows", out var sr) ? sr : null));
+
+            var start = ToNullableLong(raw.TryGetValue("series_start_ms", out var ss) ? ss : null);
+            var end = ToNullableLong(raw.TryGetValue("series_end_ms", out var se) ? se : null);
+            if (start is not null)
+                seriesStartMs = seriesStartMs is null ? start : Math.Min(seriesStartMs.Value, start.Value);
+            if (end is not null)
+                seriesEndMs = seriesEndMs is null ? end : Math.Max(seriesEndMs.Value, end.Value);
+
+            points.Add(new Dictionary<string, object?>
+            {
+                ["timestamp_ms"] = ToLong(raw.TryGetValue("timestamp_ms", out var ts) ? ts : null),
+                ["value"] = raw.TryGetValue("avg_value", out var avg) ? avg : null,
+                ["min"] = raw.TryGetValue("min_value", out var min) ? min : null,
+                ["max"] = raw.TryGetValue("max_value", out var max) ? max : null,
+                ["count"] = ToLong(raw.TryGetValue("sample_count", out var count) ? count : null),
+            }.AsReadOnly());
+        }
+
+        return (sourceRows, seriesStartMs, seriesEndMs, points);
+    }
+
+    private static IReadOnlyDictionary<string, object?> MapRow(dynamic row)
+    {
+        var dict = (IDictionary<string, object?>)row;
+        dict.Remove("timestamp_utc");
+        return dict.AsReadOnly();
+    }
+
+    private static long ToLong(object? value) => value switch
+    {
+        long v => v,
+        int v => v,
+        short v => v,
+        byte v => v,
+        decimal v => (long)v,
+        double v => (long)v,
+        float v => (long)v,
+        string s when long.TryParse(s, out var parsed) => parsed,
+        _ => 0L,
+    };
+
+    private static long? ToNullableLong(object? value) => value switch
+    {
+        null => null,
+        DBNull => null,
+        _ => ToLong(value),
+    };
 
     // ── CSV export (streaming) ────────────────────────────────────────────
 

@@ -9,6 +9,7 @@ public static class Topics
     public const string CmdDataDatasetTimestamps  = "cmd.data.dataset.timestamps";
     public const string CmdDataDatasetMissing     = "cmd.data.dataset.find_missing";
     public const string CmdDataDatasetRows        = "cmd.data.dataset.rows";
+    public const string CmdDataDatasetLatestRows  = "cmd.data.dataset.latest_rows";
     public const string CmdDataDatasetExport      = "cmd.data.dataset.export";
     public const string CmdDataDatasetExportFull  = "cmd.data.dataset.export_full";
     public const string CmdDataDatasetSchema      = "cmd.data.dataset.table_schema";
@@ -22,6 +23,7 @@ public static class Topics
     public const string CmdDataDatasetColumnStats     = "cmd.data.dataset.column_stats";
     public const string CmdDataDatasetColumnHistogram = "cmd.data.dataset.column_histogram";
     public const string CmdDataDatasetBrowse          = "cmd.data.dataset.browse";
+    public const string CmdDataDatasetSeries          = "cmd.data.dataset.series";
     public const string CmdDataDatasetComputeFeatures = "cmd.data.dataset.compute_features";
     public const string CmdDataDatasetDetectAnomalies = "cmd.data.dataset.detect_anomalies";
     public const string CmdDataDatasetCleanPreview    = "cmd.data.dataset.clean.preview";
@@ -62,6 +64,7 @@ public static class Topics
         CmdDataDatasetTimestamps,
         CmdDataDatasetMissing,
         CmdDataDatasetRows,
+        CmdDataDatasetLatestRows,
         CmdDataDatasetExport,
         CmdDataDatasetExportFull,
         CmdDataDatasetSchema,
@@ -75,6 +78,7 @@ public static class Topics
         CmdDataDatasetColumnStats,
         CmdDataDatasetColumnHistogram,
         CmdDataDatasetBrowse,
+        CmdDataDatasetSeries,
         CmdDataDatasetComputeFeatures,
         CmdDataDatasetDetectAnomalies,
         CmdDataDatasetCleanPreview,

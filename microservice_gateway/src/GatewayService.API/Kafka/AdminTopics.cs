@@ -31,6 +31,7 @@ public static class AdminTopics
     public const string DatasetColumnStats      = "cmd.data.dataset.column_stats";
     public const string DatasetColumnHistogram  = "cmd.data.dataset.column_histogram";
     public const string DatasetBrowse           = "cmd.data.dataset.browse";
+    public const string DatasetSeries           = "cmd.data.dataset.series";
     public const string DatasetComputeFeatures  = "cmd.data.dataset.compute_features";
     public const string DatasetDetectAnomalies  = "cmd.data.dataset.detect_anomalies";
     public const string DatasetCleanPreview     = "cmd.data.dataset.clean.preview";

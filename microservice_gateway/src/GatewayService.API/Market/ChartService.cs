@@ -83,11 +83,23 @@ public class ChartService : IChartService
                 BuildPendingResponse(symbolUpper, timeframe, limit, hint));
         }
 
-        // ── 4. Query data-service coverage ───────────────────────────────────
+        // ── 4. Query latest fixed-width window ───────────────────────────────
 
-        var coverage = await _data.GetCoverageAsync(symbolUpper, tfInfo.BybitInterval, ct);
+        var latestRows = await _data.GetLatestWindowRowsAsync(
+            symbolUpper,
+            tfInfo.BybitInterval,
+            tfInfo.StepMs,
+            limit,
+            ct);
 
-        if (coverage is null || !coverage.Exists || coverage.Rows == 0)
+        if (latestRows.IsClaimCheck)
+        {
+            return ServiceResult<ChartResponse>.Ok(
+                BuildPendingResponse(symbolUpper, timeframe, limit,
+                    "Data payload too large; use a smaller limit or wait for streaming path"));
+        }
+
+        if (latestRows.Rows.Count == 0)
         {
             var initialEndMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var initialStartMs = initialEndMs - (long)limit * tfInfo.StepMs * _settings.IngestWindowMultiplier;
@@ -122,58 +134,8 @@ public class ChartService : IChartService
 
         // ── 5. Determine time window ──────────────────────────────────────────
 
-        var endMs   = coverage.MaxTsMs;
+        var endMs   = latestRows.Rows[^1].TimestampMs;
         var startMs = endMs - (long)(limit - 1) * tfInfo.StepMs;
-
-        // ── 6. Fetch rows (with limit so the data-service caps its response size) ──
-
-        var rowsResult = await _data.GetRowsAsync(
-            coverage.TableName, startMs, endMs, limit, ct);
-
-        // Claim-check: data IS in the data-service but the Kafka response was too large.
-        // Do NOT trigger a new ingest — the data exists, just not fetchable at this size.
-        if (rowsResult.IsClaimCheck)
-        {
-            _log.LogWarning(
-                "Claim-check for {Symbol}/{Interval} (table={Table}, limit={Limit}) — "
-                + "payload too large for Kafka; client should use a smaller limit",
-                symbolUpper, tfInfo.BybitInterval, coverage.TableName, limit);
-            return ServiceResult<ChartResponse>.Ok(
-                BuildPendingResponse(symbolUpper, timeframe, limit,
-                    "Data payload too large; use a smaller limit or wait for streaming path"));
-        }
-
-        if (rowsResult.Rows.Count == 0)
-        {
-            var hydratedRows = await TrySynchronizeWindowAsync(
-                ingestKey, symbolUpper, tfInfo, limit, startMs, endMs, ct);
-
-            if (hydratedRows?.IsClaimCheck == true)
-            {
-                return ServiceResult<ChartResponse>.Ok(
-                    BuildPendingResponse(symbolUpper, timeframe, limit,
-                        "Data payload too large; use a smaller limit or wait for streaming path"));
-            }
-
-            if (hydratedRows is not null && hydratedRows.Rows.Count > 0)
-            {
-                return ServiceResult<ChartResponse>.Ok(
-                    await BuildChartResponseAsync(
-                        symbolUpper,
-                        timeframe,
-                        limit,
-                        tfInfo,
-                        ingestKey,
-                        startMs,
-                        endMs,
-                        hydratedRows,
-                        ct));
-            }
-
-            return ServiceResult<ChartResponse>.Ok(
-                BuildPendingResponse(symbolUpper, timeframe, limit,
-                    "No rows returned; ingest triggered"));
-        }
 
         // ── 7. Build response ─────────────────────────────────────────────────
 
@@ -186,7 +148,7 @@ public class ChartService : IChartService
                 ingestKey,
                 startMs,
                 endMs,
-                rowsResult,
+                latestRows,
                 ct));
     }
 

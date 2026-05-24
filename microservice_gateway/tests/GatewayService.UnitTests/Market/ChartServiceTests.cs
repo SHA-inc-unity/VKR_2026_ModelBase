@@ -105,6 +105,10 @@ public sealed class ChartServiceTests
         if (data is null)
         {
             var dataMock = new Mock<IDataServiceClient>();
+            dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+                    It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<int>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(RowsResult.Empty);
             dataMock.Setup(d => d.GetCoverageAsync(It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<CancellationToken>()))
                 .ReturnsAsync((CoverageResult?)null);
@@ -176,7 +180,8 @@ public sealed class ChartServiceTests
         result.IsSuccess.Should().BeTrue();
         result.Value.Should().Be(cached);
         // data-service should NOT have been called
-        dataMock.Verify(d => d.GetCoverageAsync(It.IsAny<string>(), It.IsAny<string>(),
+        dataMock.Verify(d => d.GetLatestWindowRowsAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<int>(),
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -242,14 +247,15 @@ public sealed class ChartServiceTests
             It.IsAny<ChartResponse>(),
             It.IsAny<TimeSpan>(),
             It.IsAny<CancellationToken>()), Times.Once);
-        dataMock.Verify(d => d.GetCoverageAsync(It.IsAny<string>(), It.IsAny<string>(),
+        dataMock.Verify(d => d.GetLatestWindowRowsAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<int>(),
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
     // ── No data → pending ─────────────────────────────────────────────────
 
     [Fact]
-        public async Task No_coverage_data_triggers_sync_ingest_and_returns_ok_when_rows_arrive()
+        public async Task No_latest_window_data_triggers_sync_ingest_and_returns_ok_when_rows_arrive()
     {
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var stepMs = 300_000L;
@@ -257,8 +263,9 @@ public sealed class ChartServiceTests
         var rows = BuildRows(nowMs, limit, stepMs);
 
         var dataMock = new Mock<IDataServiceClient>();
-        dataMock.Setup(d => d.GetCoverageAsync("BTCUSDT", "5", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new CoverageResult(false, "", 0, 0, 0, 0));
+        dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+                "BTCUSDT", "5", stepMs, limit, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(RowsResult.Empty);
         dataMock.Setup(d => d.IngestAsync("BTCUSDT", "5", It.IsAny<long>(), It.IsAny<long>(),
             It.IsAny<CancellationToken>()))
             .ReturnsAsync(IngestResult.Ok("btcusdt_5", limit));
@@ -292,6 +299,23 @@ public sealed class ChartServiceTests
             It.IsAny<Action>(), It.IsAny<Action<Exception>>()), Times.Never);
     }
 
+    [Fact]
+    public async Task Latest_window_claim_check_returns_pending_without_triggering_ingest()
+    {
+        var dataMock = new Mock<IDataServiceClient>();
+        dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+                "BTCUSDT", "5", 300_000L, 200, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RowsResult.ClaimCheck);
+
+        var sut = CreateSut(data: dataMock.Object);
+        var result = await sut.GetChartAsync("BTCUSDT", "5m", 200);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value!.Status.Should().Be("pending");
+        dataMock.Verify(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     // ── Full data → ok ────────────────────────────────────────────────────
 
     [Fact]
@@ -305,10 +329,8 @@ public sealed class ChartServiceTests
         var rows     = BuildRows(nowMs, limit, stepMs);
 
         var dataMock = new Mock<IDataServiceClient>();
-        dataMock.Setup(d => d.GetCoverageAsync("BTCUSDT", "5", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(coverage);
-        dataMock.Setup(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
-                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+    dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+        "BTCUSDT", "5", stepMs, limit, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(RowsResult.From(rows));
         dataMock.Setup(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))
@@ -339,14 +361,15 @@ public sealed class ChartServiceTests
         var rows = BuildRows(nowMs, available, stepMs);
 
         var dataMock = new Mock<IDataServiceClient>();
-        dataMock.Setup(d => d.GetCoverageAsync("BTCUSDT", "5", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(coverage);
-        dataMock.Setup(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
-                It.IsAny<int>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(RowsResult.From(rows));
+        dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+            "BTCUSDT", "5", stepMs, limit, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RowsResult.From(rows));
         dataMock.Setup(d => d.IngestAsync("BTCUSDT", "5", It.IsAny<long>(), It.IsAny<long>(),
             It.IsAny<CancellationToken>()))
             .ReturnsAsync(IngestResult.Ok("btcusdt_5", limit - available));
+        dataMock.Setup(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
+            It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RowsResult.From(rows));
 
         var sut = CreateSut(data: dataMock.Object);
         var result = await sut.GetChartAsync("BTCUSDT", "5m", limit);
@@ -372,10 +395,11 @@ public sealed class ChartServiceTests
         var fullRows = BuildRows(nowMs, limit, stepMs);
 
         var dataMock = new Mock<IDataServiceClient>();
-        dataMock.Setup(d => d.GetCoverageAsync("BTCUSDT", "5", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(coverage);
+        dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+            "BTCUSDT", "5", stepMs, limit, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RowsResult.From(partialRows));
         dataMock.SetupSequence(d => d.GetRowsAsync("btcusdt_5", It.IsAny<long>(), It.IsAny<long>(),
-                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            It.IsAny<int>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync(RowsResult.From(partialRows))
                 .ReturnsAsync(RowsResult.From(fullRows));
         dataMock.Setup(d => d.IngestAsync("BTCUSDT", "5", It.IsAny<long>(), It.IsAny<long>(),
@@ -405,10 +429,8 @@ public sealed class ChartServiceTests
         var coverage = FullCoverage(nowMs, limit, stepMs);
 
         var dataMock = new Mock<IDataServiceClient>();
-        dataMock.Setup(d => d.GetCoverageAsync("BTCUSDT", "5", It.IsAny<CancellationToken>()))
-                .ReturnsAsync(coverage);
-        dataMock.Setup(d => d.GetRowsAsync(It.IsAny<string>(), It.IsAny<long>(), It.IsAny<long>(),
-                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+        dataMock.Setup(d => d.GetLatestWindowRowsAsync(
+            "BTCUSDT", "5", stepMs, limit, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(RowsResult.From(rows));
         dataMock.Setup(d => d.IngestAsync(It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<long>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))

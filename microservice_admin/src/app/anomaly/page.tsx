@@ -121,6 +121,26 @@ interface BrowseResponse {
   error?: string;
 }
 
+interface TimeSeriesPoint {
+  timestamp_ms: number;
+  value: number | null;
+  min?: number | null;
+  max?: number | null;
+  count?: number | null;
+}
+
+interface TimeSeriesResponse {
+  table: string;
+  column: string;
+  max_points: number;
+  source_rows: number;
+  start_ms: number | null;
+  end_ms: number | null;
+  downsampled: boolean;
+  points: TimeSeriesPoint[];
+  error?: string;
+}
+
 // ── Anomaly + clean response shapes ─────────────────────────────────────────
 
 interface AnomalyRow {
@@ -540,7 +560,7 @@ export default function AnomalyPage() {
 
       const [statsRes, covRes, anomaliesRes, sessionRes] = await Promise.all([
         kafkaCall<ColumnStatsResponse>(Topics.CMD_DATA_DATASET_COLUMN_STATS, { table, count_only: true }),
-        kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table }).catch(() => null),
+        kafkaCall<TableCoverage>(Topics.CMD_DATA_DATASET_COVERAGE, { table, include_rows: false }).catch(() => null),
         kafkaCall<DetectAnomaliesResponse>(
           Topics.CMD_DATA_DATASET_DETECT_ANOMALIES,
           detectPayload,
@@ -825,7 +845,7 @@ export default function AnomalyPage() {
       const table = makeTableName(symbol, timeframe);
       const res = await kafkaCall<BrowseResponse>(
         Topics.CMD_DATA_DATASET_BROWSE,
-        { table, page, page_size: pageSize, order: orderDesc ? 'desc' : 'asc' },
+        { table, page, page_size: pageSize, order: orderDesc ? 'desc' : 'asc', include_total: false },
       );
       if (res.error) throw new Error(res.error);
       setBrowseRows(res.rows);
@@ -860,19 +880,21 @@ export default function AnomalyPage() {
     setBrowseChartData(null);
     try {
       const table = makeTableName(symbol, timeframe);
-      const res = await kafkaCall<BrowseResponse>(
-        Topics.CMD_DATA_DATASET_BROWSE,
-        { table, page: 0, page_size: 500, order: 'asc' },
+      const res = await kafkaCall<TimeSeriesResponse>(
+        Topics.CMD_DATA_DATASET_SERIES,
+        { table, column: colName, max_points: 600 },
       );
       if (res.error) throw new Error(res.error);
-      const data = (res.rows as Record<string, unknown>[])
-        .map(row => {
-          const ts = row['timestamp_utc'];
-          const val = row[colName];
-          if (ts == null || val == null) return null;
-          const tsNum = typeof ts === 'number' ? ts : new Date(ts as string).getTime();
-          const valNum = typeof val === 'number' ? val : parseFloat(String(val));
-          if (isNaN(tsNum) || isNaN(valNum)) return null;
+      const data = res.points
+        .map(point => {
+          if (point.value == null) return null;
+          const tsNum = typeof point.timestamp_ms === 'number'
+            ? point.timestamp_ms
+            : Number(point.timestamp_ms);
+          const valNum = typeof point.value === 'number'
+            ? point.value
+            : Number(point.value);
+          if (Number.isNaN(tsNum) || Number.isNaN(valNum)) return null;
           return { ts: tsNum, val: valNum };
         })
         .filter((x): x is { ts: number; val: number } => x !== null);

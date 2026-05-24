@@ -49,7 +49,7 @@ public sealed class MarketQueueIntegrationTests : IClassFixture<MarketQueueConta
 
         results.Should().AllSatisfy(r => r.IsSuccess.Should().BeTrue());
 
-        _container.FakeData.GetCoverageCallCount
+        _container.FakeData.GetLatestWindowCallCount
             .Should().BeLessOrEqualTo(
                 n / 5 + 2,
                 "concurrent identical requests should be heavily coalesced");
@@ -201,15 +201,23 @@ internal sealed class NopBybitProvider : IBybitSymbolProvider
 /// </summary>
 public sealed class FakeDelayedDataServiceClient : IDataServiceClient
 {
-    private int _getCoverageCallCount;
-    public int GetCoverageCallCount => _getCoverageCallCount;
+    private int _getLatestWindowCallCount;
+    public int GetLatestWindowCallCount => _getLatestWindowCallCount;
 
     public async Task<CoverageResult?> GetCoverageAsync(
         string symbol, string bybitInterval, CancellationToken ct = default)
+        => null;
+
+    public async Task<RowsResult> GetLatestWindowRowsAsync(
+        string symbol,
+        string bybitInterval,
+        long stepMs,
+        int limit,
+        CancellationToken ct = default)
     {
-        Interlocked.Increment(ref _getCoverageCallCount);
+        Interlocked.Increment(ref _getLatestWindowCallCount);
         await Task.Delay(200, ct); // deliberate delay so concurrent requests coalesce
-        return null; // no coverage → ChartService returns pending (no rows path)
+        return RowsResult.Empty; // no latest rows → ChartService returns pending (no rows path)
     }
 
     public Task<RowsResult> GetRowsAsync(

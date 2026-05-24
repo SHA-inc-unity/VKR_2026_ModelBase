@@ -67,6 +67,7 @@ const TOPIC_PATH: Readonly<Record<string, string>> = {
   [Topics.CMD_DATA_DATASET_COLUMN_STATS]:      'dataset/column-stats',
   [Topics.CMD_DATA_DATASET_COLUMN_HISTOGRAM]:  'dataset/column-histogram',
   [Topics.CMD_DATA_DATASET_BROWSE]:            'dataset/browse',
+  [Topics.CMD_DATA_DATASET_SERIES]:            'dataset/series',
   [Topics.CMD_DATA_DATASET_COMPUTE_FEATURES]:  'dataset/compute-features',
   [Topics.CMD_DATA_DATASET_DETECT_ANOMALIES]:  'dataset/detect-anomalies',
   [Topics.CMD_DATA_DATASET_CLEAN_PREVIEW]:     'dataset/clean-preview',

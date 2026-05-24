@@ -25,6 +25,7 @@ export const Topics = {
   CMD_DATA_DATASET_COLUMN_STATS:     'cmd.data.dataset.column_stats',
   CMD_DATA_DATASET_COLUMN_HISTOGRAM: 'cmd.data.dataset.column_histogram',
   CMD_DATA_DATASET_BROWSE:           'cmd.data.dataset.browse',
+  CMD_DATA_DATASET_SERIES:           'cmd.data.dataset.series',
   CMD_DATA_DATASET_COMPUTE_FEATURES: 'cmd.data.dataset.compute_features',
   CMD_DATA_DATASET_DETECT_ANOMALIES: 'cmd.data.dataset.detect_anomalies',
   CMD_DATA_DATASET_CLEAN_PREVIEW:    'cmd.data.dataset.clean.preview',

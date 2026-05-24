@@ -54,6 +54,61 @@ public sealed class DataServiceClient : IDataServiceClient
     }
 
     /// <inheritdoc />
+    public async Task<RowsResult> GetLatestWindowRowsAsync(
+        string symbol,
+        string bybitInterval,
+        long stepMs,
+        int limit,
+        CancellationToken ct = default)
+    {
+        var timeout = TimeSpan.FromSeconds(_settings.KafkaTimeoutSeconds);
+        var tableName = BuildTableName(symbol, bybitInterval);
+
+        try
+        {
+            var reply = await _kafka.RequestAsync(
+                DataTopics.CmdDataDatasetLatestRows,
+                new { table = tableName, step_ms = stepMs, limit },
+                timeout,
+                ct);
+
+            if (reply.ValueKind == JsonValueKind.Object &&
+                reply.TryGetProperty("error", out var errEl))
+            {
+                _log.LogWarning(
+                    "data-service latest_rows error for {Table} stepMs={StepMs} limit={Limit}: {Error}",
+                    tableName, stepMs, limit, errEl.GetString());
+                return RowsResult.Empty;
+            }
+
+            if (reply.ValueKind == JsonValueKind.Object &&
+                reply.TryGetProperty("claim_check", out _))
+            {
+                _log.LogWarning(
+                    "data-service latest_rows returned a claim-check for {Table} stepMs={StepMs} limit={Limit}",
+                    tableName, stepMs, limit);
+                return RowsResult.ClaimCheck;
+            }
+
+            return RowsResult.From(ParseRows(reply));
+        }
+        catch (TimeoutException ex)
+        {
+            _log.LogWarning(ex,
+                "Latest window Kafka request timed out for {Table} stepMs={StepMs} limit={Limit}",
+                tableName, stepMs, limit);
+            return RowsResult.Empty;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Latest window Kafka request failed for {Table} stepMs={StepMs} limit={Limit}",
+                tableName, stepMs, limit);
+            return RowsResult.Empty;
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<RowsResult> GetRowsAsync(
         string tableName, long startMs, long endMs, int limit, CancellationToken ct = default)
     {
