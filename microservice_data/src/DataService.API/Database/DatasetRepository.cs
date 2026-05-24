@@ -32,6 +32,7 @@ public sealed partial class DatasetRepository
 {
     private readonly PostgresConnectionFactory _pg;
     private readonly ILogger<DatasetRepository> _log;
+    private const int NoTimeout = 0;
 
     // Only lower-case letters, digits, underscores are safe in identifiers.
     private static readonly Regex _safeIdentifier =
@@ -1054,46 +1055,156 @@ public sealed partial class DatasetRepository
     /// are first added via <c>ALTER TABLE ... ADD COLUMN IF NOT EXISTS</c>
     /// (idempotent). Returns the number of updated rows.
     /// </summary>
+    public async Task<long> ComputeAndUpdateFeaturesSinceAsync(
+        string tableName, long updateFromMs, CancellationToken ct = default)
+    {
+        var tbl = Safe(tableName);
+        await using var conn = await _pg.OpenAsync(ct);
+        await EnsureFeatureColumnsAsync(conn, tbl, ct);
+
+        var (selectList, setList) = BuildFeatureSqlFragments();
+        var lookbackOffset = Math.Max(0, GetFeatureLookbackRows() - 1);
+
+        var updateSql = $@"
+            WITH bounds AS (
+                SELECT COALESCE((
+                    SELECT timestamp_utc
+                    FROM ""{tbl}""
+                    WHERE timestamp_utc < @update_from
+                    ORDER BY timestamp_utc DESC
+                    OFFSET @lookback_offset LIMIT 1
+                ), @update_from::timestamptz) AS seed_from
+            ),
+            source_rows AS (
+                SELECT *
+                FROM ""{tbl}""
+                WHERE timestamp_utc >= (SELECT seed_from FROM bounds)
+            ),
+            tr_prep AS (
+                SELECT
+                    timestamp_utc,
+                    GREATEST(
+                        (high_price::double precision - low_price::double precision),
+                        ABS(high_price::double precision - LAG(close_price::double precision, 1) OVER w),
+                        ABS(low_price::double precision  - LAG(close_price::double precision, 1) OVER w)
+                    )::double precision AS tr_raw
+                FROM source_rows
+                WINDOW w AS (PARTITION BY symbol, timeframe ORDER BY timestamp_utc)
+            ),
+            cte AS (
+                SELECT
+                    timestamp_utc,
+                    {selectList}
+                FROM source_rows
+                JOIN tr_prep USING (timestamp_utc)
+                WINDOW w AS (PARTITION BY symbol, timeframe ORDER BY timestamp_utc)
+            )
+                        UPDATE ""{tbl}"" AS t
+            SET {setList}
+            FROM cte
+            WHERE t.timestamp_utc = cte.timestamp_utc
+              AND t.timestamp_utc >= @update_from;";
+
+        var affected = await conn.ExecuteAsync(new CommandDefinition(
+            updateSql,
+            new
+            {
+                update_from = ToUtc(updateFromMs),
+                lookback_offset = lookbackOffset,
+            },
+            commandTimeout: NoTimeout,
+            cancellationToken: ct));
+        return affected;
+    }
+
     public async Task<long> ComputeAndUpdateFeaturesAsync(
         string tableName, CancellationToken ct = default)
     {
         var tbl = Safe(tableName);
         await using var conn = await _pg.OpenAsync(ct);
 
-        // Feature computation runs ~50 window functions over the entire table
-        // (millions of rows for 1m timeframes) and far exceeds Npgsql's default
-        // 30 s command timeout. Disable the per-command timeout for this call
-        // only — all other queries keep the default. commandTimeout = 0 means
-        // “wait indefinitely” in Npgsql.
-        const int NoTimeout = 0;
+        await EnsureFeatureColumnsAsync(conn, tbl, ct);
+        var (selectList, setList) = BuildFeatureSqlFragments();
 
-        // 1. Idempotently add any missing feature columns.
+        var updateSql = $@"
+            WITH tr_prep AS (
+                SELECT
+                    timestamp_utc,
+                    GREATEST(
+                        (high_price::double precision - low_price::double precision),
+                        ABS(high_price::double precision - LAG(close_price::double precision, 1) OVER w),
+                        ABS(low_price::double precision  - LAG(close_price::double precision, 1) OVER w)
+                    )::double precision AS tr_raw
+                FROM ""{tbl}""
+                WINDOW w AS (PARTITION BY symbol, timeframe ORDER BY timestamp_utc)
+            ),
+            cte AS (
+                SELECT
+                    timestamp_utc,
+                    {selectList}
+                FROM ""{tbl}""
+                JOIN tr_prep USING (timestamp_utc)
+                WINDOW w AS (PARTITION BY symbol, timeframe ORDER BY timestamp_utc)
+            )
+            UPDATE ""{tbl}"" AS t
+            SET {setList}
+            FROM cte
+            WHERE t.timestamp_utc = cte.timestamp_utc;";
+
+        var affected = await conn.ExecuteAsync(new CommandDefinition(
+            updateSql, commandTimeout: NoTimeout, cancellationToken: ct));
+        return affected;
+    }
+
+    private static int GetFeatureLookbackRows()
+    {
+        var lookbackRows = 0;
+        if (DatasetConstants.ReturnHorizons.Length > 0)
+        {
+            lookbackRows = Math.Max(lookbackRows, DatasetConstants.ReturnHorizons.Max());
+        }
+
+        if (DatasetConstants.RollingWindows.Length > 0)
+        {
+            lookbackRows = Math.Max(lookbackRows, DatasetConstants.RollingWindows.Max());
+        }
+
+        if (DatasetConstants.RsiLagSteps.Length > 0)
+        {
+            lookbackRows = Math.Max(lookbackRows, DatasetConstants.RsiLagSteps.Max());
+        }
+
+        return Math.Max(lookbackRows, 1);
+    }
+
+    private static async Task EnsureFeatureColumnsAsync(
+        NpgsqlConnection conn,
+        string tableName,
+        CancellationToken ct)
+    {
         var alterSb = new StringBuilder();
         foreach (var (col, sqlType) in DatasetConstants.FeatureTableSchema)
         {
-            alterSb.Append("ALTER TABLE \"").Append(tbl)
+            alterSb.Append("ALTER TABLE \"").Append(tableName)
                    .Append("\" ADD COLUMN IF NOT EXISTS \"")
                    .Append(col).Append("\" ").Append(sqlType).AppendLine(";");
         }
+
         await conn.ExecuteAsync(new CommandDefinition(
             alterSb.ToString(), commandTimeout: NoTimeout, cancellationToken: ct));
+    }
 
-        // 2. Single CTE with all window-function feature expressions, joined
-        //    back by timestamp_utc. All divisions NULLIF-safe; all results
-        //    cast to double precision (matches DB column types).
-        //
-        //    Partition = (symbol, timeframe) — per-series context.
-        //    Order     = timestamp_utc.
-        //    Rolling frame = ROWS BETWEEN W-1 PRECEDING AND CURRENT ROW.
+    private static (string SelectList, string SetList) BuildFeatureSqlFragments()
+    {
         const double TwoPi = 2.0 * Math.PI;
         var pi2 = TwoPi.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
 
-        string Cast(string expr) => $"({expr})::double precision";
-        string PctChange(string col, int k) =>
+        static string Cast(string expr) => $"({expr})::double precision";
+        static string PctChange(string col, int k) =>
             Cast($"{col}::double precision / NULLIF(LAG({col}::double precision, {k}) OVER w, 0) - 1");
-        string LogReturn(string col, int k) =>
+        static string LogReturn(string col, int k) =>
             Cast($"LN(GREATEST({col}::double precision / NULLIF(LAG({col}::double precision, {k}) OVER w, 0), 1e-10))");
-        string Rolling(string agg, string col, int w) =>
+        static string Rolling(string agg, string col, int w) =>
             $"{agg}({col}::double precision) OVER (PARTITION BY symbol, timeframe ORDER BY timestamp_utc ROWS BETWEEN {w - 1} PRECEDING AND CURRENT ROW)";
 
         var parts = new List<string>();
@@ -1126,10 +1237,6 @@ public sealed partial class DatasetRepository
         parts.Add($"SIN({pi2} * EXTRACT(DOW  FROM timestamp_utc AT TIME ZONE 'UTC') / 7.0)::double precision  AS dow_sin");
         parts.Add($"COS({pi2} * EXTRACT(DOW  FROM timestamp_utc AT TIME ZONE 'UTC') / 7.0)::double precision  AS dow_cos");
 
-        // ── ATR (Average True Range) ─────────────────────────────────────
-        // TR is pre-computed as tr_raw in the tr_prep CTE (see updateSql below).
-        // Here tr_raw is a plain column joined in, so AVG(tr_raw) OVER (...) is
-        // a normal aggregate over a column — no nested window functions.
         foreach (var w in DatasetConstants.RollingWindows)
         {
             parts.Add(
@@ -1137,7 +1244,6 @@ public sealed partial class DatasetRepository
                 $"ROWS BETWEEN {w - 1} PRECEDING AND CURRENT ROW)::double precision AS atr_{w}");
         }
 
-        // ── Candle shape ─────────────────────────────────────────────────
         parts.Add(
             $"ABS(close_price::double precision - open_price::double precision)::double precision " +
             $"AS candle_body");
@@ -1148,7 +1254,6 @@ public sealed partial class DatasetRepository
             $"(LEAST(close_price::double precision, open_price::double precision) - low_price::double precision)::double precision " +
             $"AS lower_wick");
 
-        // ── Volume features ───────────────────────────────────────────────
         foreach (var w in DatasetConstants.RollingWindows)
             parts.Add($"{Rolling("AVG", "volume", w)} AS volume_roll{w}_mean");
         foreach (var w in DatasetConstants.RollingWindows)
@@ -1156,8 +1261,6 @@ public sealed partial class DatasetRepository
                 $"(volume::double precision / NULLIF({Rolling("AVG", "volume", w)}, 0))::double precision " +
                 $"AS volume_to_roll{w}_mean");
         parts.Add($"{PctChange("volume", 1)} AS volume_return_1");
-
-        // ── RSI slope ─────────────────────────────────────────────────────
         parts.Add($"(rsi::double precision - LAG(rsi::double precision, 1) OVER w)::double precision AS rsi_slope");
 
         var selectList = string.Join(",\n                ", parts);
@@ -1165,35 +1268,7 @@ public sealed partial class DatasetRepository
         var setList = string.Join(
             ",\n                ",
             featureCols.Select(c => $"\"{c}\" = cte.\"{c}\""));
-
-        var updateSql = $@"
-            WITH tr_prep AS (
-                SELECT
-                    timestamp_utc,
-                    GREATEST(
-                        (high_price::double precision - low_price::double precision),
-                        ABS(high_price::double precision - LAG(close_price::double precision, 1) OVER w),
-                        ABS(low_price::double precision  - LAG(close_price::double precision, 1) OVER w)
-                    )::double precision AS tr_raw
-                FROM ""{tbl}""
-                WINDOW w AS (PARTITION BY symbol, timeframe ORDER BY timestamp_utc)
-            ),
-            cte AS (
-                SELECT
-                    timestamp_utc,
-                    {selectList}
-                FROM ""{tbl}""
-                JOIN tr_prep USING (timestamp_utc)
-                WINDOW w AS (PARTITION BY symbol, timeframe ORDER BY timestamp_utc)
-            )
-            UPDATE ""{tbl}"" AS t
-            SET {setList}
-            FROM cte
-            WHERE t.timestamp_utc = cte.timestamp_utc;";
-
-        var affected = await conn.ExecuteAsync(new CommandDefinition(
-            updateSql, commandTimeout: NoTimeout, cancellationToken: ct));
-        return affected;
+        return (selectList, setList);
     }
 }
 

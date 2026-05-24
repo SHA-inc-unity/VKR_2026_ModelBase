@@ -52,10 +52,11 @@ Watcher считает live-price по best bid/ask midpoint там, где би
 Одновременно на каждом candle rollover watcher теперь дотягивает через
 exchange client authoritative closed raw candle и пишет в canonical dataset
 table для этого `exchange + symbol + timeframe` полноценные
-`OHLCV + funding_rate + open_interest + RSI`. Полный feature-pass на hot path
-по-прежнему не запускается, поэтому derived columns остаются зоной
-ingest/repair/compute_features. Это live bridge для свежести raw tables, а не
-замена ingest/repair/upsert как authoritative historical source.
+`OHLCV + funding_rate + open_interest + RSI`. Сразу после записи watcher
+дополнительно пересчитывает derived feature columns только для затронутого
+хвоста таблицы, а не делает full-table `compute_features` на каждый rollover.
+Это live bridge для свежести raw tables, а не замена ingest/repair/upsert как
+authoritative historical source.
 
 ## Kraken
 

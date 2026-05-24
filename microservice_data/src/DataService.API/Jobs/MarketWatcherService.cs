@@ -901,6 +901,7 @@ public sealed class MarketWatcherService : BackgroundService
 
         await _datasetRepo.CreateTableIfNotExistsAsync(tableName, ct);
         await _datasetRepo.BulkUpsertAsync(tableName, rows, ct);
+        await _datasetRepo.ComputeAndUpdateFeaturesSinceAsync(tableName, targetTimestamps[0], ct);
     }
 
     private static Dictionary<long, decimal> ComputeWilderRsi(IList<(long Ts, decimal Close)> closes, int period)

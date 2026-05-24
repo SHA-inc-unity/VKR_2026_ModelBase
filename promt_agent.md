@@ -12,7 +12,7 @@
 
 ### 2026-05-24
 
-- `microservice_data/src/DataService.API/Jobs/MarketWatcherService.cs`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: CSV Inspect показал, что прошлый watcher-save fix был недостаточным: canonical dataset rows, созданные на candle rollover, содержали только `open/high/low/close`, а `volume/turnover/funding_rate/open_interest/rsi` оставались `NULL`, из-за чего таблица выглядела почти пустой. `MarketWatcherService` теперь при закрытии свечи дотягивает authoritative raw candle через `MarketDataClientFactory` и пишет в dataset полный `MarketRow` (`OHLCV + funding_rate + open_interest + RSI`) через `BulkUpsertAsync`. Full-table `compute_features` на hot path не добавлялся намеренно, чтобы не пересчитывать целую 1m-таблицу каждую минуту. `dotnet build src/DataService.API/DataService.API.csproj` проходит.
+- `microservice_data/src/DataService.API/{Jobs/MarketWatcherService.cs,Database/DatasetRepository.cs}`, `microservice_data/{README.md,STRUCTURE.md,EXCHANGE_APIS.md}`: после следующей проверки Inspect выяснилось, что raw watcher-save уже починен, но derived fields (`return_1` и ниже) всё ещё не создавались. Причина локальная: watcher не запускал feature recompute после `BulkUpsertAsync`. В `DatasetRepository` добавлен `ComputeAndUpdateFeaturesSinceAsync` — tail-only recompute с lookback по max feature horizon, а `MarketWatcherService` теперь вызывает его сразу после записи новых raw rows. Это заполняет `return_*`, rolling stats, `atr_*` и соседние derived columns для новых watcher-свечей без full-table `compute_features` на каждый rollover. `dotnet build src/DataService.API/DataService.API.csproj` проходит.
 
 ### 2026-05-23
 

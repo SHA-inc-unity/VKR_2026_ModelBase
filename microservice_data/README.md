@@ -450,9 +450,10 @@ table for that `exchange + symbol + timeframe`, while still persisting one row p
 `market_watch_live(exchange, symbol, realtime_symbol, last_price, last_price_ts, candles_json, updated_at)`.
 `candles_json` keeps the last closed candle for each configured timeframe, so
 the watcher still exposes a compact live overlay without turning every incoming
-realtime price tick into a database write. The hot path still does not run the
-full-table `compute_features` SQL pass on every minute rollover, so derived
-feature columns remain owned by ingest/repair/feature workflows.
+realtime price tick into a database write. After writing those raw rows the
+watcher also recomputes derived feature columns for the affected tail window,
+so `return_*`, rolling stats and related fields appear for newly closed candles
+without launching a full-table `compute_features` pass on every minute rollover.
 
 On service startup the data-service also purges legacy `market_watch` rows from
 `dataset_jobs`, because the watcher no longer belongs to the queue model and
