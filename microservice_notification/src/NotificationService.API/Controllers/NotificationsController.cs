@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using NotificationService.API.Services;
 using NotificationService.API.Sse;
 using NotificationService.Application.DTOs;
 using NotificationService.Application.Services;
