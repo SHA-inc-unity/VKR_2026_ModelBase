@@ -353,45 +353,57 @@ public sealed class KrakenApiClient : IMarketDataClient
             return new MarketWatchSymbol(normalized, cachedWsName);
         }
 
-        var candidate = BuildMarketWatchPairCandidate(normalized);
-        try
-        {
-            using var doc = await GetJsonAsync(
-                $"{BaseUrl}/0/public/AssetPairs?pair={Uri.EscapeDataString(candidate)}",
-                ct);
-            if (!doc.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
-            {
-                return null;
-            }
+        // Kraken's /0/public/AssetPairs only accepts the altname form (e.g. XBTUSDT)
+        // for the `pair` query parameter — the wsname (XBT/USDT) returns
+        // "Unknown asset pair". Probe altname candidates first; the wsname is only
+        // resolved from the AssetPairs response itself.
+        var probeCandidates = BuildPairCandidates(normalized)
+            .Where(c => !c.Contains('/'))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
-            foreach (var prop in result.EnumerateObject())
+        foreach (var candidate in probeCandidates)
+        {
+            try
             {
-                var altname = prop.Value.TryGetProperty("altname", out var altNode) ? altNode.GetString() : null;
-                var wsname = prop.Value.TryGetProperty("wsname", out var wsNode) ? wsNode.GetString() : null;
-                if (string.IsNullOrWhiteSpace(wsname))
+                using var doc = await GetJsonAsync(
+                    $"{BaseUrl}/0/public/AssetPairs?pair={Uri.EscapeDataString(candidate)}",
+                    ct);
+                if (!doc.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
                 {
                     continue;
                 }
 
-                var datasetSymbol = NormalizeDatasetSymbol(altname ?? prop.Name);
-                if (!string.Equals(datasetSymbol, normalized, StringComparison.OrdinalIgnoreCase))
+                foreach (var prop in result.EnumerateObject())
                 {
-                    continue;
+                    var altname = prop.Value.TryGetProperty("altname", out var altNode) ? altNode.GetString() : null;
+                    var wsname = prop.Value.TryGetProperty("wsname", out var wsNode) ? wsNode.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(wsname))
+                    {
+                        continue;
+                    }
+
+                    var datasetSymbol = NormalizeDatasetSymbol(altname ?? prop.Name);
+                    if (!string.Equals(datasetSymbol, normalized, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var resolvedPair = altname ?? prop.Name;
+                    _pairCache[normalized] = resolvedPair;
+                    _websocketNameCache[normalized] = wsname;
+                    return new MarketWatchSymbol(normalized, wsname);
                 }
-
-                var resolvedPair = altname ?? prop.Name;
-                _pairCache[normalized] = resolvedPair;
-                _websocketNameCache[normalized] = candidate;
-                return new MarketWatchSymbol(normalized, candidate);
             }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("Unknown asset pair", StringComparison.OrdinalIgnoreCase))
+            {
+                // try the next candidate
+                continue;
+            }
+        }
 
-            return null;
-        }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("Unknown asset pair", StringComparison.OrdinalIgnoreCase))
-        {
-            _log.LogInformation("Kraken market watcher skips unsupported symbol {Symbol}", normalized);
-            return null;
-        }
+        _log.LogInformation("Kraken market watcher skips unsupported symbol {Symbol}", normalized);
+        return null;
     }
 
     private async Task<JsonDocument> GetJsonAsync(string url, CancellationToken ct)
