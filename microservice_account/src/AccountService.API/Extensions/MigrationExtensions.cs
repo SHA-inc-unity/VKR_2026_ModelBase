@@ -64,17 +64,26 @@ public static class MigrationExtensions
             return;
         }
 
-        if (missingTables.Length != RequiredTables.Length)
+        // Fast path: brand-new DB → create the entire model from the snapshot.
+        if (missingTables.Length == RequiredTables.Length)
         {
-            throw new InvalidOperationException(
-                $"Account database schema is partially present after migration. Missing tables: {string.Join(", ", missingTables)}");
+            logger.LogWarning(
+                "Account database has no application tables after migration. Recreating schema from current EF model.");
+
+            var creator = db.GetService<IRelationalDatabaseCreator>();
+            await creator.CreateTablesAsync();
         }
-
-        logger.LogWarning(
-            "Account database has no application tables after migration. Recreating schema from current EF model.");
-
-        var creator = db.GetService<IRelationalDatabaseCreator>();
-        await creator.CreateTablesAsync();
+        else
+        {
+            // Partial schema: the DB was created before the latest migration was
+            // added. EF can't selectively create individual tables from a snapshot
+            // without rewinding through migrations, so apply hand-rolled DDL for
+            // the new exchange-API tables.
+            logger.LogWarning(
+                "Account database is missing tables {Missing}. Applying inline DDL for new schema.",
+                string.Join(", ", missingTables));
+            await EnsureExchangeApiTablesAsync(db, missingTables);
+        }
 
         existingTables = await GetExistingPublicTablesAsync(db);
         missingTables = RequiredTables.Where(table => !existingTables.Contains(table)).ToArray();
@@ -85,6 +94,54 @@ public static class MigrationExtensions
         }
 
         logger.LogInformation("Account database schema recovered from current EF model.");
+    }
+
+    private static async Task EnsureExchangeApiTablesAsync(AccountDbContext db, string[] missingTables)
+    {
+        if (missingTables.Contains("exchange_api_keys", StringComparer.OrdinalIgnoreCase))
+        {
+            await db.Database.ExecuteSqlRawAsync(@"
+                CREATE TABLE IF NOT EXISTS exchange_api_keys (
+                    id uuid PRIMARY KEY,
+                    user_id uuid NOT NULL,
+                    exchange varchar(32) NOT NULL,
+                    label varchar(64) NOT NULL,
+                    api_key_enc varchar(1024) NOT NULL,
+                    api_secret_enc varchar(2048) NOT NULL,
+                    api_key_masked varchar(64) NOT NULL,
+                    can_read boolean NOT NULL,
+                    can_trade boolean NOT NULL,
+                    created_at timestamptz NOT NULL,
+                    last_used_at timestamptz NULL,
+                    status varchar(20) NOT NULL,
+                    last_validation_error varchar(512) NULL,
+                    last_validated_at timestamptz NULL,
+                    CONSTRAINT fk_exchange_api_keys_users_user_id FOREIGN KEY (user_id)
+                        REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS ix_exchange_api_keys_user_id_exchange
+                    ON exchange_api_keys (user_id, exchange);
+            ");
+        }
+        if (missingTables.Contains("exchange_metadata", StringComparer.OrdinalIgnoreCase))
+        {
+            await db.Database.ExecuteSqlRawAsync(@"
+                CREATE TABLE IF NOT EXISTS exchange_metadata (
+                    id uuid PRIMARY KEY,
+                    exchange varchar(32) NOT NULL,
+                    symbol varchar(32) NOT NULL,
+                    category varchar(32) NOT NULL,
+                    maker_fee_bps numeric NULL,
+                    taker_fee_bps numeric NULL,
+                    min_notional numeric NULL,
+                    max_leverage numeric NULL,
+                    raw_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+                    captured_at timestamptz NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_exchange_metadata_exchange_symbol_category
+                    ON exchange_metadata (exchange, symbol, category);
+            ");
+        }
     }
 
     private static async Task<HashSet<string>> GetExistingPublicTablesAsync(AccountDbContext db)
