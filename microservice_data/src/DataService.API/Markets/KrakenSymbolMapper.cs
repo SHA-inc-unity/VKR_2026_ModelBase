@@ -23,7 +23,12 @@ public sealed class KrakenSymbolMapper : IExchangeSymbolMapper
         {
             ["BTC"]   = "XBT",
             ["MATIC"] = "POL",
-            ["DOGE"]  = "XDG",
+            // NOTE: DOGE: Kraken REST returns `wsname=XDG/USDT` for the
+            // XDGUSDT pair, but Kraken's public WebSocket then rejects that
+            // wsname with "Currency pair not supported". We therefore do
+            // *not* map DOGE→XDG and instead skip Dogecoin on Kraken until
+            // the WS namespace catches up. Once Kraken accepts XDG/USDT on
+            // ws.kraken.com, re-add ["DOGE"] = "XDG" here.
         };
 
     private static readonly IReadOnlyDictionary<string, string> _exchangeToDataset =

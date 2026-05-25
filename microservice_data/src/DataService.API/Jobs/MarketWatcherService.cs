@@ -720,26 +720,57 @@ public sealed class MarketWatcherService : BackgroundService
         {
             foreach (var symbol in symbolsToStart)
             {
-                try
+                const int MaxAttempts = 4;
+                Exception? lastError = null;
+                for (var attempt = 1; attempt <= MaxAttempts; attempt++)
                 {
-                    var entry = await StartOrderBookAsync(symbol);
-                    startedOrderBooks.Add(entry);
+                    try
+                    {
+                        var entry = await StartOrderBookAsync(symbol);
+                        startedOrderBooks.Add(entry);
+                        lastError = null;
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        lastError = ex;
+                        var msg = ex.Message ?? string.Empty;
+                        var isRateLimit =
+                            msg.Contains("429", StringComparison.Ordinal)
+                            || msg.Contains("RateLimit", StringComparison.OrdinalIgnoreCase);
+                        if (!isRateLimit || attempt == MaxAttempts)
+                        {
+                            break;
+                        }
+
+                        // Exponential backoff on 429: 1s, 2s, 4s.
+                        var backoff = TimeSpan.FromSeconds(Math.Pow(2, attempt - 1));
+                        _log.LogInformation(
+                            "Kraken WS rate-limited for {Symbol} (attempt {Attempt}/{Max}); backing off {Backoff}",
+                            symbol.RealtimeSymbol, attempt, MaxAttempts, backoff);
+                        try
+                        {
+                            await Task.Delay(backoff, ct);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                    }
                 }
-                catch (Exception ex)
+
+                if (lastError != null)
                 {
-                    // One symbol failing must not nuke the whole exchange — log and
-                    // continue. Common failure modes here are 429 from the WebSocket
-                    // upgrade and individual delisted/illiquid pairs.
-                    _log.LogWarning(ex,
+                    _log.LogWarning(lastError,
                         "Kraken order book subscription failed for {Symbol}; continuing without it",
                         symbol.RealtimeSymbol);
                 }
 
-                // Small inter-subscription delay to stay well below Kraken's WS
-                // connect-rate ceiling (~1 connection/250 ms is comfortable).
+                // Inter-subscription pause. Kraken's free-tier public WS endpoint
+                // caps roughly 1 new connection / 700 ms / IP; smaller gaps trip 429.
                 try
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(350), ct);
+                    await Task.Delay(TimeSpan.FromMilliseconds(900), ct);
                 }
                 catch (OperationCanceledException)
                 {
