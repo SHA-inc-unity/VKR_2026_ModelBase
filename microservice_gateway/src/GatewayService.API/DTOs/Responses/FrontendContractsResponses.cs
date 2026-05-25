@@ -67,6 +67,35 @@ public sealed record PortfolioDetailedSummaryResponse
     public int ExchangeCount { get; init; }
     public IReadOnlyList<PortfolioAssetSummaryDto> ByAsset { get; init; } = [];
     public IReadOnlyList<PortfolioExchangeSummaryDto> ByExchange { get; init; } = [];
+    public IReadOnlyList<PortfolioCopyTradingDto> CopyTrading { get; init; } = [];
+    public IReadOnlyList<PortfolioBotDto> Bots { get; init; } = [];
+    /// <summary>Bybit permission scopes the user's key is missing. Drives the "ask user to enable" banner.</summary>
+    public IReadOnlyList<string> MissingPermissions { get; init; } = [];
+}
+
+public sealed record PortfolioCopyTradingDto
+{
+    public string Symbol { get; init; } = string.Empty;
+    public string Side { get; init; } = string.Empty;
+    public decimal Size { get; init; }
+    public decimal EntryPrice { get; init; }
+    public decimal MarkPrice { get; init; }
+    public decimal UnrealisedPnl { get; init; }
+    public decimal Leverage { get; init; }
+    public string Role { get; init; } = "leader";
+}
+
+public sealed record PortfolioBotDto
+{
+    public string BotId { get; init; } = string.Empty;
+    public string BotType { get; init; } = string.Empty;
+    public string Category { get; init; } = string.Empty;
+    public string Symbol { get; init; } = string.Empty;
+    public decimal Investment { get; init; }
+    public decimal CurrentValue { get; init; }
+    public decimal TotalPnl { get; init; }
+    public decimal TotalPnlPercent { get; init; }
+    public string Status { get; init; } = string.Empty;
 }
 
 public sealed record PortfolioAssetSummaryDto

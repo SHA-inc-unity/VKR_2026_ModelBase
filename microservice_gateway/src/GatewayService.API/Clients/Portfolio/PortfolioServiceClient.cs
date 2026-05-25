@@ -70,7 +70,7 @@ public sealed class PortfolioServiceClient : IPortfolioServiceClient
 
         try
         {
-            var wallet = await _bybit.GetUnifiedWalletAsync(key.ApiKey, key.ApiSecret, ct);
+            var wallet = await _bybit.GetPortfolioAsync(key.ApiKey, key.ApiSecret, ct);
             var dto = MapToDetailedSummary(wallet);
             _cache.Set(cacheKey, dto, CacheTtl);
             return ServiceResult<PortfolioDetailedSummaryResponse>.Ok(dto);
@@ -114,7 +114,7 @@ public sealed class PortfolioServiceClient : IPortfolioServiceClient
         ByExchange = [],
     };
 
-    private static PortfolioDetailedSummaryResponse MapToDetailedSummary(BybitWalletBalance wallet)
+    private static PortfolioDetailedSummaryResponse MapToDetailedSummary(BybitPortfolioSnapshot wallet)
     {
         var byAsset = wallet.Coins
             .OrderByDescending(c => c.UsdValue)
@@ -159,16 +159,54 @@ public sealed class PortfolioServiceClient : IPortfolioServiceClient
             }
         };
 
+        var copyTrading = wallet.CopyTradingPositions
+            .Select(p => new PortfolioCopyTradingDto
+            {
+                Symbol = p.Symbol,
+                Side = p.Side,
+                Size = p.Size,
+                EntryPrice = p.EntryPrice,
+                MarkPrice = p.MarkPrice,
+                UnrealisedPnl = p.UnrealisedPnl,
+                Leverage = p.Leverage,
+                Role = p.Role,
+            })
+            .ToList();
+
+        var bots = wallet.BotPositions
+            .Select(b => new PortfolioBotDto
+            {
+                BotId = b.BotId,
+                BotType = b.BotType,
+                Category = b.Category,
+                Symbol = b.Symbol,
+                Investment = b.Investment,
+                CurrentValue = b.CurrentValue,
+                TotalPnl = b.TotalPnl,
+                TotalPnlPercent = b.TotalPnlPercent,
+                Status = b.Status,
+            })
+            .ToList();
+
+        // Fold unrealised PnL from copy-trading + bots into the totals so the
+        // "Total value" tile reflects the full picture, not just spot equity.
+        var copyPnl = copyTrading.Sum(p => p.UnrealisedPnl);
+        var botPnl = bots.Sum(b => b.TotalPnl);
+        var grandTotal = totalValue + copyPnl + bots.Sum(b => b.CurrentValue);
+
         return new PortfolioDetailedSummaryResponse
         {
             State = "ok",
-            TotalValue = totalValue,
-            TotalPnl = 0m,
-            TotalPnlPercent = 0m,
+            TotalValue = grandTotal,
+            TotalPnl = copyPnl + botPnl,
+            TotalPnlPercent = grandTotal > 0 ? (copyPnl + botPnl) / grandTotal * 100m : 0m,
             AssetCount = byAsset.Count,
             ExchangeCount = byExchange.Count,
             ByAsset = byAsset,
             ByExchange = byExchange,
+            CopyTrading = copyTrading,
+            Bots = bots,
+            MissingPermissions = wallet.MissingPermissions,
         };
     }
 }
