@@ -32,8 +32,14 @@ public static class ServiceCollectionExtensions
 
         services.AddHttpClient("cryptopanic", c =>
         {
-            c.Timeout = TimeSpan.FromSeconds(20);
-            c.DefaultRequestHeaders.UserAgent.ParseAdd("ModelLine-NewsService/1.0");
+            c.Timeout = TimeSpan.FromSeconds(30);
+            c.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; ModelLine-NewsService/1.0; +https://modelline.app)");
+            c.DefaultRequestHeaders.Accept.ParseAdd("application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5");
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 5,
         });
 
         services.AddHostedService<CryptoPanicIngesterService>();
