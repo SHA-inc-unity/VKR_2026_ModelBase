@@ -21,14 +21,21 @@ public sealed class KrakenSymbolMapper : IExchangeSymbolMapper
     private static readonly IReadOnlyDictionary<string, string> _datasetToExchange =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["BTC"]   = "XBT",
-            ["MATIC"] = "POL",
-            // NOTE: DOGE: Kraken REST returns `wsname=XDG/USDT` for the
-            // XDGUSDT pair, but Kraken's public WebSocket then rejects that
-            // wsname with "Currency pair not supported". We therefore do
-            // *not* map DOGE→XDG and instead skip Dogecoin on Kraken until
-            // the WS namespace catches up. Once Kraken accepts XDG/USDT on
-            // ws.kraken.com, re-add ["DOGE"] = "XDG" here.
+            ["BTC"]  = "XBT",
+            ["DOGE"] = "XDG",
+            // NOTE: MATIC was previously mapped to POL because Kraken renamed
+            // the Polygon token. As of 2026-05 Kraken has delisted both the
+            // MATIC/USDT and POL/USDT spot pairs entirely (REST AssetPairs
+            // returns "Unknown asset pair" for both). Keep the rename out of
+            // here so PairCandidates doesn't waste two probes per cycle on
+            // a pair that does not exist — Market Watcher's "skips unsupported
+            // symbol MATICUSDT" log line is the correct outcome.
+            //
+            // NOTE: DOGE↔XDG: Kraken REST altname is XDGUSDT with wsname
+            // XDG/USDT, but the live WebSocket v2 accepts DOGE/USDT only. We
+            // keep this dataset↔altname rename so the REST AssetPairs probe
+            // matches; the WS form is rewritten at subscribe time via
+            // ToWebSocketPair (see _restToWebsocketWsname below).
         };
 
     private static readonly IReadOnlyDictionary<string, string> _exchangeToDataset =
