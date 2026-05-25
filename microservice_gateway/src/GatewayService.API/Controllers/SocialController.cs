@@ -73,12 +73,14 @@ public sealed class SocialController : ControllerBase
         JsonElement? body = null,
         CancellationToken ct = default)
     {
-        string? token = null;
-        if (requireBearer)
-        {
-            token = GetRawToken();
-            if (token is null) return Unauthorized();
-        }
+        // Anonymous routes (ListComments etc.) still want to opportunistically
+        // forward the bearer token when one is present, so downstream Social
+        // can fill `likedByMe` / personalised projections for the caller.
+        // Without this the social service sees no Authorization header and
+        // every refresh of the comments list returns likedByMe=false for the
+        // signed-in user, which makes their own ❤️ disappear on reload.
+        var token = GetRawToken();
+        if (requireBearer && token is null) return Unauthorized();
 
         try
         {
