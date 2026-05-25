@@ -40,13 +40,32 @@ public static class DatasetConstants
     /// <summary>Product-approved dataset symbol universe mirrored by the
     /// admin Dataset Configuration screen. Market watcher live subscriptions
     /// must stay inside this whitelist instead of expanding to every tradable
-    /// instrument returned by exchange metadata.</summary>
+    /// instrument returned by exchange metadata.
+    /// Sourced from Bybit spot top-100 by 24h turnover (snapshot 2026-05-25),
+    /// filtered to exclude stablecoins (USDC/USDE/USDS/USD1/STABLE),
+    /// fiat-backed wrappers (XAUT), and synthetic/wrapped staking tokens
+    /// (STETH/BBSOL/BSB/BILL) — these add no analytical value.</summary>
     public static readonly string[] SupportedSymbols =
     [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-        "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
-        "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT",
-        "TONUSDT", "SUIUSDT", "APTUSDT",
+        "BTCUSDT",  "ETHUSDT",  "HYPEUSDT", "SOLUSDT",  "XRPUSDT",
+        "NEARUSDT", "ONDOUSDT", "HUSDT",    "LITUSDT",  "MNTUSDT",
+        "VVVUSDT",  "DOGEUSDT", "CCUSDT",   "SUIUSDT",  "TONUSDT",
+        "TRXUSDT",  "IPUSDT",   "ADAUSDT",  "ASTERUSDT","GRASSUSDT",
+        "MONUSDT",  "LINKUSDT", "WLDUSDT",  "BNBUSDT",  "ENAUSDT",
+        "LTCUSDT",  "BCHUSDT",  "OPGUSDT",  "PLUMEUSDT","HOLOUSDT",
+        "XPLUSDT",  "PENGUUSDT","XDCUSDT",  "RENDERUSDT","DOTUSDT",
+        "AVAXUSDT", "INJUSDT",  "CHIPUSDT", "PEPEUSDT", "APEXUSDT",
+        "FIDAUSDT", "EDGEUSDT", "ATHUSDT",  "VIRTUALUSDT","FOGOUSDT",
+        "XANUSDT",  "MEGAUSDT", "AEROUSDT", "CHZUSDT",  "EIGENUSDT",
+        "ARBUSDT",  "AVLUSDT",  "STRKUSDT", "WLFIUSDT", "KASUSDT",
+        "TRUMPUSDT","BASEDUSDT","HBARUSDT", "WIFUSDT",  "SEIUSDT",
+        "PUMPUSDT", "AAVEUSDT", "ICPUSDT",  "SAHARAUSDT","NIGHTUSDT",
+        "ALTUSDT",  "JTOUSDT",  "FETUSDT",  "SHIBUSDT", "CPOOLUSDT",
+        "ZENUSDT",  "APTUSDT",  "XLMUSDT",  "TIAUSDT",  "OPUSDT",
+        "BLENDUSDT","WAVESUSDT","MEUSDT",   "ZEREBROUSDT","SPXUSDT",
+        "TOWNSUSDT","JUPUSDT",  "RECALLUSDT","ZBTUSDT", "ETHFIUSDT",
+        "FILUSDT",  "AVNTUSDT", "POLUSDT",  "UNIUSDT",  "POPCATUSDT",
+        "ATOMUSDT",
     ];
 
     /// <summary>timeframe key → (bybit_interval, step_ms)</summary>
