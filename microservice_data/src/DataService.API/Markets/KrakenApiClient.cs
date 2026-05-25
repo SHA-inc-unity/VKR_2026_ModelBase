@@ -62,9 +62,14 @@ public sealed class KrakenApiClient : IMarketDataClient
             }
 
             var datasetSymbol = NormalizeDatasetSymbol(altname);
+            // Kraken's REST AssetPairs emits stale wsnames for XBT/USDT and
+            // XDG/USDT — the live WebSocket v2 only accepts BTC/USDT and
+            // DOGE/USDT. Rewrite via the mapper before we hand the symbol to
+            // the order-book subscription layer.
+            var liveWsname = _symbolMapper.ToWebSocketPair(wsname);
             _pairCache[datasetSymbol] = altname;
-            _websocketNameCache[datasetSymbol] = wsname;
-            symbols.Add(new MarketWatchSymbol(datasetSymbol, wsname));
+            _websocketNameCache[datasetSymbol] = liveWsname;
+            symbols.Add(new MarketWatchSymbol(datasetSymbol, liveWsname));
         }
 
         return symbols;
@@ -390,9 +395,12 @@ public sealed class KrakenApiClient : IMarketDataClient
                     }
 
                     var resolvedPair = altname ?? prop.Name;
+                    // Same WS v2 rewrite as the catalog branch above — see
+                    // FetchMarketWatchSymbolsAsync.
+                    var liveWsname = _symbolMapper.ToWebSocketPair(wsname!);
                     _pairCache[normalized] = resolvedPair;
-                    _websocketNameCache[normalized] = wsname;
-                    return new MarketWatchSymbol(normalized, wsname);
+                    _websocketNameCache[normalized] = liveWsname;
+                    return new MarketWatchSymbol(normalized, liveWsname);
                 }
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("Unknown asset pair", StringComparison.OrdinalIgnoreCase))

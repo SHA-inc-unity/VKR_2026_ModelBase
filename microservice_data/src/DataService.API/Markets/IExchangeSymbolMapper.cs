@@ -36,4 +36,16 @@ public interface IExchangeSymbolMapper
     /// <summary>The single pair candidate used when probing the streaming /
     /// market-watch endpoint (Kraken's wsname format requires a slash).</summary>
     string MarketWatchPairCandidate(string datasetSymbol);
+
+    /// <summary>Translate a REST-advertised <c>wsname</c> into the form the
+    /// exchange's live WebSocket actually accepts. On Kraken these two
+    /// namespaces have diverged for a handful of pairs (notably
+    /// <c>XBT/USDT → BTC/USDT</c> and <c>XDG/USDT → DOGE/USDT</c>): the REST
+    /// <c>AssetPairs</c> endpoint still emits the legacy altname-prefixed
+    /// wsname, but Kraken's WebSocket v2 only recognises the modern colloquial
+    /// names. See the live verification documented in
+    /// <c>https://docs.kraken.com/api/docs/websocket-v2/book</c>. Identity for
+    /// any pair that doesn't need a rewrite, and identity by default for any
+    /// mapper that hasn't opted in.</summary>
+    string ToWebSocketPair(string wsname) => wsname;
 }

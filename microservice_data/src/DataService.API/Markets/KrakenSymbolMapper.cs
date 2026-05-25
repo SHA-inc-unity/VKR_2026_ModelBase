@@ -34,6 +34,27 @@ public sealed class KrakenSymbolMapper : IExchangeSymbolMapper
     private static readonly IReadOnlyDictionary<string, string> _exchangeToDataset =
         _datasetToExchange.ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Kraken WebSocket v2 ↔ REST <c>wsname</c> override table.
+    ///
+    /// REST <c>/0/public/AssetPairs</c> still emits the legacy altname-prefixed
+    /// wsname for two specific pairs: <c>XBT/USDT</c> (BTC) and <c>XDG/USDT</c>
+    /// (DOGE). Kraken's WebSocket v2 only accepts the modern names — verified
+    /// against the WS <c>instrument</c> channel snapshot (1544 pairs returned;
+    /// none of them contain <c>XBT</c> or <c>XDG</c>; both <c>BTC/USDT</c> and
+    /// <c>DOGE/USDT</c> subscribe successfully where the legacy form gets a
+    /// <c>"Currency pair not supported"</c> error).
+    ///
+    /// Other historical X-prefix tickers (<c>XRP</c>, <c>XMR</c>, <c>XTZ</c>,
+    /// <c>XAUT</c>) are not affected and remain identical on both APIs.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> _restToWebsocketWsname =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["XBT/USDT"] = "BTC/USDT",
+            ["XDG/USDT"] = "DOGE/USDT",
+        };
+
     public string Exchange => KrakenApiClient.ExchangeName;
 
     public string ToExchangeBase(string datasetBase)
@@ -115,6 +136,13 @@ public sealed class KrakenSymbolMapper : IExchangeSymbolMapper
         var baseAsset = symbol[..^4];
         var mappedBase = ToExchangeBase(baseAsset);
         return $"{mappedBase}/USDT";
+    }
+
+    public string ToWebSocketPair(string wsname)
+    {
+        if (string.IsNullOrWhiteSpace(wsname)) return wsname;
+        var trimmed = wsname.Trim();
+        return _restToWebsocketWsname.TryGetValue(trimmed, out var mapped) ? mapped : trimmed;
     }
 
     private static void AddIfNew(List<string> list, string item)
