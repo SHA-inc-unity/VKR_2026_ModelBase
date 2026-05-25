@@ -178,10 +178,43 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
             sourcesDenied.Add("query-account-coins-balance:FUND (transport)");
         }
 
+        // 2.5. Bybit Earn (Flexible / Fixed / On-Chain Savings). Lots of users
+        //      park their USDT here — it does NOT show up in wallet-balance or
+        //      funding-balance, so without this probe we under-report the
+        //      portfolio by potentially hundreds of dollars.
+        //      Requires the "Earn" read permission on the API key.
+        var missingPermissions = new List<string>();
+        var earnCoins = new List<BybitWalletCoin>();
+        var earnDenied = false;
+        foreach (var category in new[] { "FlexibleSaving", "FixedSaving", "OnChain" })
+        {
+            try
+            {
+                var rows = await TryGetEarnPositionsAsync(apiKey, apiSecret, category, ct);
+                if (rows is { Count: > 0 })
+                {
+                    sourcesUsed.Add($"earn:{category}:{rows.Count}");
+                    earnCoins.AddRange(rows);
+                }
+            }
+            catch (BybitApiException ex) when (ex.RetCode is 10005 or 10003 or 10004)
+            {
+                earnDenied = true;
+                sourcesDenied.Add($"earn:{category} ({ex.RetCode})");
+                lastRetMsg = ex.RetMsg;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Bybit earn-position call failed for {Category}", category);
+                sourcesDenied.Add($"earn:{category} (transport)");
+            }
+        }
+        if (earnDenied) missingPermissions.Add("Earn");
+        if (earnCoins.Count > 0) MergeCoins(bySymbol, earnCoins);
+
         // 3. Probe copy-trading positions. Bybit requires the "Copy Trade" scope
         //    on the key — if it's missing we get 10005 and flag the permission
         //    so the UI can ask the user to enable it on api.bybit.com.
-        var missingPermissions = new List<string>();
         IReadOnlyList<BybitCopyTradingPosition> copyPositions = [];
         try
         {
@@ -340,6 +373,22 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
     };
 
     /// <summary>
+    /// Fetches Bybit Earn positions (Flexible / Fixed / On-Chain savings).
+    /// Requires the "Earn" scope on the API key. Returns rows as
+    /// <see cref="BybitWalletCoin"/> with USD valuation left at 0 — the caller
+    /// enriches via the spot ticker (or sets 1.0 for stables).
+    /// </summary>
+    private async Task<IReadOnlyList<BybitWalletCoin>?> TryGetEarnPositionsAsync(
+        string apiKey, string apiSecret, string category, CancellationToken ct)
+    {
+        var body = await SignedGetAsync(
+            "/v5/earn/position",
+            $"category={category}",
+            apiKey, apiSecret, ct);
+        return ParseEarnPositions(body, category);
+    }
+
+    /// <summary>
     /// Fetches the user's copy-trading positions. Requires the "Copy Trade" scope
     /// on the Bybit API key. The endpoint exists in two flavours — leader and
     /// follower — but both return the same shape; we try leader first and fall
@@ -465,6 +514,50 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
                     // is expected to enrich it via spot tickers.
                     UsdValue = 0m,
                     SourceAccountType = "FUND",
+                });
+            }
+        }
+        return coins;
+    }
+
+    private static List<BybitWalletCoin> ParseEarnPositions(string json, string category)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var retCode = root.TryGetProperty("retCode", out var rcEl) ? rcEl.GetInt32() : -1;
+        var retMsg = root.TryGetProperty("retMsg", out var rmEl) ? (rmEl.GetString() ?? "") : "";
+        if (retCode != 0) throw new BybitApiException(retCode, retMsg);
+
+        var coins = new List<BybitWalletCoin>();
+        if (root.TryGetProperty("result", out var result)
+            && result.TryGetProperty("list", out var list)
+            && list.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var p in list.EnumerateArray())
+            {
+                // Bybit Earn rows expose the position as "amount" (principal) on
+                // some categories and "totalAmount"/"holdingPrincipal" on others.
+                // We try them all in order of likelihood.
+                decimal amount = 0m;
+                foreach (var field in new[] { "amount", "totalAmount", "holdingPrincipal", "principal", "totalPrincipal" })
+                {
+                    if (p.TryGetProperty(field, out var el))
+                    {
+                        amount = ParseDecimal(el);
+                        if (amount > 0m) break;
+                    }
+                }
+                if (amount <= 0m) continue;
+
+                coins.Add(new BybitWalletCoin
+                {
+                    Coin = p.TryGetProperty("coin", out var nm) ? (nm.GetString() ?? "") : "",
+                    Equity = amount,
+                    WalletBalance = amount,
+                    UsdValue = 0m,            // priced upstream
+                    Locked = amount,           // funds are staked, treat as locked
+                    SourceAccountType = $"EARN_{category.ToUpperInvariant()}",
                 });
             }
         }
