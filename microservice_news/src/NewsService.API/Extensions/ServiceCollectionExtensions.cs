@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Sockets;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
@@ -34,13 +35,22 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient("cryptopanic", c =>
         {
             c.Timeout = TimeSpan.FromSeconds(30);
-            c.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; ModelLine-NewsService/1.0; +https://modelline.app)");
-            c.DefaultRequestHeaders.Accept.ParseAdd("application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5");
+            // Send a real browser User-Agent + Accept-Language. Some news CDNs (Cloudflare in
+            // front of Cointelegraph / CoinDesk / Decrypt) return 403/throttle responses to
+            // plain bot agents, and only deliver the full RSS body when the request advertises
+            // the gzip support and language headers a real browser would.
+            c.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            c.DefaultRequestHeaders.Accept.ParseAdd(
+                "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5");
+            c.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+            c.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip, deflate, br");
         })
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
             AllowAutoRedirect = true,
             MaxAutomaticRedirections = 5,
+            AutomaticDecompression = DecompressionMethods.All,
             // Force IPv4 — the container's DNS often hands out AAAA records that have no working
             // outbound route in our docker network, which manifests as 30s read timeouts.
             ConnectCallback = static async (ctx, ct) =>
