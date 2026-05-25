@@ -135,7 +135,7 @@ public static class MigrationExtensions
                     taker_fee_bps numeric NULL,
                     min_notional numeric NULL,
                     max_leverage numeric NULL,
-                    raw_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+                    raw_json jsonb NOT NULL DEFAULT '{{}}'::jsonb,
                     captured_at timestamptz NOT NULL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS ix_exchange_metadata_exchange_symbol_category
