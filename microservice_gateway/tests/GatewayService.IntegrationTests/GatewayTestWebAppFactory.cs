@@ -473,4 +473,25 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
             UpdatedAt = UpdatedAt,
         }));
     }
+
+    public Task<ServiceResult<MarketGlobalSummaryResponse>> GetGlobalSummaryAsync(string? exchange = null, CancellationToken ct = default)
+    {
+        return Task.FromResult(ServiceResult<MarketGlobalSummaryResponse>.Ok(new MarketGlobalSummaryResponse
+        {
+            Exchange = string.IsNullOrWhiteSpace(exchange) ? "bybit" : exchange!.ToLowerInvariant(),
+            TrackedCount = 0,
+            Gainers = 0,
+            Losers = 0,
+            TotalVolume24h = 0m,
+            AverageChange24h = 0m,
+            SentimentValue = 50,
+            SentimentLabel = "Neutral",
+            SentimentSource = "synthetic",
+            Meta = new FrontendResponseMetaDto
+            {
+                GeneratedAt = UpdatedAt,
+                UpdatedAt = UpdatedAt,
+            },
+        }));
+    }
 }

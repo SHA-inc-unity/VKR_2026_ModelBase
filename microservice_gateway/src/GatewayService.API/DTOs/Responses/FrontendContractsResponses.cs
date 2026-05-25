@@ -17,6 +17,35 @@ public sealed record PublicMarketOverviewDto
     public string? FearGreedLabel { get; init; }
 }
 
+/// Per-exchange aggregate computed from the MW-tracked symbol universe.
+/// Backend-side aggregation so the client doesn't have to keep tickers
+/// for every MW symbol in memory (the per-symbol live poller only watches
+/// a small subset — usually trending + focused — which would otherwise
+/// silently undercount the global statistics card).
+public sealed record MarketGlobalSummaryResponse
+{
+    /// Echoes the requested exchange (`bybit`, `binance`, `kraken`).
+    public string Exchange { get; init; } = string.Empty;
+    /// Number of MW-tracked symbols that contributed to this summary.
+    public int TrackedCount { get; init; }
+    /// Number of symbols whose 24h change was strictly positive.
+    public int Gainers { get; init; }
+    /// Number of symbols whose 24h change was strictly negative.
+    public int Losers { get; init; }
+    /// Sum of 24h turnover across tracked symbols (USD).
+    public decimal TotalVolume24h { get; init; }
+    /// Arithmetic mean of 24h % change across tracked symbols.
+    public decimal AverageChange24h { get; init; }
+    /// 0..100 sentiment score; uses Fear&Greed when available, else
+    /// breadth-weighted average of move and gainers / total.
+    public int SentimentValue { get; init; }
+    public string SentimentLabel { get; init; } = string.Empty;
+    /// "fear_greed" when SentimentValue came from the canonical feed,
+    /// "synthetic" when it was derived locally from the tracked ticker set.
+    public string SentimentSource { get; init; } = "synthetic";
+    public FrontendResponseMetaDto Meta { get; init; } = new();
+}
+
 public sealed record FrontendResponseMetaDto
 {
     public DateTimeOffset GeneratedAt { get; init; } = DateTimeOffset.UtcNow;

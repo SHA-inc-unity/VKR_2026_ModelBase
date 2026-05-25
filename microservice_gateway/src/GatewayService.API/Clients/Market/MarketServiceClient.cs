@@ -12,6 +12,7 @@ public sealed class MarketServiceClient : IMarketServiceClient
 {
     private const string SnapshotCacheKey = "market:snapshot:linear:v1";
     private const string CanonicalOverviewCacheKey = "market:overview:canonical:v2";
+    private const string GlobalSummaryCacheKeyPrefix = "market:summary:tracked:v2";
     private const string SnapshotSource = "bybit-linear-tickers";
     private const string RealtimeSource = "market-watch-live";
     private const string SnapshotFallbackSource = "snapshot-fallback";
@@ -579,6 +580,176 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         }
 
         return (null, ConverterPriceSource.None);
+    }
+
+    /// <inheritdoc />
+    public async Task<ServiceResult<MarketGlobalSummaryResponse>> GetGlobalSummaryAsync(
+        string? exchange = null,
+        CancellationToken ct = default)
+    {
+        var normalizedExchange = NormalizeSummaryExchange(exchange);
+        var ttl = TimeSpan.FromSeconds(Math.Max(5, _settings.GlobalSummaryCacheTtlSeconds));
+        var cacheKey = $"{GlobalSummaryCacheKeyPrefix}:{normalizedExchange}";
+
+        var summary = await _cache.GetOrCreateAsync(
+            cacheKey,
+            ttl,
+            () => BuildGlobalSummaryAsync(normalizedExchange, ct),
+            ct);
+
+        return ServiceResult<MarketGlobalSummaryResponse>.Ok(summary);
+    }
+
+    /// Aggregate the snapshot + canonical-overview feeds across the
+    /// MW-tracked symbol universe for [exchange]. Honest about what's
+    /// missing: when the snapshot has no 24h-change for a tracked symbol
+    /// (e.g. a Kraken-only symbol that Bybit doesn't carry), that symbol
+    /// still counts toward TrackedCount but contributes zero to the
+    /// gainers/losers/avg-change breakdown — and the meta lists it as
+    /// a degraded field so the client can show a hint.
+    private async Task<MarketGlobalSummaryResponse> BuildGlobalSummaryAsync(
+        string exchange,
+        CancellationToken ct)
+    {
+        var configTask = _marketConfig.GetConfigAsync(exchange, ct);
+        var snapshotTask = LoadSnapshotAsync(ct);
+        var canonicalTask = LoadCanonicalOverviewAsync(ct);
+        await Task.WhenAll(configTask, snapshotTask, canonicalTask);
+
+        var config = await configTask;
+        var snapshot = await snapshotTask;
+        var canonical = await canonicalTask;
+
+        var tracked = (config.Symbols ?? Array.Empty<string>())
+            .Where(static s => !string.IsNullOrWhiteSpace(s))
+            .Select(static s => s.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var snapshotBySymbol = snapshot.Items.ToDictionary(
+            item => item.Symbol,
+            StringComparer.OrdinalIgnoreCase);
+
+        // Per-symbol contributions. Symbols not present in the Bybit
+        // snapshot are skipped from change-stats (we have no 24h data
+        // for them) but still counted as tracked.
+        var gainers = 0;
+        var losers = 0;
+        var contributingCount = 0;
+        decimal volumeSum = 0m;
+        decimal changeSum = 0m;
+        var missingChangeData = new List<string>();
+
+        foreach (var symbol in tracked)
+        {
+            if (!snapshotBySymbol.TryGetValue(symbol, out var ticker))
+            {
+                missingChangeData.Add(symbol);
+                continue;
+            }
+
+            volumeSum += ticker.Volume24h;
+
+            // Treat zero-change as neither gainer nor loser (matches the
+            // existing UI semantics).
+            if (ticker.Change24h > 0)
+            {
+                gainers++;
+            }
+            else if (ticker.Change24h < 0)
+            {
+                losers++;
+            }
+            changeSum += ticker.Change24h;
+            contributingCount++;
+        }
+
+        var averageChange = contributingCount > 0
+            ? decimal.Round(changeSum / contributingCount, 2, MidpointRounding.AwayFromZero)
+            : 0m;
+
+        // Sentiment: prefer canonical Fear&Greed; otherwise synthesise
+        // from breadth (gainers / contributing) and clamped average
+        // 24h move. Keeps the client logic trivial.
+        int sentimentValue;
+        string sentimentLabel;
+        string sentimentSource;
+        if (canonical.FearGreedValue is int fg && fg > 0)
+        {
+            sentimentValue = Math.Clamp(fg, 0, 100);
+            sentimentLabel = string.IsNullOrWhiteSpace(canonical.FearGreedLabel)
+                ? SentimentLabelFor(sentimentValue)
+                : canonical.FearGreedLabel;
+            sentimentSource = "fear_greed";
+        }
+        else if (contributingCount > 0)
+        {
+            var breadth = (double)gainers / contributingCount;
+            var clampedMove = Math.Clamp((double)averageChange, -8.0, 8.0);
+            var moveScore = (clampedMove + 8.0) / 16.0;
+            sentimentValue = (int)Math.Round(((breadth * 0.75) + (moveScore * 0.25)) * 100);
+            sentimentValue = Math.Clamp(sentimentValue, 0, 100);
+            sentimentLabel = SentimentLabelFor(sentimentValue);
+            sentimentSource = "synthetic";
+        }
+        else
+        {
+            sentimentValue = 50;
+            sentimentLabel = SentimentLabelFor(50);
+            sentimentSource = "synthetic";
+        }
+
+        var degradedFields = new List<string>();
+        if (missingChangeData.Count > 0)
+        {
+            degradedFields.Add("change24h");
+            degradedFields.Add("volume24h");
+        }
+
+        return new MarketGlobalSummaryResponse
+        {
+            Exchange = exchange,
+            TrackedCount = tracked.Length,
+            Gainers = gainers,
+            Losers = losers,
+            TotalVolume24h = DecimalRound(volumeSum),
+            AverageChange24h = averageChange,
+            SentimentValue = sentimentValue,
+            SentimentLabel = sentimentLabel,
+            SentimentSource = sentimentSource,
+            Meta = new FrontendResponseMetaDto
+            {
+                GeneratedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = ResolveCompositeUpdatedAt(snapshot.UpdatedAt, canonical.UpdatedAt),
+                DegradedFields = degradedFields,
+                DegradedSections = missingChangeData.Count > 0
+                    ? new[] { "trackedChange" }
+                    : Array.Empty<string>(),
+            },
+        };
+    }
+
+    private static string SentimentLabelFor(int value)
+    {
+        if (value <= 20) return "Extreme Fear";
+        if (value <= 40) return "Fear";
+        if (value < 60) return "Neutral";
+        if (value < 80) return "Greed";
+        return "Extreme Greed";
+    }
+
+    private static string NormalizeSummaryExchange(string? exchange)
+    {
+        if (string.IsNullOrWhiteSpace(exchange))
+        {
+            return "bybit";
+        }
+        var trimmed = exchange.Trim().ToLowerInvariant();
+        return trimmed switch
+        {
+            "bybit" or "binance" or "kraken" => trimmed,
+            _ => "bybit",
+        };
     }
 
     private async Task<SnapshotEnvelope> LoadSnapshotAsync(CancellationToken ct)

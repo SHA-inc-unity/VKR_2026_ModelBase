@@ -74,6 +74,36 @@ public sealed class MarketController : ControllerBase
         return Ok(result.Value);
     }
 
+    /// <summary>
+    /// Returns the per-exchange Global Stats summary: tracked-symbol count,
+    /// total 24h volume, gainers / losers split, average 24h change, and
+    /// sentiment (Fear &amp; Greed when available, synthetic otherwise).
+    ///
+    /// Aggregation runs server-side across the entire MW-tracked symbol
+    /// universe for the requested exchange — the client used to compute
+    /// this from its live ticker map, which only held a small subset of
+    /// the tracked symbols (the trending+focused window), so the home
+    /// screen badly undercounted "Active Assets".
+    /// </summary>
+    [HttpGet("overview/summary")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetOverviewSummary(
+        [FromQuery] string? exchange = null,
+        CancellationToken ct = default)
+    {
+        var result = await _market.GetGlobalSummaryAsync(exchange, ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                ErrorResponse.ServiceUnavailable("market_overview_summary", HttpContext.GetCorrelationId()));
+        }
+
+        // Same cache window as the parent overview — server already
+        // caches the heavy work in Redis at GlobalSummaryCacheTtlSeconds.
+        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(result.Value);
+    }
+
     [HttpGet("tickers")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]

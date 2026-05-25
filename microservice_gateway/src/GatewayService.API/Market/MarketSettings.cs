@@ -50,6 +50,9 @@ public sealed class MarketSettings
     /// <summary>How long to cache the canonical global overview payload (seconds).</summary>
     public int GlobalOverviewCacheTtlSeconds { get; init; } = 180;
 
+    /// <summary>How long to cache the per-exchange MW-tracked global summary (seconds).</summary>
+    public int GlobalSummaryCacheTtlSeconds { get; init; } = 30;
+
     /// <summary>
     /// Per-instance in-memory hot cache TTL (seconds) layered on top of the
     /// distributed cache to reduce Redis round-trips for bursty read traffic.

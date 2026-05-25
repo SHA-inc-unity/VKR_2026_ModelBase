@@ -25,4 +25,11 @@ public interface IMarketServiceClient
         decimal amount,
         string? exchange = null,
         CancellationToken ct = default);
+    /// Per-exchange aggregate (count, gainers, losers, total volume,
+    /// average change, sentiment) computed across the full MW-tracked
+    /// symbol universe. Cached server-side so the client can render
+    /// the Global Stats card without holding 17+ tickers in memory.
+    Task<ServiceResult<MarketGlobalSummaryResponse>> GetGlobalSummaryAsync(
+        string? exchange = null,
+        CancellationToken ct = default);
 }
