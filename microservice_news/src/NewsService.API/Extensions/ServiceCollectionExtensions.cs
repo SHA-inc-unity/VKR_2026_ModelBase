@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
 using NewsService.API.BackgroundJobs;
@@ -36,10 +37,30 @@ public static class ServiceCollectionExtensions
             c.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; ModelLine-NewsService/1.0; +https://modelline.app)");
             c.DefaultRequestHeaders.Accept.ParseAdd("application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5");
         })
-        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
             AllowAutoRedirect = true,
             MaxAutomaticRedirections = 5,
+            // Force IPv4 — the container's DNS often hands out AAAA records that have no working
+            // outbound route in our docker network, which manifests as 30s read timeouts.
+            ConnectCallback = static async (ctx, ct) =>
+            {
+                var endpoint = ctx.DnsEndPoint;
+                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+                {
+                    NoDelay = true,
+                };
+                try
+                {
+                    await socket.ConnectAsync(endpoint.Host, endpoint.Port, ct);
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            },
         });
 
         services.AddHostedService<CryptoPanicIngesterService>();
