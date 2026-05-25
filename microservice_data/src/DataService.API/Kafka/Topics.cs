@@ -49,6 +49,10 @@ public static class Topics
     public const string CmdDataMarketWatcherSetEnabled= "cmd.data.market_watcher.set_enabled";
     public const string CmdDataMarketWatcherRows      = "cmd.data.market_watcher.rows";
     public const string CmdDataMarketWatcherLogs      = "cmd.data.market_watcher.logs";
+    // Returns the dataset symbols MW is actively tracking on a given exchange.
+    // Drives the user-facing currency dropdown so it only lists symbols whose
+    // {exchange}_{symbol}_{timeframe} tables are being filled in real time.
+    public const string CmdDataMarketWatcherTracked   = "cmd.data.market_watcher.tracked_symbols";
 
     // ── Events (fire-and-forget, no correlation round-trip) ──────────────
     public const string EvtDataIngestProgress         = "events.data.ingest.progress";
@@ -94,5 +98,6 @@ public static class Topics
         CmdDataMarketWatcherSetEnabled,
         CmdDataMarketWatcherRows,
         CmdDataMarketWatcherLogs,
+        CmdDataMarketWatcherTracked,
     ];
 }

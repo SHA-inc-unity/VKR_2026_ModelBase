@@ -155,10 +155,10 @@ public sealed class MarketQueueContainer : IDisposable
 /// <summary>Always treats any symbol as known; returns empty config.</summary>
 internal sealed class AlwaysKnownSymbolService : IMarketConfigService
 {
-    public Task<bool> IsKnownSymbolAsync(string symbol, CancellationToken ct = default)
+    public Task<bool> IsKnownSymbolAsync(string symbol, string? exchange = null, CancellationToken ct = default)
         => Task.FromResult(true);
 
-    public Task<MarketConfigResponse> GetConfigAsync(CancellationToken ct = default)
+    public Task<MarketConfigResponse> GetConfigAsync(string? exchange = null, CancellationToken ct = default)
         => Task.FromResult(new MarketConfigResponse
         {
             Symbols    = [],

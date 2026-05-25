@@ -57,7 +57,7 @@ public sealed class ChartRequestQueueTests
         // custom IDataServiceClient / IMarketConfigService that encode the logic above.
         var configMock = new Mock<IMarketConfigService>();
         configMock
-            .Setup(c => c.IsKnownSymbolAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Setup(c => c.IsKnownSymbolAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
         var cacheMock = new Mock<IMarketCacheService>();

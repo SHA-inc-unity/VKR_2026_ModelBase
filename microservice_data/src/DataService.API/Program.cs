@@ -88,6 +88,9 @@ try
     builder.Services.AddSingleton<BybitRateLimiter>();
     builder.Services.AddSingleton<BinanceRateLimiter>();
     builder.Services.AddSingleton<KrakenRateLimiter>();
+    // Per-exchange symbol mapper for Kraken (BTC↔XBT, MATIC→POL, …).
+    // Bybit and Binance use canonical dataset names, so they need no mapper.
+    builder.Services.AddSingleton<IExchangeSymbolMapper, KrakenSymbolMapper>();
     builder.Services.AddHttpClient<BybitApiClient>(client =>
     {
         client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);

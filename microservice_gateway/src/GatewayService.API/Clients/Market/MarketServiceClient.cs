@@ -485,7 +485,7 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
             TimeSpan.FromSeconds(Math.Max(1, _settings.SnapshotCacheTtlSeconds)),
             async () =>
             {
-                var config = await _marketConfig.GetConfigAsync(ct);
+                var config = await _marketConfig.GetConfigAsync(null, ct);
                 return await FetchSnapshotAsync(config.Symbols, ct);
             },
             ct);

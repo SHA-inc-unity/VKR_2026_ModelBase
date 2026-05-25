@@ -20,7 +20,7 @@ public sealed class MarketServiceClientOverviewTests
     [Fact]
     public async Task GetPublicOverviewAsync_prefers_canonical_global_metrics_over_snapshot_proxies()
     {
-        _marketConfig.Setup(service => service.GetConfigAsync(It.IsAny<CancellationToken>()))
+        _marketConfig.Setup(service => service.GetConfigAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new MarketConfigResponse
             {
                 Symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
@@ -123,7 +123,7 @@ public sealed class MarketServiceClientOverviewTests
     [Fact]
     public async Task GetPublicOverviewAsync_marks_market_overview_degraded_when_canonical_feeds_fail()
     {
-        _marketConfig.Setup(service => service.GetConfigAsync(It.IsAny<CancellationToken>()))
+        _marketConfig.Setup(service => service.GetConfigAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new MarketConfigResponse
             {
                 Symbols = ["BTCUSDT", "ETHUSDT"],

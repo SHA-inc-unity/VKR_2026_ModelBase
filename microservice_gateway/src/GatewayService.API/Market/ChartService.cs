@@ -71,7 +71,7 @@ public class ChartService : IChartService
         // For non-Bybit exchanges we skip the strict whitelist for now — typos
         // will surface as a downstream 503 rather than a 400 until we add
         // per-exchange instrument lists. (See plan: Phase 1 / risks.)
-        if (exchangeKey == "bybit" && !await _config.IsKnownSymbolAsync(symbolUpper, ct))
+        if (exchangeKey == "bybit" && !await _config.IsKnownSymbolAsync(symbolUpper, exchangeKey, ct))
             return ServiceResult<ChartResponse>.Fail(
                 $"INVALID_SYMBOL: '{symbol}' is not in the active symbol list");
 

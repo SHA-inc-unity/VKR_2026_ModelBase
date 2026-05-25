@@ -13,4 +13,5 @@ public static class DataTopics
     public const string CmdDataDatasetJobsStart = "cmd.data.dataset.jobs.start";
     public const string CmdDataDatasetJobsGet   = "cmd.data.dataset.jobs.get";
     public const string CmdDataMarketWatcherRows = "cmd.data.market_watcher.rows";
+    public const string CmdDataMarketWatcherTracked = "cmd.data.market_watcher.tracked_symbols";
 }

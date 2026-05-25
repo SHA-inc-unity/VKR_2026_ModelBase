@@ -20,15 +20,21 @@ public sealed class KrakenApiClient : IMarketDataClient
     private readonly HttpClient _http;
     private readonly ILogger<KrakenApiClient> _log;
     private readonly KrakenRateLimiter _rateLimiter;
+    private readonly IExchangeSymbolMapper _symbolMapper;
     private readonly ConcurrentDictionary<string, string> _pairCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _websocketNameCache = new(StringComparer.OrdinalIgnoreCase);
 
     public string Exchange => ExchangeName;
 
-    public KrakenApiClient(HttpClient http, KrakenRateLimiter rateLimiter, ILogger<KrakenApiClient> log)
+    public KrakenApiClient(
+        HttpClient http,
+        KrakenRateLimiter rateLimiter,
+        IExchangeSymbolMapper symbolMapper,
+        ILogger<KrakenApiClient> log)
     {
         _http = http;
         _rateLimiter = rateLimiter;
+        _symbolMapper = symbolMapper;
         _log = log;
     }
 
@@ -556,37 +562,17 @@ public sealed class KrakenApiClient : IMarketDataClient
         return new HttpRequestException($"GET {url} returned {(int)statusCode} ({statusCode}){snippet}", null, statusCode);
     }
 
-    private static string[] BuildPairCandidates(string symbol)
-    {
-        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { symbol };
-        if (!symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase)) return candidates.ToArray();
+    // Pair-naming / asset-rename logic lives in IExchangeSymbolMapper so all of
+    // Kraken's quirks (XBT↔BTC, MATIC→POL, future renames) sit in one place
+    // instead of being scattered through this client. See KrakenSymbolMapper.cs.
+    private IReadOnlyList<string> BuildPairCandidates(string symbol) =>
+        _symbolMapper.PairCandidates(symbol);
 
-        var baseAsset = symbol[..^4];
-        var mappedBase = baseAsset.Equals("BTC", StringComparison.OrdinalIgnoreCase) ? "XBT" : baseAsset;
-        candidates.Add($"{baseAsset}/USDT");
-        candidates.Add($"{mappedBase}USDT");
-        candidates.Add($"{mappedBase}/USDT");
-        return candidates.ToArray();
-    }
+    private string BuildMarketWatchPairCandidate(string symbol) =>
+        _symbolMapper.MarketWatchPairCandidate(symbol);
 
-    private static string BuildMarketWatchPairCandidate(string symbol)
-    {
-        if (!symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase))
-        {
-            return symbol;
-        }
-
-        var baseAsset = symbol[..^4];
-        return $"{baseAsset}/USDT";
-    }
-
-    private static string NormalizeDatasetSymbol(string symbol)
-    {
-        var normalized = symbol.Trim().ToUpperInvariant();
-        return normalized.StartsWith("XBT", StringComparison.OrdinalIgnoreCase)
-            ? $"BTC{normalized[3..]}"
-            : normalized;
-    }
+    private string NormalizeDatasetSymbol(string symbol) =>
+        _symbolMapper.NormalizeDatasetSymbol(symbol);
 
     private static long GetReachableLookbackMs(long stepMs)
     {
@@ -646,10 +632,27 @@ public sealed class KrakenApiClient : IMarketDataClient
         var ordered = rows.OrderBy(x => x.TimestampMs).ToList();
         var result = new List<(long, decimal, decimal, decimal, decimal, decimal, decimal)>();
 
+        // The latest bucket-key present in the input. Kraken's REST OHLC withholds
+        // still-forming candles, so the trailing aggregate bucket may be short
+        // by 1 underlying base candle (e.g. 2-of-3 for a 3m bucket). We accept
+        // such a partial trailing bucket — its volume/turnover will be
+        // slightly understated until the missing base candle arrives on the
+        // next watcher tick, at which point the bucket is re-upserted.
+        long? trailingKey = ordered.Count == 0
+            ? (long?)null
+            : ordered[^1].TimestampMs - ordered[^1].TimestampMs % stepMs;
+
         foreach (var group in ordered.GroupBy(x => x.TimestampMs - x.TimestampMs % stepMs))
         {
             var bucket = group.OrderBy(x => x.TimestampMs).ToList();
-            if (bucket.Count < aggregateFactor) continue;
+            var isTrailingBucket = trailingKey.HasValue && group.Key == trailingKey.Value;
+            // Interior buckets must be fully populated; trailing edge tolerates
+            // a single missing base candle to survive Kraken's "still-forming"
+            // semantics on the latest bar.
+            var minRequired = isTrailingBucket
+                ? Math.Max(1, aggregateFactor - 1)
+                : aggregateFactor;
+            if (bucket.Count < minRequired) continue;
             result.Add((
                 group.Key,
                 bucket[0].Open,

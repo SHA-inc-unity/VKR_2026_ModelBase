@@ -370,6 +370,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataMarketWatcherSetEnabled=> HandleMarketWatcherSetEnabled(payload),
             Topics.CmdDataMarketWatcherRows      => await HandleMarketWatcherRowsAsync(payload, ct),
             Topics.CmdDataMarketWatcherLogs      => HandleMarketWatcherLogs(payload),
+            Topics.CmdDataMarketWatcherTracked   => HandleMarketWatcherTrackedSymbols(payload),
             _                                => new { error = $"Unknown topic: {topic}" },
         };
 
@@ -494,6 +495,30 @@ public sealed partial class KafkaConsumerService : BackgroundService
         });
 
         return new { logs };
+    }
+
+    /// <summary>
+    /// Returns dataset symbols MW is actively tracking on the given exchange.
+    /// Backs the gateway's <c>GET /api/v1/market/config?exchange=…</c> so the
+    /// user-facing dropdown lists only symbols whose `{exchange}_{symbol}_…`
+    /// tables are being filled in real time. Falls back to an empty list when
+    /// MW has not yet completed its first discovery cycle — callers are
+    /// expected to layer their own persisted fallback (see MarketConfigService).
+    /// </summary>
+    private object HandleMarketWatcherTrackedSymbols(JsonElement payload)
+    {
+        var exchange = TryGetString(payload, "exchange");
+        if (string.IsNullOrWhiteSpace(exchange))
+        {
+            return new { error = "exchange is required", code = "bad_request" };
+        }
+
+        var symbols = _marketWatcher.GetTrackedSymbols(exchange);
+        return new
+        {
+            exchange = exchange.Trim().ToLowerInvariant(),
+            symbols,
+        };
     }
 
     /// <summary>

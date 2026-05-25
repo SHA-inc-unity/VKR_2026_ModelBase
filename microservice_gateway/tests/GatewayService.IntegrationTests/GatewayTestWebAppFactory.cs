@@ -102,7 +102,7 @@ internal sealed class FakeMarketConfigService : IMarketConfigService
 {
     private static readonly IReadOnlyList<string> Symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 
-    public Task<MarketConfigResponse> GetConfigAsync(CancellationToken ct = default)
+    public Task<MarketConfigResponse> GetConfigAsync(string? exchange = null, CancellationToken ct = default)
     {
         var config = new MarketConfigResponse
         {
@@ -127,7 +127,7 @@ internal sealed class FakeMarketConfigService : IMarketConfigService
         return Task.FromResult(config);
     }
 
-    public Task<bool> IsKnownSymbolAsync(string symbol, CancellationToken ct = default) =>
+    public Task<bool> IsKnownSymbolAsync(string symbol, string? exchange = null, CancellationToken ct = default) =>
         Task.FromResult(Symbols.Contains(symbol, StringComparer.OrdinalIgnoreCase));
 }
 

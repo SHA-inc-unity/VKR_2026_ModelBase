@@ -317,6 +317,30 @@ public sealed class MarketWatcherRuntimeState
         }
     }
 
+    /// <summary>
+    /// Distinct dataset symbols MW is currently flushing on a given exchange,
+    /// sorted alphabetically. Used by the gateway's /api/v1/market/config so
+    /// the user dropdown lists only the universe that is being persisted in
+    /// real time (no orphan dropdown entries with empty Postgres tables).
+    /// </summary>
+    public IReadOnlyList<string> GetTrackedSymbols(string exchange)
+    {
+        if (string.IsNullOrWhiteSpace(exchange))
+        {
+            return Array.Empty<string>();
+        }
+
+        lock (_gate)
+        {
+            return _rows.Values
+                .Where(row => string.Equals(row.Exchange, exchange, StringComparison.OrdinalIgnoreCase))
+                .Select(row => row.Symbol)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+    }
+
     public IReadOnlyList<MarketWatcherLogEntry> ReadLogs(int limit)
     {
         var safeLimit = Math.Clamp(limit, 1, MaxLogs);

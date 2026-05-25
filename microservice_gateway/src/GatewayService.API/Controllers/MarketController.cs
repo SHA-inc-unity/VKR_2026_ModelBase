@@ -48,9 +48,11 @@ public sealed class MarketController : ControllerBase
     /// <response code="200">Market configuration response.</response>
     [HttpGet("config")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetConfig(CancellationToken ct)
+    public async Task<IActionResult> GetConfig(
+        [FromQuery] string? exchange = null,
+        CancellationToken ct = default)
     {
-        var response = await _marketConfig.GetConfigAsync(ct);
+        var response = await _marketConfig.GetConfigAsync(exchange, ct);
 
         // Stale-while-revalidate: config changes at most every hour.
         Response.Headers["Cache-Control"] = "public, max-age=60, stale-while-revalidate=3540";

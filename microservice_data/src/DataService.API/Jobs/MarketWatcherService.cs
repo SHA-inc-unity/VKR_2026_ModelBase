@@ -895,8 +895,34 @@ public sealed class MarketWatcherService : BackgroundService
 
         if (rows.Count != targetTimestamps.Length)
         {
-            throw new InvalidOperationException(
-                $"Market watcher could not hydrate {targetTimestamps.Length - rows.Count} closed candles for {tableName}");
+            var missing = targetTimestamps.Length - rows.Count;
+            // Recoverable: the missing candles will be re-attempted on the next
+            // watcher tick (the live state still holds the open bucket, and the
+            // exchange will fill in the trailing base candle that was withheld
+            // as still-forming on this round). Throwing here used to crash the
+            // entire watcher loop for *every* exchange — a single Kraken miss
+            // would lose Bybit/Binance ticks too. Demote to a warning + skip
+            // this table; partial rows are not persisted to avoid feature gaps.
+            _log.LogWarning(
+                "Market watcher could not hydrate {Missing}/{Total} closed candles for {Table}; skipping this flush",
+                missing, targetTimestamps.Length, tableName);
+            _state.AppendLog(
+                "warning",
+                "persist.hydrate_miss",
+                $"Skipped {missing}/{targetTimestamps.Length} closed candles for {tableName} (will retry next tick)",
+                new Dictionary<string, object?>
+                {
+                    ["table"] = tableName,
+                    ["missing"] = missing,
+                    ["target"] = targetTimestamps.Length,
+                });
+            if (rows.Count == 0)
+            {
+                return;
+            }
+            // Persist only the rows we successfully hydrated, recomputing the
+            // target list so feature back-fill stops at the last good row.
+            targetTimestamps = rows.Select(r => r.TimestampMs).OrderBy(t => t).ToArray();
         }
 
         await _datasetRepo.CreateTableIfNotExistsAsync(tableName, ct);

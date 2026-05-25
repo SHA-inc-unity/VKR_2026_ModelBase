@@ -1,5 +1,7 @@
+using System.Text.Json;
 using FluentAssertions;
 using GatewayService.API.DTOs.Responses;
+using GatewayService.API.Kafka;
 using GatewayService.API.Market;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -56,14 +58,33 @@ public sealed class MarketConfigServiceTests
         return mock.Object;
     }
 
+    /// <summary>
+    /// Stub Kafka client that always replies with an empty payload, forcing the
+    /// MarketConfigService to fall back to the Bybit symbol provider (the legacy
+    /// universe source) — which is what these tests expect.
+    /// </summary>
+    private sealed class NoopKafka : IKafkaRequestClient
+    {
+        public Task<JsonElement> RequestAsync(string topic, object payload, TimeSpan timeout, CancellationToken ct = default)
+            => Task.FromResult(JsonDocument.Parse("{}").RootElement.Clone());
+    }
+
+    private static MarketConfigService NewSut(
+        IBybitSymbolProvider? provider = null,
+        MarketSettings? settings = null)
+        => new(
+            provider ?? SymbolProvider(),
+            new PassthroughCache(),
+            new NoopKafka(),
+            Options(settings),
+            NullLogger<MarketConfigService>.Instance);
+
     // ── Tests ─────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task GetConfigAsync_includes_all_eleven_timeframes()
     {
-        var sut = new MarketConfigService(
-            SymbolProvider(), new PassthroughCache(), Options(),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut();
 
         var config = await sut.GetConfigAsync();
 
@@ -74,9 +95,7 @@ public sealed class MarketConfigServiceTests
     public async Task GetConfigAsync_returns_symbols_from_provider()
     {
         var symbols = new[] { "BTCUSDT", "ETHUSDT" };
-        var sut = new MarketConfigService(
-            SymbolProvider(symbols), new PassthroughCache(), Options(),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut(SymbolProvider(symbols));
 
         var config = await sut.GetConfigAsync();
 
@@ -87,9 +106,7 @@ public sealed class MarketConfigServiceTests
     public async Task GetConfigAsync_defaults_match_settings()
     {
         var settings = DefaultSettings();
-        var sut = new MarketConfigService(
-            SymbolProvider(), new PassthroughCache(), Options(settings),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut(settings: settings);
 
         var config = await sut.GetConfigAsync();
 
@@ -101,9 +118,7 @@ public sealed class MarketConfigServiceTests
     [Fact]
     public async Task GetConfigAsync_candle_counts_grouped_by_class()
     {
-        var sut = new MarketConfigService(
-            SymbolProvider(), new PassthroughCache(), Options(),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut();
 
         var config = await sut.GetConfigAsync();
 
@@ -115,9 +130,7 @@ public sealed class MarketConfigServiceTests
     [Fact]
     public async Task GetConfigAsync_heavy_timeframes_list_contains_5m()
     {
-        var sut = new MarketConfigService(
-            SymbolProvider(), new PassthroughCache(), Options(),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut();
 
         var config = await sut.GetConfigAsync();
 
@@ -127,9 +140,7 @@ public sealed class MarketConfigServiceTests
     [Fact]
     public async Task IsKnownSymbolAsync_returns_true_for_known_symbol()
     {
-        var sut = new MarketConfigService(
-            SymbolProvider(["BTCUSDT", "ETHUSDT"]), new PassthroughCache(), Options(),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut(SymbolProvider(["BTCUSDT", "ETHUSDT"]));
 
         (await sut.IsKnownSymbolAsync("BTCUSDT")).Should().BeTrue();
     }
@@ -137,9 +148,7 @@ public sealed class MarketConfigServiceTests
     [Fact]
     public async Task IsKnownSymbolAsync_is_case_insensitive()
     {
-        var sut = new MarketConfigService(
-            SymbolProvider(["BTCUSDT"]), new PassthroughCache(), Options(),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut(SymbolProvider(["BTCUSDT"]));
 
         (await sut.IsKnownSymbolAsync("btcusdt")).Should().BeTrue();
     }
@@ -147,9 +156,7 @@ public sealed class MarketConfigServiceTests
     [Fact]
     public async Task IsKnownSymbolAsync_returns_false_for_unknown_symbol()
     {
-        var sut = new MarketConfigService(
-            SymbolProvider(["BTCUSDT"]), new PassthroughCache(), Options(),
-            NullLogger<MarketConfigService>.Instance);
+        var sut = NewSut(SymbolProvider(["BTCUSDT"]));
 
         (await sut.IsKnownSymbolAsync("FAKEUSDT")).Should().BeFalse();
     }

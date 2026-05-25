@@ -39,10 +39,12 @@ public sealed class ChartServiceTests
         var m = new Mock<IMarketConfigService>();
         m.Setup(c => c.IsKnownSymbolAsync(It.Is<string>(s =>
                 s.Equals(symbol, StringComparison.OrdinalIgnoreCase)),
+            It.IsAny<string?>(),
             It.IsAny<CancellationToken>()))
          .ReturnsAsync(true);
         m.Setup(c => c.IsKnownSymbolAsync(It.Is<string>(s =>
                 !s.Equals(symbol, StringComparison.OrdinalIgnoreCase)),
+            It.IsAny<string?>(),
             It.IsAny<CancellationToken>()))
          .ReturnsAsync(false);
         return m;

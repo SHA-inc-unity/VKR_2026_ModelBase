@@ -1,4 +1,6 @@
+using System.Text.Json;
 using GatewayService.API.DTOs.Responses;
+using GatewayService.API.Kafka;
 using Microsoft.Extensions.Options;
 
 namespace GatewayService.API.Market;
@@ -6,47 +8,51 @@ namespace GatewayService.API.Market;
 /// <inheritdoc />
 public sealed class MarketConfigService : IMarketConfigService
 {
-    private const string SymbolsCacheKey = "market:config:symbols:v1";
-    private const string ConfigCacheKey  = "market:config:full:v1";
+    private const string DefaultExchange = "bybit";
 
     private readonly IBybitSymbolProvider   _bybit;
     private readonly IMarketCacheService    _cache;
+    private readonly IKafkaRequestClient    _kafka;
     private readonly MarketSettings         _settings;
     private readonly ILogger<MarketConfigService> _log;
 
     public MarketConfigService(
         IBybitSymbolProvider bybit,
         IMarketCacheService cache,
+        IKafkaRequestClient kafka,
         IOptions<MarketSettings> settings,
         ILogger<MarketConfigService> log)
     {
         _bybit    = bybit;
         _cache    = cache;
+        _kafka    = kafka;
         _settings = settings.Value;
         _log      = log;
     }
 
     /// <inheritdoc />
-    public async Task<MarketConfigResponse> GetConfigAsync(CancellationToken ct = default)
+    public async Task<MarketConfigResponse> GetConfigAsync(string? exchange = null, CancellationToken ct = default)
     {
+        var normalized = NormalizeExchange(exchange);
         var ttl = TimeSpan.FromSeconds(_settings.ConfigCacheTtlSeconds);
-        return await _cache.GetOrCreateAsync(ConfigCacheKey, ttl,
-            () => BuildConfigAsync(ct), ct);
+        var key = $"market:config:full:{normalized}:v2";
+        return await _cache.GetOrCreateAsync(key, ttl,
+            () => BuildConfigAsync(normalized, ct), ct);
     }
 
     /// <inheritdoc />
-    public async Task<bool> IsKnownSymbolAsync(string symbol, CancellationToken ct = default)
+    public async Task<bool> IsKnownSymbolAsync(string symbol, string? exchange = null, CancellationToken ct = default)
     {
-        var symbols = await GetOrFetchSymbolsAsync(ct);
+        var symbols = await GetOrFetchSymbolsAsync(NormalizeExchange(exchange), ct);
         return symbols.Contains(symbol, StringComparer.OrdinalIgnoreCase);
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
 
-    private async Task<MarketConfigResponse> BuildConfigAsync(CancellationToken ct)
+    private async Task<MarketConfigResponse> BuildConfigAsync(string exchange, CancellationToken ct)
     {
         var symbolsUpdatedAt = DateTimeOffset.UtcNow;
-        var symbols = await GetOrFetchSymbolsAsync(ct);
+        var symbols = await GetOrFetchSymbolsAsync(exchange, ct);
 
         var timeframeDtos = TimeframeMap.All
             .Select(tf => new TimeframeDto(
@@ -89,26 +95,121 @@ public sealed class MarketConfigService : IMarketConfigService
         };
 
         _log.LogInformation(
-            "Built market config: {SymbolCount} symbols, {TfCount} timeframes",
-            symbols.Count, timeframeDtos.Count);
+            "Built market config for {Exchange}: {SymbolCount} symbols, {TfCount} timeframes",
+            exchange, symbols.Count, timeframeDtos.Count);
 
         return response;
     }
 
-    private async Task<IReadOnlyList<string>> GetOrFetchSymbolsAsync(CancellationToken ct)
+    private async Task<IReadOnlyList<string>> GetOrFetchSymbolsAsync(string exchange, CancellationToken ct)
     {
         var ttl = TimeSpan.FromSeconds(_settings.SymbolsCacheTtlSeconds);
-        return await _cache.GetOrCreateAsync<SymbolListWrapper>(
-            SymbolsCacheKey, ttl,
+        var key = $"market:config:symbols:{exchange}:v2";
+        var wrapper = await _cache.GetOrCreateAsync<SymbolListWrapper>(
+            key, ttl,
             async () =>
             {
-                var list = await _bybit.GetActiveSymbolsAsync(ct);
+                var list = await FetchSymbolsForExchangeAsync(exchange, ct);
                 return new SymbolListWrapper(list.ToList());
             },
-            ct)
-            .ContinueWith(t => (IReadOnlyList<string>)t.Result.Symbols, ct,
-                TaskContinuationOptions.OnlyOnRanToCompletion,
-                TaskScheduler.Default);
+            ct);
+        return wrapper.Symbols;
+    }
+
+    private async Task<IReadOnlyList<string>> FetchSymbolsForExchangeAsync(string exchange, CancellationToken ct)
+    {
+        // 1) Try MW (single source of truth for what's actually persisted).
+        var mwSymbols = await TryFetchTrackedFromMarketWatcherAsync(exchange, ct);
+        if (mwSymbols.Count > 0)
+        {
+            return mwSymbols;
+        }
+
+        // 2) Fallback: Bybit instrument list (only meaningful for bybit) so the
+        //    dropdown never goes empty during MW startup / cold-deploy.
+        if (string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase))
+        {
+            var bybitList = await _bybit.GetActiveSymbolsAsync(ct);
+            _log.LogInformation(
+                "MW returned no tracked symbols for {Exchange}; falling back to Bybit instrument list ({Count} symbols)",
+                exchange, bybitList.Count);
+            return bybitList;
+        }
+
+        _log.LogWarning(
+            "MW returned no tracked symbols for {Exchange} and no fallback is available; returning empty list",
+            exchange);
+        return Array.Empty<string>();
+    }
+
+    private async Task<IReadOnlyList<string>> TryFetchTrackedFromMarketWatcherAsync(string exchange, CancellationToken ct)
+    {
+        var timeout = TimeSpan.FromSeconds(Math.Max(2, _settings.KafkaTimeoutSeconds));
+        try
+        {
+            var reply = await _kafka.RequestAsync(
+                DataTopics.CmdDataMarketWatcherTracked,
+                new { exchange },
+                timeout,
+                ct);
+
+            if (reply.ValueKind != JsonValueKind.Object)
+            {
+                return Array.Empty<string>();
+            }
+
+            if (reply.TryGetProperty("error", out var errorEl))
+            {
+                _log.LogWarning(
+                    "MW tracked-symbols request for {Exchange} returned error: {Error}",
+                    exchange, errorEl.GetString());
+                return Array.Empty<string>();
+            }
+
+            if (!reply.TryGetProperty("symbols", out var symbolsEl) || symbolsEl.ValueKind != JsonValueKind.Array)
+            {
+                return Array.Empty<string>();
+            }
+
+            var result = new List<string>(symbolsEl.GetArrayLength());
+            foreach (var item in symbolsEl.EnumerateArray())
+            {
+                var value = item.GetString();
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    result.Add(value.Trim().ToUpperInvariant());
+                }
+            }
+            return result
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (TimeoutException ex)
+        {
+            _log.LogWarning(ex, "MW tracked-symbols request for {Exchange} timed out", exchange);
+            return Array.Empty<string>();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "MW tracked-symbols request for {Exchange} failed", exchange);
+            return Array.Empty<string>();
+        }
+    }
+
+    private static string NormalizeExchange(string? exchange)
+    {
+        if (string.IsNullOrWhiteSpace(exchange))
+        {
+            return DefaultExchange;
+        }
+
+        var trimmed = exchange.Trim().ToLowerInvariant();
+        return trimmed switch
+        {
+            "bybit" or "binance" or "kraken" => trimmed,
+            _ => DefaultExchange,
+        };
     }
 
     // Thin wrapper to give the symbol list a class type that IMarketCacheService<T> can serialise.
