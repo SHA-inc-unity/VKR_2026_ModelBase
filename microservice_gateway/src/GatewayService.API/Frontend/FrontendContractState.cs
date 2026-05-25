@@ -19,7 +19,6 @@ public sealed class FrontendContractState : IFrontendContractState
     [
         new() { Id = "binance", Name = "Binance", Slug = "binance", IsActive = true },
         new() { Id = "bybit", Name = "Bybit", Slug = "bybit", IsActive = true },
-        new() { Id = "kraken", Name = "Kraken", Slug = "kraken", IsActive = true },
     ];
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);

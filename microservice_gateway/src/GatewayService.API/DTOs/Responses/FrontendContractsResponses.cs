@@ -24,7 +24,7 @@ public sealed record PublicMarketOverviewDto
 /// silently undercount the global statistics card).
 public sealed record MarketGlobalSummaryResponse
 {
-    /// Echoes the requested exchange (`bybit`, `binance`, `kraken`).
+    /// Echoes the requested exchange (`bybit`, `binance`).
     public string Exchange { get; init; } = string.Empty;
     /// Number of MW-tracked symbols that contributed to this summary.
     public int TrackedCount { get; init; }

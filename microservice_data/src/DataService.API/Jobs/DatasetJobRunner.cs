@@ -31,7 +31,7 @@ namespace DataService.API.Jobs;
 /// </summary>
 public sealed class DatasetJobRunner : BackgroundService
 {
-    private static readonly string[] IngestExchanges = ["bybit", "binance", "kraken"];
+    private static readonly string[] IngestExchanges = ["bybit", "binance"];
     private const int IngestSlotsPerExchange = 4;
     // Heavy timeframes (1m/3m) used to be limited to ONE concurrent ingest per
     // exchange. With the chart-ingest fast-path (skip_features) the per-job
@@ -56,7 +56,7 @@ public sealed class DatasetJobRunner : BackgroundService
     };
 
     // Extra gate for heavy timeframes (1m, 3m): at most 1 may run concurrently
-    // per exchange, so Kraken cannot block Bybit heavy jobs and vice versa.
+    // per exchange, so Binance cannot block Bybit heavy jobs and vice versa.
     private readonly Dictionary<string, SemaphoreSlim> _heavyIngestSlotsByExchange;
     private readonly Dictionary<string, SemaphoreSlim> _ingestSlotsByExchange;
 
@@ -381,7 +381,6 @@ public sealed class DatasetJobRunner : BackgroundService
 
         if (job.TargetTable is { } table)
         {
-            if (table.StartsWith("kraken_", StringComparison.OrdinalIgnoreCase)) return "kraken";
             if (table.StartsWith("binance_", StringComparison.OrdinalIgnoreCase)) return "binance";
         }
 

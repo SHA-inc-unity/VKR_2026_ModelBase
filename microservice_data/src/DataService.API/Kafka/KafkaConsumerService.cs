@@ -553,9 +553,11 @@ public sealed partial class KafkaConsumerService : BackgroundService
                 else
                 {
                     // For bybit, skip rows that look like another exchange's tables
-                    // (e.g. kraken_btcusdt_5m would otherwise match).
-                    if (name.StartsWith("kraken_", StringComparison.OrdinalIgnoreCase)
-                        || name.StartsWith("binance_", StringComparison.OrdinalIgnoreCase))
+                    // (e.g. binance_btcusdt_5m would otherwise match). Also skip
+                    // legacy kraken_* tables that may still exist from before the
+                    // Kraken integration was removed.
+                    if (name.StartsWith("binance_", StringComparison.OrdinalIgnoreCase)
+                        || name.StartsWith("kraken_", StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }

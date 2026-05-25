@@ -225,7 +225,7 @@ public sealed class MarketConfigService : IMarketConfigService
         var trimmed = exchange.Trim().ToLowerInvariant();
         return trimmed switch
         {
-            "bybit" or "binance" or "kraken" => trimmed,
+            "bybit" or "binance" => trimmed,
             _ => DefaultExchange,
         };
     }

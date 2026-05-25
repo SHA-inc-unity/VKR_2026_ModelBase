@@ -464,8 +464,8 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
 
         var normalizedExchange = NormalizeExchange(exchange);
 
-        // Per-exchange resolution: if the caller picked an exchange (typically
-        // Kraken, since Bybit is the historical default), prefer the Market
+        // Per-exchange resolution: if the caller picked an exchange (e.g.
+        // Binance, since Bybit is the historical default), prefer the Market
         // Watcher live-quote map filtered to that exchange — that's the
         // single source of truth that the chart, tickers and watcher state
         // share. Fall back to the legacy Bybit linear-tickers snapshot only
@@ -489,7 +489,7 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         var rate = fromPrice.Value / toPrice.Value;
 
         // Source label: if either leg came from MW for the requested exchange,
-        // surface that label (e.g. "kraken-market-watcher"); otherwise fall
+        // surface that label (e.g. "binance-market-watcher"); otherwise fall
         // back to the snapshot source ("bybit-linear-tickers").
         string sourceLabel;
         if (fromSource == ConverterPriceSource.MarketWatcher
@@ -603,7 +603,7 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
     /// Aggregate the snapshot + canonical-overview feeds across the
     /// MW-tracked symbol universe for [exchange]. Honest about what's
     /// missing: when the snapshot has no 24h-change for a tracked symbol
-    /// (e.g. a Kraken-only symbol that Bybit doesn't carry), that symbol
+    /// (e.g. a Binance-only symbol that Bybit doesn't carry), that symbol
     /// still counts toward TrackedCount but contributes zero to the
     /// gainers/losers/avg-change breakdown — and the meta lists it as
     /// a degraded field so the client can show a hint.
@@ -747,7 +747,7 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         var trimmed = exchange.Trim().ToLowerInvariant();
         return trimmed switch
         {
-            "bybit" or "binance" or "kraken" => trimmed,
+            "bybit" or "binance" => trimmed,
             _ => "bybit",
         };
     }
@@ -1310,7 +1310,6 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         {
             "bybit" => 0,
             "binance" => 1,
-            "kraken" => 2,
             _ => 10,
         };
     }

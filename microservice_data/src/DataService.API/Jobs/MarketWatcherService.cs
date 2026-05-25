@@ -8,8 +8,6 @@ using DataService.API.Database;
 using DataService.API.Dataset;
 using DataService.API.Markets;
 using DataService.API.Settings;
-using Kraken.Net.Clients;
-using Kraken.Net.SymbolOrderBooks;
 using Microsoft.Extensions.Options;
 
 namespace DataService.API.Jobs;
@@ -18,7 +16,6 @@ public sealed class MarketWatcherService : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan DiscoveryDeadline = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan KrakenDiscoveryDeadline = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan SubscriptionRetryDelay = TimeSpan.FromSeconds(3);
     private const int SubscriptionStartAttempts = 3;
 
@@ -362,33 +359,25 @@ public sealed class MarketWatcherService : BackgroundService
         HashSet<string> configuredSymbols,
         CancellationToken ct)
     {
+        _ = configuredSymbols;
         using var discoveryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var deadline = string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
-            ? KrakenDiscoveryDeadline
-            : DiscoveryDeadline;
-        discoveryCts.CancelAfter(deadline);
+        discoveryCts.CancelAfter(DiscoveryDeadline);
 
         try
         {
-            if (client is KrakenApiClient krakenClient)
-            {
-                return await krakenClient.FetchMarketWatchSymbolsAsync(configuredSymbols, discoveryCts.Token);
-            }
-
             return await client.FetchMarketWatchSymbolsAsync(discoveryCts.Token);
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && discoveryCts.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"Market watcher discovery for {exchange} exceeded {deadline.TotalSeconds:0}s",
+                $"Market watcher discovery for {exchange} exceeded {DiscoveryDeadline.TotalSeconds:0}s",
                 ex);
         }
     }
 
     private async Task<IReadOnlyList<MarketWatchSymbol>> TryLoadFallbackSymbolsAsync(string exchange, CancellationToken ct)
     {
-        if (string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(exchange, BinanceApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
+        if (string.Equals(exchange, BinanceApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase))
         {
             return await _repo.ListKnownSymbolsAsync(exchange, ct);
@@ -484,11 +473,6 @@ public sealed class MarketWatcherService : BackgroundService
             await TryStartAsync("bybit", () => StartBybitAsync(bybitSymbols, settings, onPrice, ct));
         }
 
-        if (universe.TryGetValue("kraken", out var krakenSymbols) && krakenSymbols.Count > 0)
-        {
-            await TryStartAsync("kraken", () => StartKrakenAsync(krakenSymbols, settings, onPrice, ct));
-        }
-
         if (handles.Count == 0)
         {
             throw new InvalidOperationException($"No market watcher subscriptions started: {string.Join("; ", failures)}");
@@ -512,16 +496,12 @@ public sealed class MarketWatcherService : BackgroundService
 
     private static bool IsNonFatalStartupFailure(string exchange, Exception? error)
     {
-        if (!string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
-            || error is null)
-        {
-            return false;
-        }
-
-        var message = error.Message;
-        return message.Contains("RateLimitRequest", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("status code '429'", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("too many requests", StringComparison.OrdinalIgnoreCase);
+        // After Kraken was removed, no remaining exchange has a startup-time
+        // failure mode we want to demote to a warning. Both Bybit and Binance
+        // expose stable enough WS endpoints that a failed subscribe is fatal.
+        _ = exchange;
+        _ = error;
+        return false;
     }
 
     private static async Task<IAsyncDisposable> StartBinanceAsync(
@@ -649,205 +629,6 @@ public sealed class MarketWatcherService : BackgroundService
         return null;
     }
 
-    private async Task<IAsyncDisposable> StartKrakenAsync(
-        IReadOnlyList<MarketWatchSymbol> symbols,
-        MarketWatchSettings settings,
-        Action<string, string, decimal, DateTimeOffset> onPrice,
-        CancellationToken ct)
-    {
-        void PublishCurrentPrice(KrakenSpotSymbolOrderBook orderBook, string symbol)
-        {
-            var price = SelectMidPrice(orderBook.BestBid?.Price, orderBook.BestAsk?.Price);
-            if (!price.HasValue)
-            {
-                return;
-            }
-
-            onPrice("kraken", symbol, price.Value, DateTimeOffset.UtcNow);
-        }
-
-        async Task<(MarketWatchSymbol Symbol, KrakenSpotSymbolOrderBook OrderBook, AsyncDisposeAction Disposer)> StartOrderBookAsync(MarketWatchSymbol symbol)
-        {
-            var realtimeSymbol = symbol.RealtimeSymbol!;
-            var orderBook = new KrakenSpotSymbolOrderBook(realtimeSymbol, _ => { });
-            Action<(ISymbolOrderBookEntry BestBid, ISymbolOrderBookEntry BestAsk)> handler = _ =>
-            {
-                PublishCurrentPrice(orderBook, symbol.Symbol);
-            };
-
-            orderBook.OnBestOffersChanged += handler;
-
-            async ValueTask DisposeOrderBookAsync()
-            {
-                orderBook.OnBestOffersChanged -= handler;
-                await orderBook.StopAsync();
-                (orderBook as IDisposable)?.Dispose();
-            }
-
-            try
-            {
-                var startResult = await orderBook.StartAsync(ct);
-                if (!startResult.Success || !startResult.Data)
-                {
-                    await DisposeOrderBookAsync();
-                    throw new InvalidOperationException($"Kraken order book subscription failed for {realtimeSymbol}: {startResult.Error}");
-                }
-
-                return (symbol, orderBook, new AsyncDisposeAction(DisposeOrderBookAsync));
-            }
-            catch
-            {
-                await DisposeOrderBookAsync();
-                throw;
-            }
-        }
-
-        // Kraken's public WebSocket endpoint enforces a fairly tight per-connection
-        // /per-IP rate limit (it returns HTTP 429 on the WebSocket upgrade when too
-        // many subscriptions are opened in parallel). Each KrakenSpotSymbolOrderBook
-        // opens its own socket, so we MUST stagger startups instead of firing them
-        // all via Task.WhenAll — that was the reason MW kept aborting Kraken with
-        // "subscription start failed for ADA/USDT: 429" after every restart.
-        var symbolsToStart = symbols
-            .Where(item => !string.IsNullOrWhiteSpace(item.RealtimeSymbol))
-            .ToArray();
-
-        var startedOrderBooks =
-            new List<(MarketWatchSymbol Symbol, KrakenSpotSymbolOrderBook OrderBook, AsyncDisposeAction Disposer)>(
-                symbolsToStart.Length);
-
-        try
-        {
-            foreach (var symbol in symbolsToStart)
-            {
-                const int MaxAttempts = 4;
-                Exception? lastError = null;
-                for (var attempt = 1; attempt <= MaxAttempts; attempt++)
-                {
-                    try
-                    {
-                        var entry = await StartOrderBookAsync(symbol);
-                        startedOrderBooks.Add(entry);
-                        lastError = null;
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        lastError = ex;
-                        var msg = ex.Message ?? string.Empty;
-                        var isRateLimit =
-                            msg.Contains("429", StringComparison.Ordinal)
-                            || msg.Contains("RateLimit", StringComparison.OrdinalIgnoreCase);
-                        if (!isRateLimit || attempt == MaxAttempts)
-                        {
-                            break;
-                        }
-
-                        // Exponential backoff on 429: 1s, 2s, 4s.
-                        var backoff = TimeSpan.FromSeconds(Math.Pow(2, attempt - 1));
-                        _log.LogInformation(
-                            "Kraken WS rate-limited for {Symbol} (attempt {Attempt}/{Max}); backing off {Backoff}",
-                            symbol.RealtimeSymbol, attempt, MaxAttempts, backoff);
-                        try
-                        {
-                            await Task.Delay(backoff, ct);
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            throw;
-                        }
-                    }
-                }
-
-                if (lastError != null)
-                {
-                    _log.LogWarning(lastError,
-                        "Kraken order book subscription failed for {Symbol}; continuing without it",
-                        symbol.RealtimeSymbol);
-                }
-
-                // Inter-subscription pause. Kraken's free-tier public WS endpoint
-                // caps roughly 1 new connection / 700 ms / IP; smaller gaps trip 429.
-                try
-                {
-                    await Task.Delay(TimeSpan.FromMilliseconds(900), ct);
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-            }
-
-            if (startedOrderBooks.Count == 0)
-            {
-                throw new InvalidOperationException(
-                    "Kraken order book subscriptions all failed; nothing to watch");
-            }
-
-            var orderBooks = startedOrderBooks.ToArray();
-            var refreshCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var refreshTask = Task.Run(async () =>
-            {
-                using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(750));
-                while (await timer.WaitForNextTickAsync(refreshCts.Token))
-                {
-                    foreach (var orderBook in orderBooks)
-                    {
-                        if (orderBook.OrderBook.Status != OrderBookStatus.Synced)
-                        {
-                            continue;
-                        }
-
-                        var dataAge = orderBook.OrderBook.DataAge;
-                        if (dataAge.HasValue && dataAge.Value > TimeSpan.FromSeconds(5))
-                        {
-                            continue;
-                        }
-
-                        PublishCurrentPrice(orderBook.OrderBook, orderBook.Symbol.Symbol);
-                    }
-                }
-            }, CancellationToken.None);
-
-            var disposers = orderBooks
-                .Select(item => (IAsyncDisposable)item.Disposer)
-                .ToList();
-            disposers.Add(new AsyncDisposeAction(async () =>
-            {
-                refreshCts.Cancel();
-                try
-                {
-                    await refreshTask;
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                finally
-                {
-                    refreshCts.Dispose();
-                }
-            }));
-
-            return new CompositeAsyncDisposable(disposers);
-        }
-        catch
-        {
-            foreach (var entry in startedOrderBooks)
-            {
-                try
-                {
-                    await entry.Disposer.DisposeAsync();
-                }
-                catch
-                {
-                    // Best-effort cleanup; suppress to surface the original error.
-                }
-            }
-
-            throw;
-        }
-    }
-
     private static List<PendingSnapshot> CollectPendingSnapshots(
         ConcurrentDictionary<string, SymbolLiveState> state)
     {
@@ -923,14 +704,8 @@ public sealed class MarketWatcherService : BackgroundService
         var (oiLabel, oiIntervalMs) = DatasetCore.ChooseOpenInterestInterval(stepMs);
 
         var klineTask = market.FetchKlinesAsync(symbol, interval, fetchStart, fetchEnd, stepMs, 1, ct);
-        Task<IReadOnlyList<(long TimestampMs, decimal Rate)>> fundingTask =
-            string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
-                ? Task.FromResult<IReadOnlyList<(long TimestampMs, decimal Rate)>>(Array.Empty<(long TimestampMs, decimal Rate)>())
-                : market.FetchFundingRatesAsync(symbol, Math.Max(0L, targetTimestamps[0] - fundingIntervalMs), fetchEnd, fundingIntervalMs, ct);
-        Task<IReadOnlyList<(long TimestampMs, decimal Oi)>> oiTask =
-            string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase)
-                ? Task.FromResult<IReadOnlyList<(long TimestampMs, decimal Oi)>>(Array.Empty<(long TimestampMs, decimal Oi)>())
-                : market.FetchOpenInterestAsync(symbol, oiLabel, Math.Max(0L, targetTimestamps[0] - oiIntervalMs), fetchEnd, oiIntervalMs, ct);
+        var fundingTask = market.FetchFundingRatesAsync(symbol, Math.Max(0L, targetTimestamps[0] - fundingIntervalMs), fetchEnd, fundingIntervalMs, ct);
+        var oiTask = market.FetchOpenInterestAsync(symbol, oiLabel, Math.Max(0L, targetTimestamps[0] - oiIntervalMs), fetchEnd, oiIntervalMs, ct);
 
         var klines = await klineTask;
         var funding = await fundingTask;
@@ -979,9 +754,10 @@ public sealed class MarketWatcherService : BackgroundService
             // watcher tick (the live state still holds the open bucket, and the
             // exchange will fill in the trailing base candle that was withheld
             // as still-forming on this round). Throwing here used to crash the
-            // entire watcher loop for *every* exchange — a single Kraken miss
-            // would lose Bybit/Binance ticks too. Demote to a warning + skip
-            // this table; partial rows are not persisted to avoid feature gaps.
+            // entire watcher loop for *every* exchange — a single per-exchange
+            // miss would lose ticks across the board. Demote to a warning +
+            // skip this table; partial rows are not persisted to avoid feature
+            // gaps.
             _log.LogWarning(
                 "Market watcher could not hydrate {Missing}/{Total} closed candles for {Table}; skipping this flush",
                 missing, targetTimestamps.Length, tableName);

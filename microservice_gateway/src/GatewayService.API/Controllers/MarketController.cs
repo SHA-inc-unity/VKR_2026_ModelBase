@@ -293,7 +293,7 @@ public sealed class MarketController : ControllerBase
     /// candle_counts for the chosen timeframe class.
     /// </param>
     /// <param name="exchange">
-    /// Exchange to fetch candles from. Supported: "bybit" (default), "binance", "kraken".
+    /// Exchange to fetch candles from. Supported: "bybit" (default), "binance".
     /// Unknown values fall back to bybit. Each exchange has its own data-service table
     /// and independent Redis cache namespace.
     /// </param>
@@ -368,7 +368,7 @@ public sealed class MarketController : ControllerBase
     /// <param name="symbol">Trading pair, e.g. BTCUSDT.</param>
     /// <param name="timeframe">Timeframe id from /config.</param>
     /// <param name="limit">Number of candles per exchange.</param>
-    /// <param name="exchanges">Comma-separated list of exchanges. Default: "bybit,binance,kraken".</param>
+    /// <param name="exchanges">Comma-separated list of exchanges. Default: "bybit,binance".</param>
     /// <param name="ct">Cancellation token.</param>
     /// <response code="200">
     /// Object with <c>items</c> (exchange → ChartResponse) and <c>errors</c>
@@ -388,7 +388,7 @@ public sealed class MarketController : ControllerBase
         var correlationId = HttpContext.GetCorrelationId();
 
         var requested = string.IsNullOrWhiteSpace(exchanges)
-            ? new[] { "bybit", "binance", "kraken" }
+            ? new[] { "bybit", "binance" }
             : exchanges
                 .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                 .Select(static e => DataServiceClient.NormalizeExchange(e))

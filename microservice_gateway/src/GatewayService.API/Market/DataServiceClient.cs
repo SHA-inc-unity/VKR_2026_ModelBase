@@ -506,7 +506,7 @@ public sealed class DataServiceClient : IDataServiceClient
         var trimmed = exchange.Trim().ToLowerInvariant();
         return trimmed switch
         {
-            "bybit" or "binance" or "kraken" => trimmed,
+            "bybit" or "binance" => trimmed,
             _ => "bybit",
         };
     }

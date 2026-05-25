@@ -11,19 +11,16 @@ public sealed class MarketDataClientFactory
         {
             "bybit",
             "binance",
-            "kraken",
         };
 
     public MarketDataClientFactory(
         BybitApiClient bybit,
-        BinanceApiClient binance,
-        KrakenApiClient kraken)
+        BinanceApiClient binance)
     {
         _clients = new Dictionary<string, IMarketDataClient>(StringComparer.OrdinalIgnoreCase)
         {
             [bybit.Exchange] = bybit,
             [binance.Exchange] = binance,
-            [kraken.Exchange] = kraken,
         };
     }
 

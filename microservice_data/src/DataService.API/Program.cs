@@ -1,5 +1,3 @@
-using System.Net;
-using System.Net.Http;
 using DataService.API.Bybit;
 using DataService.API.Database;
 using DataService.API.HealthChecks;
@@ -84,13 +82,9 @@ try
     builder.Services.AddSingleton<KafkaProducer>();
     builder.Services.AddSingleton<MinioClaimCheckService>();
 
-    // BybitApiClient via typed HttpClient
+    // BybitApiClient + BinanceApiClient via typed HttpClient
     builder.Services.AddSingleton<BybitRateLimiter>();
     builder.Services.AddSingleton<BinanceRateLimiter>();
-    builder.Services.AddSingleton<KrakenRateLimiter>();
-    // Per-exchange symbol mapper for Kraken (BTC↔XBT, MATIC→POL, …).
-    // Bybit and Binance use canonical dataset names, so they need no mapper.
-    builder.Services.AddSingleton<IExchangeSymbolMapper, KrakenSymbolMapper>();
     builder.Services.AddHttpClient<BybitApiClient>(client =>
     {
         client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
@@ -98,16 +92,6 @@ try
     builder.Services.AddHttpClient<BinanceApiClient>(client =>
     {
         client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
-    });
-    builder.Services.AddHttpClient<KrakenApiClient>(client =>
-    {
-        client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
-        client.DefaultRequestVersion = HttpVersion.Version11;
-        client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("ModelLine/1.0 (+https://kraken.com)");
-    }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-    {
-        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
     });
     builder.Services.AddSingleton<MarketDataClientFactory>();
 

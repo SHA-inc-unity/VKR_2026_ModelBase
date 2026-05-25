@@ -87,36 +87,6 @@ public sealed class IngestJobHandler : IDatasetJobHandler
         var market = _markets.GetRequiredClient(exchange);
         string? windowDetail = null;
 
-        if (string.Equals(exchange, KrakenApiClient.ExchangeName, StringComparison.OrdinalIgnoreCase))
-        {
-            var (effectiveStartMs, effectiveEndMs, clipped) = KrakenApiClient.ClampRequestedWindow(
-                s, e, stepMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            if (effectiveStartMs > effectiveEndMs)
-            {
-                await ctx.ReportAsync(
-                    "done",
-                    100,
-                    $"kraken window outside reachable history for {table}; requested {JobHandlerHelpers.FormatUtc(s)} .. {JobHandlerHelpers.FormatUtc(e)}; " +
-                    $"available {KrakenApiClient.DescribeReachableLookback(stepMs)}",
-                    stageProgress: 100,
-                    stageTotal: 0,
-                    stageCompleted: 0,
-                    total: 0,
-                    completed: 0,
-                    skipped: 1);
-                return;
-            }
-
-            if (clipped)
-            {
-                windowDetail =
-                    $"kraken window clipped to {JobHandlerHelpers.FormatUtc(effectiveStartMs)} .. {JobHandlerHelpers.FormatUtc(effectiveEndMs)} " +
-                    $"({KrakenApiClient.DescribeReachableLookback(stepMs)})";
-                s = effectiveStartMs;
-                e = effectiveEndMs;
-            }
-        }
-
         // ── prepare ────────────────────────────────────────────
         var stagePrep = await ctx.StartStageAsync("prepare");
         await ctx.ReportAsync("prepare", 1,
