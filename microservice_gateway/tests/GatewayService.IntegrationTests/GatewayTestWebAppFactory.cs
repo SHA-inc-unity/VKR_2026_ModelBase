@@ -459,7 +459,7 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
         }));
     }
 
-    public Task<ServiceResult<MarketConverterQuoteResponse>> GetConverterQuoteAsync(string fromAsset, string toAsset, decimal amount, CancellationToken ct = default)
+    public Task<ServiceResult<MarketConverterQuoteResponse>> GetConverterQuoteAsync(string fromAsset, string toAsset, decimal amount, string? exchange = null, CancellationToken ct = default)
     {
         return Task.FromResult(ServiceResult<MarketConverterQuoteResponse>.Ok(new MarketConverterQuoteResponse
         {

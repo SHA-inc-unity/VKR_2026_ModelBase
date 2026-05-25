@@ -19,5 +19,10 @@ public interface IMarketServiceClient
         CancellationToken ct = default);
     Task<ServiceResult<MarketBatchQuotesResponse>> GetQuotesAsync(IReadOnlyList<string> symbols, CancellationToken ct = default);
     Task<ServiceResult<MarketRealtimeQuotesResponse>> GetRealtimeQuotesAsync(IReadOnlyList<string> symbols, string? exchange = null, CancellationToken ct = default);
-    Task<ServiceResult<MarketConverterQuoteResponse>> GetConverterQuoteAsync(string fromAsset, string toAsset, decimal amount, CancellationToken ct = default);
+    Task<ServiceResult<MarketConverterQuoteResponse>> GetConverterQuoteAsync(
+        string fromAsset,
+        string toAsset,
+        decimal amount,
+        string? exchange = null,
+        CancellationToken ct = default);
 }

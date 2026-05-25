@@ -195,9 +195,10 @@ public sealed class MarketController : ControllerBase
         [FromQuery] string fromAsset,
         [FromQuery] string toAsset,
         [FromQuery] decimal amount = 1,
+        [FromQuery] string? exchange = null,
         CancellationToken ct = default)
     {
-        var result = await _market.GetConverterQuoteAsync(fromAsset, toAsset, amount, ct);
+        var result = await _market.GetConverterQuoteAsync(fromAsset, toAsset, amount, exchange, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid converter quote request", HttpContext.GetCorrelationId()));
@@ -214,6 +215,7 @@ public sealed class MarketController : ControllerBase
         [FromQuery(Name = "from")] string? from,
         [FromQuery(Name = "to")] string? to,
         [FromQuery] decimal amount = 1,
+        [FromQuery] string? exchange = null,
         CancellationToken ct = default)
     {
         var fromAsset = string.IsNullOrWhiteSpace(from)
@@ -223,7 +225,7 @@ public sealed class MarketController : ControllerBase
             ? Request.Query["toAsset"].ToString()
             : to;
 
-        var result = await _market.GetConverterQuoteAsync(fromAsset, toAsset, amount, ct);
+        var result = await _market.GetConverterQuoteAsync(fromAsset, toAsset, amount, exchange, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid convert request", HttpContext.GetCorrelationId()));
