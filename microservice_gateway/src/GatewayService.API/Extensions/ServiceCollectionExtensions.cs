@@ -179,12 +179,43 @@ public static class ServiceCollectionExtensions
 
                 options.Events = new JwtBearerEvents
                 {
+                    OnAuthenticationFailed = ctx =>
+                    {
+                        // Surface the underlying validation failure so we can diagnose
+                        // mysterious 401s in production. Without this the OnChallenge
+                        // handler eats the reason and the client just sees "401".
+                        var logger = ctx.HttpContext.RequestServices
+                            .GetRequiredService<ILoggerFactory>()
+                            .CreateLogger("Gateway.JwtBearer");
+                        logger.LogWarning(ctx.Exception,
+                            "JWT auth failed for {Method} {Path}: {ExceptionType}: {Message}",
+                            ctx.Request.Method,
+                            ctx.Request.Path,
+                            ctx.Exception.GetType().Name,
+                            ctx.Exception.Message);
+                        return Task.CompletedTask;
+                    },
                     OnChallenge = ctx =>
                     {
                         ctx.HandleResponse();
                         ctx.Response.StatusCode = 401;
                         ctx.Response.ContentType = "application/json";
                         var correlationId = ctx.HttpContext.GetCorrelationId();
+                        // Also log the challenge — fires when no Authentication scheme
+                        // succeeded (e.g. missing Authorization header) so the auth
+                        // failure event never fired.
+                        var logger = ctx.HttpContext.RequestServices
+                            .GetRequiredService<ILoggerFactory>()
+                            .CreateLogger("Gateway.JwtBearer");
+                        var authHeader = ctx.Request.Headers.Authorization.FirstOrDefault();
+                        logger.LogWarning(
+                            "JWT challenge for {Method} {Path}: error={Error} desc={Desc} authHeaderPresent={Present} authError={AuthFailure}",
+                            ctx.Request.Method,
+                            ctx.Request.Path,
+                            ctx.Error,
+                            ctx.ErrorDescription,
+                            !string.IsNullOrEmpty(authHeader),
+                            ctx.AuthenticateFailure?.Message);
                         return ctx.Response.WriteAsJsonAsync(DTOs.ErrorResponse.Unauthorized(correlationId));
                     }
                 };
