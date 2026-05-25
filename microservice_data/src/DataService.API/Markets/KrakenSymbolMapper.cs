@@ -23,6 +23,7 @@ public sealed class KrakenSymbolMapper : IExchangeSymbolMapper
         {
             ["BTC"]   = "XBT",
             ["MATIC"] = "POL",
+            ["DOGE"]  = "XDG",
         };
 
     private static readonly IReadOnlyDictionary<string, string> _exchangeToDataset =
