@@ -649,7 +649,7 @@ public sealed class MarketWatcherService : BackgroundService
         return null;
     }
 
-    private static async Task<IAsyncDisposable> StartKrakenAsync(
+    private async Task<IAsyncDisposable> StartKrakenAsync(
         IReadOnlyList<MarketWatchSymbol> symbols,
         MarketWatchSettings settings,
         Action<string, string, decimal, DateTimeOffset> onPrice,
