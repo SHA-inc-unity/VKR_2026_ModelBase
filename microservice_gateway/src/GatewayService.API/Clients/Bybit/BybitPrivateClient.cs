@@ -19,6 +19,13 @@ public interface IBybitPrivateClient
         string apiKey,
         string apiSecret,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Looks up spot USDT prices for the given coins. Stablecoins return 1.0.
+    /// Coins without a /USDT pair on Bybit are absent from the result.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, decimal>> GetSpotUsdPricesAsync(
+        IEnumerable<string> coins, CancellationToken ct = default);
 }
 
 public sealed class BybitApiException : Exception
@@ -135,7 +142,7 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
                 totalEquity += snap.TotalEquityUsd;
                 MergeCoins(bySymbol, snap.Coins);
             }
-            catch (BybitApiException ex) when (ex.RetCode == 10005 || ex.RetCode == 10003 || ex.RetCode == 10004)
+            catch (BybitApiException ex) when (ex.RetCode is 10005 or 10003 or 10004 or 10001)
             {
                 sourcesDenied.Add($"wallet-balance:{accountType} ({ex.RetCode})");
                 lastRetMsg = ex.RetMsg;
@@ -193,24 +200,11 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
             sourcesDenied.Add("copy-trading (transport)");
         }
 
-        // 4. Probe trading bots (Grid / DCA / Martingale across spot + linear).
+        // 4. Trading bots: Bybit V5 does not expose Grid / DCA bots via a stable
+        //    public REST surface — these are managed via internal app routes only.
+        //    We intentionally skip probing them and return an empty list rather
+        //    than misleading the UI with a permission warning.
         IReadOnlyList<BybitBotPosition> botPositions = [];
-        try
-        {
-            botPositions = await TryGetBotPositionsAsync(apiKey, apiSecret, ct) ?? [];
-            if (botPositions.Count > 0) sourcesUsed.Add($"trading-bots:{botPositions.Count}");
-        }
-        catch (BybitApiException ex) when (ex.RetCode == 10005 || ex.RetCode == 10003 || ex.RetCode == 10004)
-        {
-            sourcesDenied.Add($"trading-bots ({ex.RetCode})");
-            missingPermissions.Add("SpotTrade/DerivativesTrade");
-            lastRetMsg = ex.RetMsg;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Bybit trading-bots call failed");
-            sourcesDenied.Add("trading-bots (transport)");
-        }
 
         // If absolutely nothing worked, surface the last Bybit retMsg so the UI
         // can display it instead of a generic "failed".
@@ -285,6 +279,67 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
     }
 
     /// <summary>
+    /// Fetches the spot USDT-quoted last price for a list of coins from the
+    /// public Bybit ticker endpoint (no auth required). USDT/USDC and other
+    /// dollar-pegged stables are assumed to be 1.0. Unknown coins → 0 (the
+    /// caller decides whether to show them).
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, decimal>> GetSpotUsdPricesAsync(
+        IEnumerable<string> coins, CancellationToken ct = default)
+    {
+        var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        foreach (var coin in coins.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(coin)) continue;
+
+            // Treat dollar-pegged stables as $1 — saves a network round trip
+            // and avoids ticker noise for these.
+            if (IsStablecoin(coin))
+            {
+                prices[coin] = 1m;
+                continue;
+            }
+
+            try
+            {
+                var symbol = $"{coin.ToUpperInvariant()}USDT";
+                using var req = new HttpRequestMessage(HttpMethod.Get,
+                    $"/v5/market/tickers?category=spot&symbol={symbol}");
+                using var resp = await _http.SendAsync(req, ct);
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                if (!resp.IsSuccessStatusCode) continue;
+
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("retCode", out var rc) || rc.GetInt32() != 0) continue;
+                if (!root.TryGetProperty("result", out var result)) continue;
+                if (!result.TryGetProperty("list", out var list) || list.ValueKind != JsonValueKind.Array) continue;
+
+                foreach (var t in list.EnumerateArray())
+                {
+                    if (t.TryGetProperty("lastPrice", out var lp))
+                    {
+                        var price = ParseDecimal(lp);
+                        if (price > 0m) prices[coin] = price;
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Spot ticker lookup failed for {Coin}", coin);
+            }
+        }
+        return prices;
+    }
+
+    private static bool IsStablecoin(string coin) => coin.ToUpperInvariant() switch
+    {
+        "USDT" or "USDC" or "BUSD" or "DAI" or "TUSD" or "USDD" or "FDUSD" or "USDE" => true,
+        _ => false,
+    };
+
+    /// <summary>
     /// Fetches the user's copy-trading positions. Requires the "Copy Trade" scope
     /// on the Bybit API key. The endpoint exists in two flavours — leader and
     /// follower — but both return the same shape; we try leader first and fall
@@ -301,59 +356,6 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
         return ParseCopyTradingPositions(body);
     }
 
-    /// <summary>
-    /// Fetches active trading bots. Bybit exposes a combined "running" list at
-    /// <c>/v5/spot/lever-token/...</c> for leverage tokens and dedicated bot
-    /// endpoints for Grid / DCA / Martingale. We probe the Grid endpoints first
-    /// because they cover most users; the response shape is uniform enough to
-    /// merge.
-    /// </summary>
-    private async Task<IReadOnlyList<BybitBotPosition>?> TryGetBotPositionsAsync(
-        string apiKey, string apiSecret, CancellationToken ct)
-    {
-        var merged = new List<BybitBotPosition>();
-
-        // Spot grid bots.
-        try
-        {
-            var spotBody = await SignedGetAsync(
-                "/v5/spot-grid/order/list",
-                "orderStatus=Running",
-                apiKey, apiSecret, ct);
-            merged.AddRange(ParseBotPositions(spotBody, botType: "grid", category: "spot"));
-        }
-        catch (BybitApiException ex) when (ex.RetCode == 10005 || ex.RetCode == 10003 || ex.RetCode == 10004)
-        {
-            // Permission denied for this specific bot family — re-throw so the
-            // outer probe records the missing scope.
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Spot grid bot list call failed (will continue with futures bots)");
-        }
-
-        // Futures grid bots (linear).
-        try
-        {
-            var futBody = await SignedGetAsync(
-                "/v5/futures-grid/order/list",
-                "orderStatus=Running",
-                apiKey, apiSecret, ct);
-            merged.AddRange(ParseBotPositions(futBody, botType: "grid", category: "linear"));
-        }
-        catch (BybitApiException ex) when (ex.RetCode == 10005 || ex.RetCode == 10003 || ex.RetCode == 10004)
-        {
-            // ditto
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Futures grid bot list call failed");
-        }
-
-        return merged;
-    }
 
     private async Task<string> SignedGetAsync(
         string path, string query, string apiKey, string apiSecret, CancellationToken ct)
@@ -502,43 +504,6 @@ public sealed class BybitPrivateClient : IBybitPrivateClient
             }
         }
         return positions;
-    }
-
-    private static List<BybitBotPosition> ParseBotPositions(string json, string botType, string category)
-    {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-
-        var retCode = root.TryGetProperty("retCode", out var rcEl) ? rcEl.GetInt32() : -1;
-        var retMsg = root.TryGetProperty("retMsg", out var rmEl) ? (rmEl.GetString() ?? "") : "";
-        if (retCode != 0) throw new BybitApiException(retCode, retMsg);
-
-        var bots = new List<BybitBotPosition>();
-        if (root.TryGetProperty("result", out var result)
-            && result.TryGetProperty("list", out var list)
-            && list.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var b in list.EnumerateArray())
-            {
-                var investment = b.TryGetProperty("totalInvestment", out var inv) ? ParseDecimal(inv) : 0m;
-                var pnl = b.TryGetProperty("totalPnl", out var pn) ? ParseDecimal(pn) : 0m;
-                var pnlPct = b.TryGetProperty("pnlPercent", out var pp) ? ParseDecimal(pp) : 0m;
-
-                bots.Add(new BybitBotPosition
-                {
-                    BotId = b.TryGetProperty("orderId", out var oid) ? (oid.GetString() ?? "") : "",
-                    BotType = botType,
-                    Category = category,
-                    Symbol = b.TryGetProperty("symbol", out var sym) ? (sym.GetString() ?? "") : "",
-                    Investment = investment,
-                    CurrentValue = investment + pnl,
-                    TotalPnl = pnl,
-                    TotalPnlPercent = pnlPct,
-                    Status = b.TryGetProperty("orderStatus", out var st) ? (st.GetString() ?? "") : "",
-                });
-            }
-        }
-        return bots;
     }
 
     private static decimal ParseDecimal(JsonElement el)

@@ -71,7 +71,19 @@ public sealed class PortfolioServiceClient : IPortfolioServiceClient
         try
         {
             var wallet = await _bybit.GetPortfolioAsync(key.ApiKey, key.ApiSecret, ct);
-            var dto = MapToDetailedSummary(wallet);
+
+            // Coins coming from Funding wallet (and any other source) without
+            // a USD valuation get one via the public spot ticker. USDT/USDC are
+            // treated as $1 directly inside the client.
+            var coinsNeedingPrice = wallet.Coins
+                .Where(c => c.UsdValue <= 0m && c.Equity > 0m)
+                .Select(c => c.Coin)
+                .ToList();
+            IReadOnlyDictionary<string, decimal> prices = new Dictionary<string, decimal>();
+            if (coinsNeedingPrice.Count > 0)
+                prices = await _bybit.GetSpotUsdPricesAsync(coinsNeedingPrice, ct);
+
+            var dto = MapToDetailedSummary(wallet, prices);
             _cache.Set(cacheKey, dto, CacheTtl);
             return ServiceResult<PortfolioDetailedSummaryResponse>.Ok(dto);
         }
@@ -114,31 +126,47 @@ public sealed class PortfolioServiceClient : IPortfolioServiceClient
         ByExchange = [],
     };
 
-    private static PortfolioDetailedSummaryResponse MapToDetailedSummary(BybitPortfolioSnapshot wallet)
+    private static PortfolioDetailedSummaryResponse MapToDetailedSummary(
+        BybitPortfolioSnapshot wallet,
+        IReadOnlyDictionary<string, decimal> prices)
     {
+        decimal ResolvePrice(string coin) =>
+            prices.TryGetValue(coin, out var p) ? p : 0m;
+
         var byAsset = wallet.Coins
-            .OrderByDescending(c => c.UsdValue)
-            .Select(c => new PortfolioAssetSummaryDto
+            .Select(c =>
             {
-                Symbol = c.Coin,
-                TotalAmount = c.Equity,
-                TotalValue = c.UsdValue,
-                Change24h = 0m, // Best-effort; live ticker overlay supplies % on the UI side.
-                ExchangeBreakdown =
-                [
-                    new PortfolioAssetExchangeBreakdownDto
-                    {
-                        Exchange = "Bybit",
-                        Amount = c.Equity,
-                        Value = c.UsdValue,
-                    }
-                ],
+                // If wallet-balance already provided a usdValue, keep it (UNIFIED
+                // sometimes returns it). Otherwise multiply equity by the spot
+                // ticker price (or 1 for stables — handled inside the client).
+                var usd = c.UsdValue > 0m ? c.UsdValue : c.Equity * ResolvePrice(c.Coin);
+                return new PortfolioAssetSummaryDto
+                {
+                    Symbol = c.Coin,
+                    TotalAmount = c.Equity,
+                    TotalValue = usd,
+                    Change24h = 0m,
+                    ExchangeBreakdown =
+                    [
+                        new PortfolioAssetExchangeBreakdownDto
+                        {
+                            Exchange = "Bybit",
+                            Amount = c.Equity,
+                            Value = usd,
+                        }
+                    ],
+                };
             })
+            .OrderByDescending(a => a.TotalValue)
+            .ThenByDescending(a => a.TotalAmount)
             .ToList();
 
-        var totalValue = wallet.TotalEquityUsd > 0
-            ? wallet.TotalEquityUsd
-            : byAsset.Sum(a => a.TotalValue);
+        // Prefer the sum of priced rows over Bybit's totalEquity — totalEquity
+        // only reflects UNIFIED account and ignores Funding wallet entirely.
+        var pricedTotal = byAsset.Sum(a => a.TotalValue);
+        var totalValue = pricedTotal > 0m
+            ? pricedTotal
+            : (wallet.TotalEquityUsd > 0 ? wallet.TotalEquityUsd : 0m);
 
         var byExchange = new List<PortfolioExchangeSummaryDto>
         {
