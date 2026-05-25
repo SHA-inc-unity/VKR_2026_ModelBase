@@ -1,6 +1,7 @@
 using System.Text;
 using AccountService.API.Kafka;
 using AccountService.Application.Common.Settings;
+using AccountService.Application.Crypto;
 using AccountService.Application.Interfaces.Cache;
 using AccountService.Application.Interfaces.Repositories;
 using AccountService.Application.Interfaces.Services;
@@ -58,11 +59,18 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IRoleRepository, RoleRepository>();
         services.AddScoped<IRefreshTokenRepository, RefreshTokenRepository>();
+        services.AddScoped<IExchangeApiKeyRepository, ExchangeApiKeyRepository>();
 
         // Application services
         services.AddScoped<ITokenService, TokenService>();
         services.AddScoped<IPasswordService, PasswordService>();
         services.AddScoped<IAccountService, AccountAppService>();
+        services.AddScoped<IExchangeApiKeyService, ExchangeApiKeyService>();
+
+        // AES-GCM encryption singleton (master key from env / config)
+        var masterKey = config["ApiKeyEncryption:MasterKey"]
+                        ?? Environment.GetEnvironmentVariable("ACCOUNT_API_KEY_MASTER_KEY");
+        services.AddSingleton<IAesGcmEncryption>(_ => new AesGcmEncryption(masterKey));
 
         // FluentValidation
         services.AddFluentValidationAutoValidation();

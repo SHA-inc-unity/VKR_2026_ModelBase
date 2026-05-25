@@ -21,6 +21,8 @@ public static class MigrationExtensions
         "user_settings",
         "refresh_tokens",
         "audit_login_events",
+        "exchange_api_keys",
+        "exchange_metadata",
     ];
 
     public static async Task MigrateAndSeedAsync(this WebApplication app)

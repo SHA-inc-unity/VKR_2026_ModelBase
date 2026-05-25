@@ -42,6 +42,54 @@ partial class AccountDbContextModelSnapshot : ModelSnapshot
             b.ToTable("audit_login_events");
         });
 
+        modelBuilder.Entity("AccountService.Domain.Entities.ExchangeApiKey", b =>
+        {
+            b.Property<Guid>("Id").HasColumnType("uuid").HasColumnName("id");
+            b.Property<Guid>("UserId").HasColumnType("uuid").HasColumnName("user_id");
+            b.Property<string>("Exchange").IsRequired()
+                .HasMaxLength(32).HasColumnType("character varying(32)").HasColumnName("exchange");
+            b.Property<string>("Label").IsRequired()
+                .HasMaxLength(64).HasColumnType("character varying(64)").HasColumnName("label");
+            b.Property<string>("ApiKeyEnc").IsRequired()
+                .HasMaxLength(1024).HasColumnType("character varying(1024)").HasColumnName("api_key_enc");
+            b.Property<string>("ApiSecretEnc").IsRequired()
+                .HasMaxLength(2048).HasColumnType("character varying(2048)").HasColumnName("api_secret_enc");
+            b.Property<string>("ApiKeyMasked").IsRequired()
+                .HasMaxLength(64).HasColumnType("character varying(64)").HasColumnName("api_key_masked");
+            b.Property<bool>("CanRead").HasColumnType("boolean").HasColumnName("can_read");
+            b.Property<bool>("CanTrade").HasColumnType("boolean").HasColumnName("can_trade");
+            b.Property<DateTime>("CreatedAt").HasColumnType("timestamp with time zone").HasColumnName("created_at");
+            b.Property<DateTime?>("LastUsedAt").HasColumnType("timestamp with time zone").HasColumnName("last_used_at");
+            b.Property<string>("Status").IsRequired()
+                .HasMaxLength(20).HasColumnType("character varying(20)").HasColumnName("status");
+            b.Property<string>("LastValidationError")
+                .HasMaxLength(512).HasColumnType("character varying(512)").HasColumnName("last_validation_error");
+            b.Property<DateTime?>("LastValidatedAt").HasColumnType("timestamp with time zone").HasColumnName("last_validated_at");
+            b.HasKey("Id").HasName("pk_exchange_api_keys");
+            b.HasIndex("UserId", "Exchange").HasDatabaseName("ix_exchange_api_keys_user_id_exchange");
+            b.ToTable("exchange_api_keys");
+        });
+
+        modelBuilder.Entity("AccountService.Domain.Entities.ExchangeMetadata", b =>
+        {
+            b.Property<Guid>("Id").HasColumnType("uuid").HasColumnName("id");
+            b.Property<string>("Exchange").IsRequired()
+                .HasMaxLength(32).HasColumnType("character varying(32)").HasColumnName("exchange");
+            b.Property<string>("Symbol").IsRequired()
+                .HasMaxLength(32).HasColumnType("character varying(32)").HasColumnName("symbol");
+            b.Property<string>("Category").IsRequired()
+                .HasMaxLength(32).HasColumnType("character varying(32)").HasColumnName("category");
+            b.Property<decimal?>("MakerFeeBps").HasColumnType("numeric(18,6)").HasColumnName("maker_fee_bps");
+            b.Property<decimal?>("TakerFeeBps").HasColumnType("numeric(18,6)").HasColumnName("taker_fee_bps");
+            b.Property<decimal?>("MinNotional").HasColumnType("numeric(28,8)").HasColumnName("min_notional");
+            b.Property<decimal?>("MaxLeverage").HasColumnType("numeric(8,2)").HasColumnName("max_leverage");
+            b.Property<string>("RawJson").IsRequired().HasColumnType("jsonb").HasColumnName("raw_json");
+            b.Property<DateTime>("CapturedAt").HasColumnType("timestamp with time zone").HasColumnName("captured_at");
+            b.HasKey("Id").HasName("pk_exchange_metadata");
+            b.HasIndex("Exchange", "Symbol", "Category").IsUnique().HasDatabaseName("ix_exchange_metadata_exchange_symbol_category");
+            b.ToTable("exchange_metadata");
+        });
+
         modelBuilder.Entity("AccountService.Domain.Entities.RefreshToken", b =>
         {
             b.Property<Guid>("Id").ValueGeneratedOnAdd()

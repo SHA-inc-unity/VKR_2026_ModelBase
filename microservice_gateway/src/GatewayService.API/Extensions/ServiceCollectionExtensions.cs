@@ -3,6 +3,7 @@ using GatewayService.API.Aggregators.Bootstrap;
 using GatewayService.API.Aggregators.Dashboard;
 using GatewayService.API.Middleware;
 using GatewayService.API.Clients.Account;
+using GatewayService.API.Clients.Bybit;
 using GatewayService.API.Clients.Market;
 using GatewayService.API.Clients.News;
 using GatewayService.API.Clients.Notifications;
@@ -108,6 +109,26 @@ public static class ServiceCollectionExtensions
                 client.BaseAddress = BuildAccountServiceUri(configuration);
                 client.Timeout = TimeSpan.FromSeconds(15);
             });
+
+        // Account internal client (X-Internal-Api-Key) — used to fetch decrypted
+        // exchange API keys for the user.
+        var internalApiKey = configuration["InternalApi:ApiKey"]
+                             ?? Environment.GetEnvironmentVariable("ACCOUNT_INTERNAL_SECRET")
+                             ?? string.Empty;
+        services.AddHttpClient<IAccountInternalClient, AccountInternalClient>(client =>
+        {
+            client.BaseAddress = BuildAccountServiceUri(configuration);
+            client.Timeout = TimeSpan.FromSeconds(15);
+            if (!string.IsNullOrWhiteSpace(internalApiKey))
+                client.DefaultRequestHeaders.Add("X-Internal-Api-Key", internalApiKey);
+        });
+
+        // Bybit V5 private API (HMAC-signed wallet / fee endpoints).
+        services.AddHttpClient<IBybitPrivateClient, BybitPrivateClient>(client =>
+        {
+            client.BaseAddress = new Uri("https://api.bybit.com");
+            client.Timeout = TimeSpan.FromSeconds(15);
+        });
 
         // Stub clients — no HttpClient needed (no real HTTP calls yet)
         services.AddSingleton<IFrontendContractState, FrontendContractState>();

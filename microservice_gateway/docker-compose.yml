@@ -14,6 +14,9 @@ services:
       Jwt__Issuer: ${JWT_ISSUER:-account-service}
       Jwt__Audience: ${JWT_AUDIENCE:-exchange-app}
       Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
+      InternalApi__ApiKey: ${INTERNAL_API_KEY}
+      ACCOUNT_INTERNAL_SECRET: ${INTERNAL_API_KEY}
+      ACCOUNT_SERVICE_URL: ${ACCOUNT_SERVICE_URL:-http://account_service_api:5000}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5020/health/ready"]
       interval: 30s

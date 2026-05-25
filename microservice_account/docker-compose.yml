@@ -20,6 +20,8 @@ services:
       Password__WorkFactor: ${BCRYPT_WORK_FACTOR:-12}
       Redis__ConnectionString: ${REDIS_URL:-}
       InternalApi__ApiKey: ${INTERNAL_API_KEY}
+      ACCOUNT_API_KEY_MASTER_KEY: ${ACCOUNT_API_KEY_MASTER_KEY:-${INTERNAL_API_KEY}}
+      ApiKeyEncryption__MasterKey: ${ACCOUNT_API_KEY_MASTER_KEY:-${INTERNAL_API_KEY}}
       Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
       AdminBootstrap__Email: ${ADMIN_BOOTSTRAP_EMAIL:-}
       AdminBootstrap__Username: ${ADMIN_BOOTSTRAP_USERNAME:-}

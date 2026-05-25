@@ -56,6 +56,10 @@ public sealed record FrontendResponseMetaDto
 
 public sealed record PortfolioDetailedSummaryResponse
 {
+    /// <summary>"ok" | "no_key" | "error" — UI uses this to pick the empty state.</summary>
+    public string State { get; init; } = "ok";
+    /// <summary>Upstream / validation error message when State == "error".</summary>
+    public string? Message { get; init; }
     public decimal TotalValue { get; init; }
     public decimal TotalPnl { get; init; }
     public decimal TotalPnlPercent { get; init; }

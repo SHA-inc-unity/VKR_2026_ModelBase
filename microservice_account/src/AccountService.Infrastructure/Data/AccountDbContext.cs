@@ -13,6 +13,8 @@ public sealed class AccountDbContext : DbContext
     public DbSet<UserSettings> UserSettings => Set<UserSettings>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<AuditLoginEvent> AuditLoginEvents => Set<AuditLoginEvent>();
+    public DbSet<ExchangeApiKey> ExchangeApiKeys => Set<ExchangeApiKey>();
+    public DbSet<ExchangeMetadata> ExchangeMetadata => Set<ExchangeMetadata>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
