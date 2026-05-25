@@ -2,6 +2,7 @@ using System.Text.Json;
 using GatewayService.API.Clients.Social;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace GatewayService.API.Controllers;
 
@@ -13,7 +14,12 @@ namespace GatewayService.API.Controllers;
 public sealed class SocialController : ControllerBase
 {
     private readonly ISocialServiceClient _social;
-    public SocialController(ISocialServiceClient social) => _social = social;
+    private readonly ILogger<SocialController> _logger;
+    public SocialController(ISocialServiceClient social, ILogger<SocialController> logger)
+    {
+        _social = social;
+        _logger = logger;
+    }
 
     // ── Favorites ────────────────────────────────────────────────────────────
     [Authorize]
@@ -77,6 +83,14 @@ public sealed class SocialController : ControllerBase
         if (requireBearer)
         {
             token = GetRawToken();
+            _logger.LogInformation(
+                "Social.Forward {Method} {Path} userAuth={UserAuth} userName={UserName} authHeader={AuthHeaderPresent} tokenLen={TokenLen}",
+                method,
+                path,
+                User?.Identity?.IsAuthenticated,
+                User?.Identity?.Name,
+                Request.Headers.ContainsKey("Authorization"),
+                token?.Length ?? 0);
             if (token is null) return Unauthorized();
         }
 
