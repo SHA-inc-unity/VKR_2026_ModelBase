@@ -370,7 +370,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataMarketWatcherSetEnabled=> HandleMarketWatcherSetEnabled(payload),
             Topics.CmdDataMarketWatcherRows      => await HandleMarketWatcherRowsAsync(payload, ct),
             Topics.CmdDataMarketWatcherLogs      => HandleMarketWatcherLogs(payload),
-            Topics.CmdDataMarketWatcherTracked   => HandleMarketWatcherTrackedSymbols(payload),
+            Topics.CmdDataMarketWatcherTracked   => await HandleMarketWatcherTrackedSymbolsAsync(payload, ct),
             _                                => new { error = $"Unknown topic: {topic}" },
         };
 
@@ -505,7 +505,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
     /// MW has not yet completed its first discovery cycle — callers are
     /// expected to layer their own persisted fallback (see MarketConfigService).
     /// </summary>
-    private object HandleMarketWatcherTrackedSymbols(JsonElement payload)
+    private async Task<object> HandleMarketWatcherTrackedSymbolsAsync(JsonElement payload, CancellationToken ct)
     {
         var exchange = TryGetString(payload, "exchange");
         if (string.IsNullOrWhiteSpace(exchange))
@@ -513,12 +513,71 @@ public sealed partial class KafkaConsumerService : BackgroundService
             return new { error = "exchange is required", code = "bad_request" };
         }
 
-        var symbols = _marketWatcher.GetTrackedSymbols(exchange);
-        return new
+        var normalizedExchange = exchange.Trim().ToLowerInvariant();
+        var liveSymbols = _marketWatcher.GetTrackedSymbols(normalizedExchange);
+        if (liveSymbols.Count > 0)
         {
-            exchange = exchange.Trim().ToLowerInvariant(),
-            symbols,
-        };
+            return new { exchange = normalizedExchange, symbols = liveSymbols };
+        }
+
+        // MW state can be empty for a few seconds after restart, or longer if
+        // an exchange's subscription is currently retrying. Fall back to the
+        // set of persisted `{exchange}_{symbol}_*` tables — every row in there
+        // is something MW has previously written.
+        var dbSymbols = await ListPersistedSymbolsAsync(normalizedExchange, ct);
+        return new { exchange = normalizedExchange, symbols = dbSymbols };
+    }
+
+    private async Task<IReadOnlyList<string>> ListPersistedSymbolsAsync(string exchange, CancellationToken ct)
+    {
+        try
+        {
+            var tables = await _repo.ListTablesAsync(ct);
+            // For bybit the table name is `{symbol}_{timeframe}`; for every other
+            // exchange it is `{exchange}_{symbol}_{timeframe}` (DatasetCore.MakeTableName).
+            var prefix = string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase)
+                ? string.Empty
+                : $"{exchange}_";
+
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var table in tables)
+            {
+                var name = table?.Trim();
+                if (string.IsNullOrEmpty(name)) continue;
+
+                if (prefix.Length > 0)
+                {
+                    if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    name = name[prefix.Length..];
+                }
+                else
+                {
+                    // For bybit, skip rows that look like another exchange's tables
+                    // (e.g. kraken_btcusdt_5m would otherwise match).
+                    if (name.StartsWith("kraken_", StringComparison.OrdinalIgnoreCase)
+                        || name.StartsWith("binance_", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                }
+
+                // Strip trailing `_<timeframe>` (e.g. `_5m`, `_60m`, `_1d`).
+                var underscore = name.LastIndexOf('_');
+                if (underscore <= 0 || underscore >= name.Length - 1) continue;
+                var symbol = name[..underscore].ToUpperInvariant();
+                if (!symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase)) continue;
+                result.Add(symbol);
+            }
+
+            return result.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Failed to list persisted symbols for {Exchange}; returning empty",
+                exchange);
+            return Array.Empty<string>();
+        }
     }
 
     /// <summary>
