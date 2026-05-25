@@ -31,6 +31,7 @@ public sealed class CommentsAppService : ICommentsAppService
         string targetId,
         int page,
         int pageSize,
+        CommentSortMode sort,
         Guid? viewerUserId,
         CancellationToken ct)
     {
@@ -42,7 +43,7 @@ public sealed class CommentsAppService : ICommentsAppService
         if (pageSize < 1) pageSize = 50;
         if (pageSize > 200) pageSize = 200;
 
-        var slice = await _comments.ListAsync(targetType, targetId, page, pageSize, ct);
+        var slice = await _comments.ListAsync(targetType, targetId, page, pageSize, sort, ct);
         if (slice.Items.Count == 0)
         {
             return new CommentListResponse { Items = Array.Empty<CommentResponse>(), Total = slice.Total, Page = page, PageSize = pageSize };

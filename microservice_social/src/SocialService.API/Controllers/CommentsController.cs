@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SocialService.Application.DTOs.Requests;
+using SocialService.Application.Interfaces.Repositories;
 using SocialService.Application.Interfaces.Services;
 
 namespace SocialService.API.Controllers;
@@ -21,11 +22,25 @@ public sealed class CommentsController : ControllerBase
         [FromQuery] string targetId,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 50,
+        [FromQuery] string? sort = null,
         CancellationToken ct = default)
     {
         Guid? viewer = TryCurrentUserId();
-        var result = await _svc.ListAsync(targetType, targetId, page, pageSize, viewer, ct);
+        var sortMode = ParseSort(sort);
+        var result = await _svc.ListAsync(targetType, targetId, page, pageSize, sortMode, viewer, ct);
         return Ok(result);
+    }
+
+    private static CommentSortMode ParseSort(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return CommentSortMode.Top24h;
+        return raw.Trim().ToLowerInvariant() switch
+        {
+            "new" => CommentSortMode.New,
+            "top" => CommentSortMode.Top,
+            "top24h" or "hot" or "trending" => CommentSortMode.Top24h,
+            _ => CommentSortMode.Top24h,
+        };
     }
 
     [HttpPost]

@@ -1,5 +1,6 @@
 using SocialService.Application.DTOs.Requests;
 using SocialService.Application.DTOs.Responses;
+using SocialService.Application.Interfaces.Repositories;
 
 namespace SocialService.Application.Interfaces.Services;
 
@@ -18,6 +19,7 @@ public interface ICommentsAppService
         string targetId,
         int page,
         int pageSize,
+        CommentSortMode sort,
         Guid? viewerUserId,
         CancellationToken ct);
 

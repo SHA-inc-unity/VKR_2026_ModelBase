@@ -13,13 +13,39 @@ public sealed class CommentRepository : ICommentRepository
     public Task<Comment?> GetByIdAsync(Guid id, CancellationToken ct) =>
         _db.Comments.FirstOrDefaultAsync(c => c.Id == id, ct);
 
-    public async Task<CommentListPage> ListAsync(string targetType, string targetId, int page, int pageSize, CancellationToken ct)
+    public async Task<CommentListPage> ListAsync(string targetType, string targetId, int page, int pageSize, CommentSortMode sort, CancellationToken ct)
     {
         var q = _db.Comments.AsNoTracking()
             .Where(c => c.TargetType == targetType && c.TargetId == targetId);
         var total = await q.CountAsync(ct);
-        var items = await q
-            .OrderBy(c => c.CreatedAt)
+
+        // Reddit-style ordering. For top/top24h we use a correlated subquery
+        // over CommentLikes so the page slice is selected by like-count rather
+        // than by createdAt — EF Core translates the Count(...) lambda into a
+        // SQL subselect. Replies (parentId != null) are NOT excluded from the
+        // page slice itself because the UI groups them client-side under their
+        // root parents and the page-size budget covers both root+reply rows.
+        IOrderedQueryable<Comment> ordered;
+        switch (sort)
+        {
+            case CommentSortMode.New:
+                ordered = q.OrderByDescending(c => c.CreatedAt);
+                break;
+            case CommentSortMode.Top:
+                ordered = q
+                    .OrderByDescending(c => _db.CommentLikes.Count(l => l.CommentId == c.Id))
+                    .ThenByDescending(c => c.CreatedAt);
+                break;
+            case CommentSortMode.Top24h:
+            default:
+                var cutoff = DateTime.UtcNow.AddHours(-24);
+                ordered = q
+                    .OrderByDescending(c => _db.CommentLikes.Count(l => l.CommentId == c.Id && l.CreatedAt >= cutoff))
+                    .ThenByDescending(c => c.CreatedAt);
+                break;
+        }
+
+        var items = await ordered
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync(ct);
