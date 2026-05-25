@@ -35,9 +35,20 @@ public sealed class MarketConfigService : IMarketConfigService
     {
         var normalized = NormalizeExchange(exchange);
         var ttl = TimeSpan.FromSeconds(_settings.ConfigCacheTtlSeconds);
-        var key = $"market:config:full:{normalized}:v2";
-        return await _cache.GetOrCreateAsync(key, ttl,
-            () => BuildConfigAsync(normalized, ct), ct);
+        var key = $"market:config:full:{normalized}:v3";
+
+        var cached = await _cache.GetAsync<MarketConfigResponse>(key, ct);
+        if (cached is { Symbols.Count: > 0 })
+        {
+            return cached;
+        }
+
+        var fresh = await BuildConfigAsync(normalized, ct);
+        if (fresh.Symbols.Count > 0)
+        {
+            await _cache.SetAsync(key, fresh, ttl, ct);
+        }
+        return fresh;
     }
 
     /// <inheritdoc />
@@ -105,15 +116,22 @@ public sealed class MarketConfigService : IMarketConfigService
     {
         var ttl = TimeSpan.FromSeconds(_settings.SymbolsCacheTtlSeconds);
         var key = $"market:config:symbols:{exchange}:v2";
-        var wrapper = await _cache.GetOrCreateAsync<SymbolListWrapper>(
-            key, ttl,
-            async () =>
-            {
-                var list = await FetchSymbolsForExchangeAsync(exchange, ct);
-                return new SymbolListWrapper(list.ToList());
-            },
-            ct);
-        return wrapper.Symbols;
+
+        // Fast path: hit cache.
+        var cached = await _cache.GetAsync<SymbolListWrapper>(key, ct);
+        if (cached is { Symbols.Count: > 0 })
+        {
+            return cached.Symbols;
+        }
+
+        // Cold or empty cache: rebuild. Do NOT cache empty results — MW may be
+        // mid-startup and would otherwise stay empty for the full TTL window.
+        var fresh = await FetchSymbolsForExchangeAsync(exchange, ct);
+        if (fresh.Count > 0)
+        {
+            await _cache.SetAsync(key, new SymbolListWrapper(fresh.ToList()), ttl, ct);
+        }
+        return fresh;
     }
 
     private async Task<IReadOnlyList<string>> FetchSymbolsForExchangeAsync(string exchange, CancellationToken ct)
