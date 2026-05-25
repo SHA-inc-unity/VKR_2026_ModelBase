@@ -702,14 +702,58 @@ public sealed class MarketWatcherService : BackgroundService
             }
         }
 
-        var startTasks = symbols
+        // Kraken's public WebSocket endpoint enforces a fairly tight per-connection
+        // /per-IP rate limit (it returns HTTP 429 on the WebSocket upgrade when too
+        // many subscriptions are opened in parallel). Each KrakenSpotSymbolOrderBook
+        // opens its own socket, so we MUST stagger startups instead of firing them
+        // all via Task.WhenAll — that was the reason MW kept aborting Kraken with
+        // "subscription start failed for ADA/USDT: 429" after every restart.
+        var symbolsToStart = symbols
             .Where(item => !string.IsNullOrWhiteSpace(item.RealtimeSymbol))
-            .Select(StartOrderBookAsync)
             .ToArray();
+
+        var startedOrderBooks =
+            new List<(MarketWatchSymbol Symbol, KrakenSpotSymbolOrderBook OrderBook, AsyncDisposeAction Disposer)>(
+                symbolsToStart.Length);
 
         try
         {
-            var orderBooks = await Task.WhenAll(startTasks);
+            foreach (var symbol in symbolsToStart)
+            {
+                try
+                {
+                    var entry = await StartOrderBookAsync(symbol);
+                    startedOrderBooks.Add(entry);
+                }
+                catch (Exception ex)
+                {
+                    // One symbol failing must not nuke the whole exchange — log and
+                    // continue. Common failure modes here are 429 from the WebSocket
+                    // upgrade and individual delisted/illiquid pairs.
+                    _log.LogWarning(ex,
+                        "Kraken order book subscription failed for {Symbol}; continuing without it",
+                        symbol.RealtimeSymbol);
+                }
+
+                // Small inter-subscription delay to stay well below Kraken's WS
+                // connect-rate ceiling (~1 connection/250 ms is comfortable).
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(350), ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+            }
+
+            if (startedOrderBooks.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Kraken order book subscriptions all failed; nothing to watch");
+            }
+
+            var orderBooks = startedOrderBooks.ToArray();
             var refreshCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var refreshTask = Task.Run(async () =>
             {
@@ -757,11 +801,15 @@ public sealed class MarketWatcherService : BackgroundService
         }
         catch
         {
-            foreach (var task in startTasks)
+            foreach (var entry in startedOrderBooks)
             {
-                if (task.IsCompletedSuccessfully)
+                try
                 {
-                    await task.Result.Disposer.DisposeAsync();
+                    await entry.Disposer.DisposeAsync();
+                }
+                catch
+                {
+                    // Best-effort cleanup; suppress to surface the original error.
                 }
             }
 
