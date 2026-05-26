@@ -23,6 +23,83 @@ PASS = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
 
+ANSI = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "cyan": "\033[36m",
+    "white": "\033[37m",
+}
+
+STATUS_COLORS = {
+    PASS: "green",
+    FAIL: "red",
+    SKIP: "yellow",
+}
+
+SERVICE_COLORS = {
+    "infra": "magenta",
+    "data": "blue",
+    "analytics": "cyan",
+    "gateway": "green",
+    "news": "yellow",
+    "notification": "magenta",
+    "social": "blue",
+    "account": "cyan",
+    "admin": "white",
+}
+
+SERVICE_LABELS = {
+    "infra": "Infrastructure",
+    "data": "Data Service",
+    "analytics": "Analytics",
+    "gateway": "Gateway",
+    "news": "News",
+    "notification": "Notifications",
+    "social": "Social",
+    "account": "Account",
+    "admin": "Admin",
+}
+
+STEP_LABELS = {
+    ("infra", "health"): "Liveness",
+    ("infra", "ready"): "Readiness",
+    ("data", "health"): "Liveness",
+    ("analytics", "health"): "Liveness",
+    ("analytics", "registry"): "Registry",
+    ("gateway", "health"): "Liveness",
+    ("gateway", "market_config"): "Market Config",
+    ("gateway", "market_chart"): "Candles",
+    ("news", "list"): "Feed",
+    ("notification", "unread_count"): "Unread Count",
+    ("notification", "get_settings"): "Get Settings",
+    ("notification", "update_settings"): "Update Settings",
+    ("notification", "list"): "List",
+    ("social", "list_comments"): "Comments",
+    ("social", "favorite_add"): "Add Favorite",
+    ("social", "favorite_list"): "Favorites",
+    ("social", "comment_create"): "Create Comment",
+    ("social", "comment_like"): "Like Comment",
+    ("social", "comment_unlike"): "Unlike Comment",
+    ("social", "comment_delete"): "Delete Comment",
+    ("social", "favorite_remove"): "Remove Favorite",
+    ("account", "register"): "Register",
+    ("account", "login"): "Login",
+    ("account", "me"): "Profile",
+    ("account", "get_settings"): "Get Settings",
+    ("account", "update_settings"): "Update Settings",
+    ("account", "refresh"): "Refresh Token",
+    ("account", "logout"): "Logout",
+    ("account", "delete_account"): "Delete Account",
+    ("admin", "page"): "Page",
+    ("admin", "api_health"): "API Health",
+}
+
 
 def env(name: str, default: str | None = None) -> str | None:
     value = os.getenv(name)
@@ -80,6 +157,8 @@ class RunnerConfig:
     backend_host: str
     timeout_seconds: float
     insecure_https: bool
+    color_mode: str
+    verbose_output: bool
     infra_base_url: str | None
     admin_base_url: str | None
     account_base_url: str | None
@@ -110,13 +189,44 @@ class TraceRunner:
         self.account_email: str | None = None
         self.account_password: str | None = None
         self.account_username: str | None = None
+        self.last_service: str | None = None
         self.ssl_context = ssl._create_unverified_context() if config.insecure_https else None
+        self.use_color = self.should_use_color()
+
+    def should_use_color(self) -> bool:
+        if self.config.color_mode == "always":
+            return True
+        if self.config.color_mode == "never":
+            return False
+        if os.getenv("NO_COLOR"):
+            return False
+        return sys.stdout.isatty()
+
+    def paint(self, text: str, *styles: str) -> str:
+        if not self.use_color or not styles:
+            return text
+        prefix = "".join(ANSI[style] for style in styles)
+        return f"{prefix}{text}{ANSI['reset']}"
+
+    def service_label(self, service: str) -> str:
+        return SERVICE_LABELS.get(service, service.replace("_", " ").title())
+
+    def step_label(self, service: str, name: str) -> str:
+        label = STEP_LABELS.get((service, name))
+        if label:
+            return label
+        return name.replace("_", " ").title()
+
+    def print_service_header(self, service: str) -> None:
+        color = SERVICE_COLORS.get(service, "white")
+        print()
+        print(self.paint(f"== {self.service_label(service)} ==", "bold", color))
 
     def print_header(self) -> None:
-        print("ModelLine Service Tracer")
-        print(f"version={VERSION}")
-        print(f"backend_host={self.config.backend_host}")
-        print(f"timeout={self.config.timeout_seconds}s insecure_https={self.config.insecure_https}")
+        print(self.paint("ModelLine Service Tracer", "bold", "cyan"))
+        print(self.paint(f"backend: {self.config.backend_host}", "dim"))
+        mode = "verbose" if self.config.verbose_output else "presentation"
+        print(self.paint(f"timeout: {self.config.timeout_seconds}s   https-insecure: {self.config.insecure_https}   output: {mode}", "dim"))
         print()
 
     def log_result(
@@ -142,10 +252,24 @@ class TraceRunner:
             detail=detail,
         )
         self.results.append(step)
-        http_part = f" http={http_status}" if http_status is not None else ""
-        method_part = f" {method}" if method else ""
-        url_part = f" {url}" if url else ""
-        print(f"[{status}] {service}.{name}{method_part}{url_part}{http_part} {duration_ms}ms :: {detail}")
+        if self.last_service != service:
+            self.print_service_header(service)
+            self.last_service = service
+
+        if self.config.verbose_output:
+            http_part = f" http={http_status}" if http_status is not None else ""
+            method_part = f" {method}" if method else ""
+            url_part = f" {url}" if url else ""
+            status_label = self.paint(f"[{status}]", STATUS_COLORS.get(status, "white"), "bold")
+            print(f"{status_label} {service}.{name}{method_part}{url_part}{http_part} {duration_ms}ms :: {self.paint(detail, 'dim')}")
+            return
+
+        status_label = self.paint(status.ljust(4), STATUS_COLORS.get(status, "white"), "bold")
+        step_label = self.paint(self.step_label(service, name).ljust(18), "bold")
+        timing = self.paint(f"{duration_ms:>4} ms", "cyan")
+        http_label = self.paint(f"HTTP {http_status}" if http_status is not None else "", "dim")
+        detail_label = self.paint(detail, "dim")
+        print(f" {status_label}  {step_label}  {timing}  {http_label:<10}  {detail_label}")
 
     def skip(self, service: str, name: str, detail: str) -> None:
         self.log_result(service=service, name=name, status=SKIP, duration_ms=0, detail=detail)
@@ -311,7 +435,7 @@ class TraceRunner:
                 "username": self.account_username,
                 "password": self.account_password,
             },
-            validator=lambda resp: f"uid={resp.json_body['uid']} email={resp.json_body['email']}"
+            validator=lambda resp: "test account created"
             if isinstance(resp.json_body, dict) and resp.json_body.get("accessToken")
             else (_ for _ in ()).throw(TraceFailure("register response does not contain tokens")),
         )
@@ -329,7 +453,7 @@ class TraceRunner:
                 "deviceId": "trace-runner",
                 "deviceName": "deploy/run_service_traces.py",
             },
-            validator=lambda resp: f"roles={','.join(resp.json_body.get('roles', []))}"
+            validator=lambda resp: "credentials accepted"
             if isinstance(resp.json_body, dict) and resp.json_body.get("accessToken")
             else (_ for _ in ()).throw(TraceFailure("login response does not contain accessToken")),
         )
@@ -342,7 +466,7 @@ class TraceRunner:
             url=f"{base_url}/api/account/me",
             expected_statuses={200},
             headers=self.bearer_headers(),
-            validator=lambda resp: f"id={resp.json_body['id']} username={resp.json_body['username']}"
+            validator=lambda resp: "profile loaded"
             if isinstance(resp.json_body, dict) and resp.json_body.get("id")
             else (_ for _ in ()).throw(TraceFailure("me response does not contain profile id")),
         )
@@ -355,7 +479,7 @@ class TraceRunner:
             url=f"{base_url}/api/account/settings",
             expected_statuses={200},
             headers=self.bearer_headers(),
-            validator=lambda resp: f"theme={resp.json_body.get('theme')} locale={resp.json_body.get('locale')}"
+            validator=lambda resp: "settings loaded"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("settings response is not a JSON object")),
         )
@@ -373,7 +497,7 @@ class TraceRunner:
                 "locale": original_settings.get("locale"),
                 "notificationsEnabled": original_settings.get("notificationsEnabled"),
             },
-            validator=lambda resp: "settings round-trip ok"
+            validator=lambda resp: "settings saved"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("update settings response is not JSON")),
         )
@@ -385,7 +509,7 @@ class TraceRunner:
             url=f"{base_url}/api/account/refresh",
             expected_statuses={200},
             json_body={"refreshToken": self.account_auth["refreshToken"]},
-            validator=lambda resp: f"new_exp={resp.json_body.get('accessTokenExpiresAt')}"
+            validator=lambda resp: "token rotated"
             if isinstance(resp.json_body, dict) and resp.json_body.get("accessToken")
             else (_ for _ in ()).throw(TraceFailure("refresh response does not contain accessToken")),
         )
@@ -407,7 +531,7 @@ class TraceRunner:
             expected_statuses={204},
             headers=self.bearer_headers(),
             json_body={"refreshToken": self.account_auth["refreshToken"]},
-            validator=lambda _resp: "refresh token revoked",
+            validator=lambda _resp: "session closed",
         )
         self.skip("account", "delete_account", "unsupported: no public delete-account endpoint exists in current contract")
 
@@ -429,7 +553,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/health",
             expected_statuses={200},
-            validator=lambda resp: truncate(resp.text.strip() or "ok"),
+            validator=lambda _resp: "ingress online",
         )
         self.request_json(
             service="infra",
@@ -437,7 +561,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/health/ready",
             expected_statuses={200},
-            validator=lambda resp: truncate(resp.text.strip() or "ready"),
+            validator=self.validate_infra_ready,
         )
 
     def run_data_flow(self) -> None:
@@ -458,7 +582,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/health",
             expected_statuses={200},
-            validator=lambda resp: f"service={resp.json_body.get('service')} version={resp.json_body.get('version')}"
+            validator=lambda resp: f"{resp.json_body.get('service', 'service')} online"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("health response is not JSON")),
         )
@@ -481,7 +605,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/health",
             expected_statuses={200},
-            validator=lambda resp: f"status={resp.json_body.get('status')}"
+            validator=lambda _resp: "analytics online"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("analytics health response is not JSON")),
         )
@@ -491,7 +615,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/registry",
             expected_statuses={200},
-            validator=lambda resp: f"models={len(resp.json_body.get('models', []))}"
+            validator=lambda resp: f"{len(resp.json_body.get('models', []))} models"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("analytics registry response is not JSON")),
         )
@@ -514,7 +638,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/health",
             expected_statuses={200},
-            validator=lambda resp: truncate(resp.text.strip() or "ok"),
+            validator=lambda _resp: "gateway online",
         )
         self.request_json(
             service="gateway",
@@ -522,7 +646,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/api/v1/market/config",
             expected_statuses={200},
-            validator=lambda resp: f"timeframes={len(resp.json_body.get('timeframes', []))}"
+            validator=lambda resp: f"{len(resp.json_body.get('timeframes', []))} timeframes"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("market config response is not JSON")),
         )
@@ -595,7 +719,7 @@ class TraceRunner:
             url=unread_url,
             expected_statuses={200},
             headers=headers,
-            validator=lambda resp: f"{mode} unread={resp.json_body.get('unread')}"
+            validator=lambda resp: f"{resp.json_body.get('unread')} unread"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("unread-count response is not JSON")),
         )
@@ -606,7 +730,7 @@ class TraceRunner:
             url=settings_url,
             expected_statuses={200},
             headers=headers,
-            validator=lambda resp: f"{mode} priceThresholdPct={resp.json_body.get('priceThresholdPct')}"
+            validator=lambda resp: f"threshold {resp.json_body.get('priceThresholdPct')}%"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("notification settings response is not JSON")),
         )
@@ -624,7 +748,7 @@ class TraceRunner:
                 "enablePrice": self.notification_settings.get("enablePrice"),
                 "priceThresholdPct": self.notification_settings.get("priceThresholdPct"),
             },
-            validator=lambda resp: f"{mode} settings round-trip ok"
+            validator=lambda resp: "settings saved"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("notification update response is not JSON")),
         )
@@ -635,7 +759,7 @@ class TraceRunner:
             url=list_url,
             expected_statuses={200},
             headers=headers,
-            validator=lambda resp: f"{mode} total={resp.json_body.get('total')} unread={resp.json_body.get('unread')}"
+            validator=lambda resp: f"{resp.json_body.get('total')} total, {resp.json_body.get('unread')} unread"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("notification list response is not JSON")),
         )
@@ -674,7 +798,7 @@ class TraceRunner:
             method="GET",
             url=f"{comments_base}?{query}",
             expected_statuses={200},
-            validator=lambda resp: f"{mode} total={resp.json_body.get('total')}"
+            validator=lambda resp: f"{resp.json_body.get('total')} comments"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("comment list response is not JSON")),
         )
@@ -687,7 +811,7 @@ class TraceRunner:
             url=f"{favorites_base}/{urllib.parse.quote(favorite_symbol)}",
             expected_statuses={204},
             headers=headers,
-            validator=lambda _resp: f"{mode} favorite added",
+            validator=lambda _resp: "favorite saved",
         )
         self.request_json(
             service="social",
@@ -696,7 +820,7 @@ class TraceRunner:
             url=f"{favorites_base}",
             expected_statuses={200},
             headers=headers,
-            validator=lambda resp: f"{mode} favorites={len(resp.json_body.get('symbols', []))}"
+            validator=lambda resp: f"{len(resp.json_body.get('symbols', []))} symbols"
             if isinstance(resp.json_body, dict) and favorite_symbol in resp.json_body.get("symbols", [])
             else (_ for _ in ()).throw(TraceFailure(f"favorite symbol {favorite_symbol} not present in list")),
         )
@@ -714,7 +838,7 @@ class TraceRunner:
             expected_statuses={200},
             headers=headers,
             json_body=body,
-            validator=lambda resp: f"{mode} commentId={resp.json_body.get('id')}"
+            validator=lambda resp: "comment created"
             if isinstance(resp.json_body, dict) and resp.json_body.get("id")
             else (_ for _ in ()).throw(TraceFailure("comment create response does not contain id")),
         )
@@ -727,7 +851,7 @@ class TraceRunner:
             url=f"{comments_base}/{self.created_comment_id}/like",
             expected_statuses={204},
             headers=headers,
-            validator=lambda _resp: f"{mode} like applied",
+            validator=lambda _resp: "like added",
         )
         self.request_json(
             service="social",
@@ -736,7 +860,7 @@ class TraceRunner:
             url=f"{comments_base}/{self.created_comment_id}/like",
             expected_statuses={204},
             headers=headers,
-            validator=lambda _resp: f"{mode} like removed",
+            validator=lambda _resp: "like removed",
         )
         self.request_json(
             service="social",
@@ -745,7 +869,7 @@ class TraceRunner:
             url=f"{comments_base}/{self.created_comment_id}",
             expected_statuses={204},
             headers=headers,
-            validator=lambda _resp: f"{mode} comment removed",
+            validator=lambda _resp: "comment removed",
         )
         self.created_comment_id = None
 
@@ -756,7 +880,7 @@ class TraceRunner:
             url=f"{favorites_base}/{urllib.parse.quote(favorite_symbol)}",
             expected_statuses={204},
             headers=headers,
-            validator=lambda _resp: f"{mode} favorite removed",
+            validator=lambda _resp: "favorite removed",
         )
 
     def run_admin_flow(self) -> None:
@@ -778,7 +902,7 @@ class TraceRunner:
             url=base_url,
             expected_statuses={200},
             headers={"Accept": "text/html"},
-            validator=lambda resp: "html returned"
+            validator=lambda resp: "page rendered"
             if "<html" in resp.text.lower() or "<!doctype html" in resp.text.lower()
             else (_ for _ in ()).throw(TraceFailure("admin page did not return HTML")),
         )
@@ -788,10 +912,21 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/api/health",
             expected_statuses={200},
-            validator=lambda resp: f"connectionTarget={resp.json_body.get('connectionTarget')}"
+            validator=lambda _resp: "backend probe ok"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("admin api health response is not JSON")),
         )
+
+    def validate_infra_ready(self, resp: HttpResponseData) -> str:
+        if not isinstance(resp.json_body, dict):
+            raise TraceFailure("readiness response is not JSON")
+        checks = resp.json_body.get("checks")
+        if not isinstance(checks, dict):
+            raise TraceFailure("readiness response does not contain checks")
+        healthy = [name for name, data in checks.items() if isinstance(data, dict) and data.get("status") == "Healthy"]
+        if not healthy:
+            raise TraceFailure("readiness response did not report healthy checks")
+        return f"ready: {', '.join(healthy[:3])}"
 
     def validate_chart(self, resp: HttpResponseData) -> str:
         if not isinstance(resp.json_body, dict):
@@ -801,16 +936,17 @@ class TraceRunner:
             raise TraceFailure("market chart response does not contain a candles list")
         if not candles:
             raise TraceFailure("market chart returned zero candles")
-        return f"candles={len(candles)} status={resp.json_body.get('status')}"
+        status = resp.json_body.get("status") or "ok"
+        return f"{len(candles)} candles, {status}"
 
     def validate_list_response(self, resp: HttpResponseData, mode: str, list_key: str) -> str:
         if not isinstance(resp.json_body, dict):
             raise TraceFailure(f"{list_key} response is not JSON")
         if "items" in resp.json_body and isinstance(resp.json_body["items"], list):
-            return f"{mode} items={len(resp.json_body['items'])}"
+            return f"{len(resp.json_body['items'])} items"
         if "articles" in resp.json_body and isinstance(resp.json_body["articles"], list):
-            return f"{mode} articles={len(resp.json_body['articles'])}"
-        return f"{mode} keys={','.join(sorted(resp.json_body.keys())[:5])}"
+            return f"{len(resp.json_body['articles'])} articles"
+        return f"response keys: {','.join(sorted(resp.json_body.keys())[:3])}"
 
     def finalise(self) -> int:
         total = len(self.results)
@@ -819,7 +955,13 @@ class TraceRunner:
         skipped = sum(1 for item in self.results if item.status == SKIP)
 
         print()
-        print(f"Summary: total={total} pass={passed} fail={failed} skip={skipped}")
+        print(self.paint("== Summary ==", "bold", "white"))
+        print(
+            f"total {total}   "
+            f"{self.paint(f'pass {passed}', 'green', 'bold')}   "
+            f"{self.paint(f'fail {failed}', 'red', 'bold')}   "
+            f"{self.paint(f'skip {skipped}', 'yellow', 'bold')}"
+        )
 
         if self.config.json_report:
             payload = {
@@ -858,6 +1000,8 @@ def build_config() -> RunnerConfig:
     parser.add_argument("--backend-host", default=env("MODELLINE_TRACER_BACKEND_HOST", "127.0.0.1"))
     parser.add_argument("--timeout-seconds", type=float, default=float(env("MODELLINE_TRACER_TIMEOUT", "10") or "10"))
     parser.add_argument("--insecure-https", action="store_true", default=(env("MODELLINE_TRACER_INSECURE", "0") == "1"))
+    parser.add_argument("--color", choices=["auto", "always", "never"], default=env("MODELLINE_TRACER_COLOR", "auto"))
+    parser.add_argument("--verbose-output", action="store_true", default=(env("MODELLINE_TRACER_VERBOSE", "0") == "1"))
     parser.add_argument("--infra-base-url", default=env("MODELLINE_TRACER_INFRA_URL"))
     parser.add_argument("--admin-base-url", default=env("MODELLINE_TRACER_ADMIN_URL"))
     parser.add_argument("--account-base-url", default=env("MODELLINE_TRACER_ACCOUNT_URL"))
@@ -889,6 +1033,8 @@ def build_config() -> RunnerConfig:
         backend_host=host,
         timeout_seconds=args.timeout_seconds,
         insecure_https=args.insecure_https,
+        color_mode=args.color,
+        verbose_output=args.verbose_output,
         infra_base_url=normalize_base(args.infra_base_url) or default_infra,
         admin_base_url=normalize_base(args.admin_base_url) or default_admin,
         account_base_url=normalize_base(args.account_base_url) or default_account,

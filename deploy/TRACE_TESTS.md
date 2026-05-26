@@ -1,7 +1,15 @@
 # Service Trace Runner
 
 `deploy/run_service_traces.py` is a console tracer for the deployed ModelLine runtime.
-It performs real HTTP request flows and prints `PASS` / `FAIL` / `SKIP` for each step.
+It performs real HTTP request flows and prints a compact colored report by default.
+
+Default output style:
+
+- short step names instead of full URLs
+- colored `PASS` / `FAIL` / `SKIP`
+- sections grouped by service
+
+For the old debugging format with methods and URLs, use `--verbose-output`.
 
 Covered flows:
 
@@ -54,6 +62,12 @@ python3 deploy/run_service_traces.py \
 
 ```bash
 python3 deploy/run_service_traces.py --json-report /tmp/modelline-trace-report.json
+```
+
+## Verbose debug output
+
+```bash
+python3 deploy/run_service_traces.py --verbose-output --color always
 ```
 
 ## Service filtering
