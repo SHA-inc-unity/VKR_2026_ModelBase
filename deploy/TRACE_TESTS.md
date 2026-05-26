@@ -3,6 +3,11 @@
 `deploy/run_service_traces.py` is a console tracer for the deployed ModelLine runtime.
 It performs real HTTP request flows and prints a compact colored report by default.
 
+When the repo is configured for split deployment, the tracer automatically reads
+`microservice_admin/.env` and uses its backend host, HTTPS ingress URL, and
+TLS-insecure flag as the default runtime target. That makes the plain command
+work on `onlyadmin` hosts without extra flags.
+
 Default output style:
 
 - short step names instead of full URLs
@@ -38,6 +43,12 @@ or:
 
 ```bash
 bash deploy/run_service_traces.sh --insecure-https
+```
+
+## Split admin host
+
+```bash
+python3 deploy/run_service_traces.py --color always
 ```
 
 ## Remote backend host

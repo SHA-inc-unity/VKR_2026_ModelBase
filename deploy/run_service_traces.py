@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
@@ -121,6 +122,46 @@ def truncate(value: str, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3] + "..."
+
+
+def normalize_service_base(url: str | None, default_scheme: str = "http") -> str | None:
+    text = normalize_base(url)
+    if text is None:
+        return None
+    if "://" in text:
+        return text
+    return f"{default_scheme}://{text}"
+
+
+def read_simple_env_file(file_path: Path) -> dict[str, str]:
+    if not file_path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for raw_line in file_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def first_non_empty(*values: str | None) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def extract_host_from_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urllib.parse.urlparse(value.strip() if "://" in value else f"http://{value.strip()}")
+    return parsed.hostname
 
 
 def random_suffix(size: int = 10) -> str:
@@ -605,7 +646,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/health",
             expected_statuses={200},
-            validator=lambda _resp: "analytics online"
+            validator=lambda resp: "analytics online"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("analytics health response is not JSON")),
         )
@@ -912,7 +953,7 @@ class TraceRunner:
             method="GET",
             url=f"{base_url}/api/health",
             expected_statuses={200},
-            validator=lambda _resp: "backend probe ok"
+            validator=lambda resp: "backend probe ok"
             if isinstance(resp.json_body, dict)
             else (_ for _ in ()).throw(TraceFailure("admin api health response is not JSON")),
         )
@@ -993,24 +1034,26 @@ def parse_services(raw: str | None) -> set[str]:
 
 
 def build_config() -> RunnerConfig:
+    admin_env = read_simple_env_file(Path(__file__).resolve().parents[1] / "microservice_admin" / ".env")
+
     parser = argparse.ArgumentParser(
         description="Console tracer for ModelLine runtime services.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--backend-host", default=env("MODELLINE_TRACER_BACKEND_HOST", "127.0.0.1"))
+    parser.add_argument("--backend-host")
     parser.add_argument("--timeout-seconds", type=float, default=float(env("MODELLINE_TRACER_TIMEOUT", "10") or "10"))
-    parser.add_argument("--insecure-https", action="store_true", default=(env("MODELLINE_TRACER_INSECURE", "0") == "1"))
+    parser.add_argument("--insecure-https", action="store_true")
     parser.add_argument("--color", choices=["auto", "always", "never"], default=env("MODELLINE_TRACER_COLOR", "auto"))
     parser.add_argument("--verbose-output", action="store_true", default=(env("MODELLINE_TRACER_VERBOSE", "0") == "1"))
-    parser.add_argument("--infra-base-url", default=env("MODELLINE_TRACER_INFRA_URL"))
-    parser.add_argument("--admin-base-url", default=env("MODELLINE_TRACER_ADMIN_URL"))
-    parser.add_argument("--account-base-url", default=env("MODELLINE_TRACER_ACCOUNT_URL"))
-    parser.add_argument("--data-base-url", default=env("MODELLINE_TRACER_DATA_URL"))
-    parser.add_argument("--analytics-base-url", default=env("MODELLINE_TRACER_ANALYTICS_URL"))
-    parser.add_argument("--gateway-base-url", default=env("MODELLINE_TRACER_GATEWAY_URL"))
-    parser.add_argument("--news-base-url", default=env("MODELLINE_TRACER_NEWS_URL"))
-    parser.add_argument("--notification-base-url", default=env("MODELLINE_TRACER_NOTIFICATION_URL"))
-    parser.add_argument("--social-base-url", default=env("MODELLINE_TRACER_SOCIAL_URL"))
+    parser.add_argument("--infra-base-url")
+    parser.add_argument("--admin-base-url")
+    parser.add_argument("--account-base-url")
+    parser.add_argument("--data-base-url")
+    parser.add_argument("--analytics-base-url")
+    parser.add_argument("--gateway-base-url")
+    parser.add_argument("--news-base-url")
+    parser.add_argument("--notification-base-url")
+    parser.add_argument("--social-base-url")
     parser.add_argument("--target-symbol", default=env("MODELLINE_TRACER_SYMBOL", "BTCUSDT"))
     parser.add_argument("--timeframe", default=env("MODELLINE_TRACER_TIMEFRAME", "1m"))
     parser.add_argument("--candle-limit", type=int, default=int(env("MODELLINE_TRACER_LIMIT", "100") or "100"))
@@ -1021,29 +1064,56 @@ def build_config() -> RunnerConfig:
     parser.add_argument("--json-report", default=env("MODELLINE_TRACER_JSON_REPORT"))
     args = parser.parse_args()
 
-    host = args.backend_host.strip()
-    default_account = f"http://{host}:7510"
-    default_gateway = f"http://{host}:7520"
-    default_data = f"http://{host}:8100"
-    default_analytics = f"http://{host}:8000"
-    default_infra = f"https://{host}:8443"
+    host = first_non_empty(
+        args.backend_host,
+        env("MODELLINE_TRACER_BACKEND_HOST"),
+        admin_env.get("ONLINE_BACKEND_HOST"),
+        admin_env.get("BACKEND_CONNECTION_TARGET"),
+        extract_host_from_url(admin_env.get("ADMIN_BACKEND_BASE_URL")),
+        extract_host_from_url(admin_env.get("ACCOUNT_URL")),
+        extract_host_from_url(admin_env.get("GATEWAY_URL")),
+        "127.0.0.1",
+    )
+    assert host is not None
+
+    default_account = first_non_empty(
+        args.account_base_url,
+        env("MODELLINE_TRACER_ACCOUNT_URL"),
+        admin_env.get("ACCOUNT_URL"),
+        f"http://{host}:7510",
+    )
+    default_gateway = first_non_empty(
+        args.gateway_base_url,
+        env("MODELLINE_TRACER_GATEWAY_URL"),
+        admin_env.get("GATEWAY_URL"),
+        f"http://{host}:7520",
+    )
+    default_data = first_non_empty(args.data_base_url, env("MODELLINE_TRACER_DATA_URL"), f"http://{host}:8100")
+    default_analytics = first_non_empty(args.analytics_base_url, env("MODELLINE_TRACER_ANALYTICS_URL"), f"http://{host}:8000")
+    default_infra = first_non_empty(
+        args.infra_base_url,
+        env("MODELLINE_TRACER_INFRA_URL"),
+        admin_env.get("ADMIN_BACKEND_BASE_URL"),
+        f"https://{host}:8443",
+    )
     default_admin = f"http://{host}:8501/admin" if host in {"127.0.0.1", "localhost"} else None
+    insecure_https = args.insecure_https or env("MODELLINE_TRACER_INSECURE", "0") == "1" or admin_env.get("ADMIN_BACKEND_TLS_INSECURE", "0") == "1"
 
     return RunnerConfig(
         backend_host=host,
         timeout_seconds=args.timeout_seconds,
-        insecure_https=args.insecure_https,
+        insecure_https=insecure_https,
         color_mode=args.color,
         verbose_output=args.verbose_output,
-        infra_base_url=normalize_base(args.infra_base_url) or default_infra,
-        admin_base_url=normalize_base(args.admin_base_url) or default_admin,
-        account_base_url=normalize_base(args.account_base_url) or default_account,
-        data_base_url=normalize_base(args.data_base_url) or default_data,
-        analytics_base_url=normalize_base(args.analytics_base_url) or default_analytics,
-        gateway_base_url=normalize_base(args.gateway_base_url) or default_gateway,
-        news_base_url=normalize_base(args.news_base_url),
-        notification_base_url=normalize_base(args.notification_base_url),
-        social_base_url=normalize_base(args.social_base_url),
+        infra_base_url=normalize_service_base(default_infra, default_scheme="https"),
+        admin_base_url=normalize_service_base(first_non_empty(args.admin_base_url, env("MODELLINE_TRACER_ADMIN_URL"), default_admin)),
+        account_base_url=normalize_service_base(default_account),
+        data_base_url=normalize_service_base(default_data),
+        analytics_base_url=normalize_service_base(default_analytics),
+        gateway_base_url=normalize_service_base(default_gateway),
+        news_base_url=normalize_service_base(first_non_empty(args.news_base_url, env("MODELLINE_TRACER_NEWS_URL"))),
+        notification_base_url=normalize_service_base(first_non_empty(args.notification_base_url, env("MODELLINE_TRACER_NOTIFICATION_URL"))),
+        social_base_url=normalize_service_base(first_non_empty(args.social_base_url, env("MODELLINE_TRACER_SOCIAL_URL"))),
         target_symbol=args.target_symbol.strip().upper(),
         timeframe=args.timeframe.strip(),
         candle_limit=max(1, min(args.candle_limit, 500)),
