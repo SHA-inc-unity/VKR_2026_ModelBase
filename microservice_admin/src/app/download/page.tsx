@@ -11,8 +11,6 @@ import { refreshActiveJobs, refreshJobsByIds, seedQueuedJob, useDatasetJobs } fr
 import { useDatasetJobsFeed } from '@/hooks/useDatasetJobsFeed';
 import type { DatasetJobView } from '@/hooks/useDatasetJobs';
 import {
-  SYMBOLS,
-  SYMBOLS_ALL,
   TIMEFRAMES,
   TIMEFRAMES_ALL,
   TF_STEP_MS,
@@ -20,6 +18,7 @@ import {
   getCoveragePct,
   formatDateFromMs,
 } from '@/lib/constants';
+import { useSymbols } from '@/hooks/useCurrencyPairs';
 import type {
   TableCoverage,
   IngestStage,
@@ -584,6 +583,7 @@ function formatErrorHint(msg: string): string {
 
 export default function DatasetPage() {
   const { toast } = useToast();
+  const { symbols, symbolsAll } = useSymbols();
   const { history, addEntry } = useHistory();
 
   const saved = useRef(loadParams());
@@ -600,7 +600,7 @@ export default function DatasetPage() {
     let cancelled = false;
     void cacheRead<DatasetPageParams>(PARAMS_KEY).then((cached) => {
       if (cancelled) return;
-      if (cached?.symbol && SYMBOLS_ALL.includes(cached.symbol as typeof SYMBOLS_ALL[number])) setSymbol(cached.symbol);
+      if (cached?.symbol && symbolsAll.includes(cached.symbol)) setSymbol(cached.symbol);
       if (cached?.timeframe && TIMEFRAMES_ALL.includes(cached.timeframe as typeof TIMEFRAMES_ALL[number])) setTimeframe(cached.timeframe);
       if (typeof cached?.dateFrom === 'string' && cached.dateFrom.length > 0) setDateFrom(cached.dateFrom);
       if (typeof cached?.dateTo === 'string' && cached.dateTo.length > 0) setDateTo(cached.dateTo);
@@ -1241,7 +1241,7 @@ export default function DatasetPage() {
         const selectedExchanges = exchange === 'all'
           ? ACTIVE_EXCHANGES.map((item) => item.value)
           : [exchange];
-        const selectedSymbols = symbol === 'ALL' ? [...SYMBOLS] as string[] : [symbol];
+        const selectedSymbols = symbol === 'ALL' ? [...symbols] : [symbol];
         const selectedTimeframes = timeframe === 'ALL' || symbol === 'ALL'
           ? [...TIMEFRAMES] as string[]
           : [timeframe];
@@ -1871,7 +1871,7 @@ export default function DatasetPage() {
                 <label className="text-xs text-muted-foreground">Symbol</label>
                 <Select value={symbol} onValueChange={setSymbol}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>{SYMBOLS_ALL.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                  <SelectContent>{symbolsAll.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div className="flex flex-col gap-1.5">

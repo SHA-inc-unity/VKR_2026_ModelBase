@@ -6,7 +6,8 @@ import { kafkaCall } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import type { TrainStatus, TrainProgressEvent } from '@/lib/types';
 import { useToast } from '@/components/Toast';
-import { SYMBOLS, TIMEFRAMES } from '@/lib/constants';
+import { TIMEFRAMES } from '@/lib/constants';
+import { useSymbols } from '@/hooks/useCurrencyPairs';
 import { useHistory } from '@/hooks/useHistory';
 import { useEvents } from '@/hooks/useEvents';
 import { useLocale } from '@/lib/i18nContext';
@@ -45,6 +46,7 @@ function loadParams() {
 export default function TrainPage() {
   const { toast } = useToast();
   const { history, addEntry } = useHistory();
+  const { symbols } = useSymbols();
 
   const saved = useRef(loadParams());
   const [symbol,    setSymbol]    = useState<string>(saved.current?.symbol    ?? 'BTCUSDT');
@@ -181,7 +183,7 @@ export default function TrainPage() {
                   <label className="text-xs text-muted-foreground">{t('common.symbol')}</label>
                   <Select value={symbol} onValueChange={setSymbol}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>{SYMBOLS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                    <SelectContent>{symbols.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
                 <div className="flex flex-col gap-1.5 w-32">

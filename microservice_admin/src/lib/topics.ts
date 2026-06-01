@@ -44,6 +44,12 @@ export const Topics = {
   CMD_DATA_MARKET_WATCHER_ROWS:        'cmd.data.market_watcher.rows',
   CMD_DATA_MARKET_WATCHER_LOGS:        'cmd.data.market_watcher.logs',
 
+  // Currency pairs center (single source of truth) — mirrors data Topics.cs
+  CMD_DATA_PAIRS_LIST:       'cmd.data.pairs.list',
+  CMD_DATA_PAIRS_ADD:        'cmd.data.pairs.add',
+  CMD_DATA_PAIRS_REMOVE:     'cmd.data.pairs.remove',
+  CMD_DATA_PAIRS_SET_ACTIVE: 'cmd.data.pairs.set_active',
+
   // Analitic-side dataset session + ML anomaly + distribution
   CMD_ANALITIC_DATASET_LOAD:              'cmd.analitic.dataset.load',
   CMD_ANALITIC_DATASET_UNLOAD:            'cmd.analitic.dataset.unload',
@@ -74,6 +80,7 @@ export const Topics = {
   EVT_ANALITIC_DATASET_REPAIR_PROGRESS: 'events.analitic.dataset.repair.progress',
   EVT_DATA_DATASET_JOB_PROGRESS:  'events.data.dataset.job.progress',
   EVT_DATA_DATASET_JOB_COMPLETED: 'events.data.dataset.job.completed',
+  EVT_DATA_PAIRS_CHANGED:         'events.data.pairs.changed',
 } as const;
 
 export function replyInbox(service: string, instanceId: string): string {

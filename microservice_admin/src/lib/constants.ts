@@ -1,13 +1,9 @@
 // Shared constants for ModelLine Admin Panel
-
-export const SYMBOLS = [
-  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
-  'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
-  'MATICUSDT', 'UNIUSDT', 'ATOMUSDT', 'LTCUSDT', 'NEARUSDT',
-  'TONUSDT', 'SUIUSDT', 'APTUSDT',
-] as const;
-
-export const SYMBOLS_ALL = ['ALL', ...SYMBOLS] as const;
+//
+// NOTE: currency pairs/symbols are deliberately NOT declared here anymore.
+// They come from the Currency Pairs Center (data-service `currency_pair_assets`,
+// exposed via `cmd.data.pairs.list`). Read them with the `useSymbols()` /
+// `useCurrencyPairs()` hooks (src/hooks/useCurrencyPairs.ts).
 
 export const TIMEFRAMES = [
   '1m', '3m', '5m', '15m', '30m', '60m', '120m', '240m', '360m', '720m', '1d',

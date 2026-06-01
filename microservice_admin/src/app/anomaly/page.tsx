@@ -6,7 +6,8 @@ import { Download, Info, Loader2, RefreshCw, ShieldAlert, Wand2 } from 'lucide-r
 import { kafkaCall } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
-import { SYMBOLS, TIMEFRAMES, makeTableName, formatDateFromMs, TF_STEP_MS } from '@/lib/constants';
+import { TIMEFRAMES, makeTableName, formatDateFromMs, TF_STEP_MS } from '@/lib/constants';
+import { useSymbols } from '@/hooks/useCurrencyPairs';
 import type { TableCoverage } from '@/lib/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -311,6 +312,7 @@ const TIMELINE_TYPE_ORDER: string[] = [
 
 export default function AnomalyPage() {
   const { toast } = useToast();
+  const { symbols } = useSymbols();
   const { locale } = useLocale();
   const text = useMemo(() => getAnomalyText(locale), [locale]);
 
@@ -1110,7 +1112,7 @@ export default function AnomalyPage() {
               <label className="text-xs text-muted-foreground flex items-center gap-0.5">{text('symbolLabel')} <InfoTip text={text('symbolInfo')} /></label>
               <Select value={symbol} onValueChange={setSymbol}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{SYMBOLS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                <SelectContent>{symbols.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div className="flex flex-col gap-1.5 w-full xs:w-auto min-w-0 flex-1 xs:flex-initial xs:min-w-[140px]">

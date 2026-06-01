@@ -15,6 +15,7 @@ const translations = {
     'nav.anomaly':   'Anomaly',
     'nav.logs':      'Logs',
     'nav.queue':     'Queue',
+    'nav.currencyPairs': 'Currency Pairs',
     'nav.marketWatcher': 'Market Watcher',
     'nav.kafka':     'Kafka',
 
@@ -182,6 +183,7 @@ const translations = {
     'nav.anomaly':   'Аномалии',
     'nav.logs':      'Логи',
     'nav.queue':     'Очередь',
+    'nav.currencyPairs': 'Валютные пары',
     'nav.marketWatcher': 'Market Watcher',
     'nav.kafka':     'Kafka',
 

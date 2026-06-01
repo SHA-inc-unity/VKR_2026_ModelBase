@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Activity,
   Database,
+  Coins,
   BrainCircuit,
   GitCompare,
   ShieldAlert,
@@ -25,6 +26,7 @@ import { useLocale } from '@/lib/i18nContext';
 const NAV_KEYS = [
   { href: '/',         key: 'nav.dashboard' as const, icon: LayoutDashboard },
   { href: '/download', key: 'nav.dataset'   as const, icon: Database },
+  { href: '/currency-pairs', key: 'nav.currencyPairs' as const, icon: Coins },
   { href: '/train',    key: 'nav.train'     as const, icon: BrainCircuit },
   { href: '/compare',  key: 'nav.compare'   as const, icon: GitCompare },
   { href: '/anomaly',  key: 'nav.anomaly'   as const, icon: ShieldAlert },
