@@ -8,6 +8,26 @@ using Microsoft.Extensions.Options;
 namespace GatewayService.API.Kafka;
 
 /// <summary>
+/// Fan-out surface of <see cref="AdminEventRelayHub"/> consumed by the SSE
+/// endpoint. Extracted as an interface so controllers can be unit-tested
+/// without constructing a real Kafka consumer.
+/// </summary>
+public interface IAdminEventRelayHub
+{
+    /// <summary>Active SSE client count — for diagnostics/logging.</summary>
+    int SubscriberCount { get; }
+
+    /// <summary>
+    /// Register an SSE client. Returns a reader over already-serialized event
+    /// lines. Always call <see cref="Unsubscribe"/> when the client disconnects.
+    /// </summary>
+    ChannelReader<string> Subscribe(out Guid id);
+
+    /// <summary>Detach a previously-registered SSE client.</summary>
+    void Unsubscribe(Guid id);
+}
+
+/// <summary>
 /// Relays backend EVT_* events to the admin head over SSE.
 ///
 /// Why this exists
@@ -25,7 +45,7 @@ namespace GatewayService.API.Kafka;
 /// One Kafka consumer regardless of how many admin tabs are open: SSE clients
 /// are cheap in-process channels, not extra consumer groups.
 /// </summary>
-public sealed class AdminEventRelayHub : IHostedService, IDisposable
+public sealed class AdminEventRelayHub : IAdminEventRelayHub, IHostedService, IDisposable
 {
     private const int SubscriberQueueCapacity = 256;
 

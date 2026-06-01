@@ -81,14 +81,14 @@ public sealed class AdminController : ControllerBase
     private const string KafkaUnavailableCode = "admin_kafka_unavailable";
 
     private readonly IKafkaRequestClient _kafka;
-    private readonly AdminEventRelayHub _eventRelay;
+    private readonly IAdminEventRelayHub _eventRelay;
     private readonly ILogger<AdminController> _log;
     private readonly TimeSpan _defaultTimeout;
     private readonly TimeSpan _longTimeout;
 
     public AdminController(
         IKafkaRequestClient kafka,
-        AdminEventRelayHub eventRelay,
+        IAdminEventRelayHub eventRelay,
         IOptions<AdminSettings> opts,
         ILogger<AdminController> log)
     {

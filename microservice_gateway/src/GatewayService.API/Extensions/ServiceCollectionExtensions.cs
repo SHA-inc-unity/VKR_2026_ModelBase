@@ -77,6 +77,7 @@ public static class ServiceCollectionExtensions
         // (GET /api/admin/events). Lets the split-mode admin head receive live
         // events without reaching the backend broker directly.
         services.AddSingleton<AdminEventRelayHub>();
+        services.AddSingleton<IAdminEventRelayHub>(sp => sp.GetRequiredService<AdminEventRelayHub>());
         services.AddHostedService(sp => sp.GetRequiredService<AdminEventRelayHub>());
 
         // Redis distributed cache (falls back to in-memory when Redis section is absent)

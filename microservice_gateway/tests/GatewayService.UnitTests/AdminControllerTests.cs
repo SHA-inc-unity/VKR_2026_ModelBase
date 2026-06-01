@@ -80,6 +80,7 @@ public sealed class AdminControllerTests
     {
         var controller = new AdminController(
             kafka,
+            Mock.Of<IAdminEventRelayHub>(),
             Options.Create(new AdminSettings()),
             NullLogger<AdminController>.Instance);
 
