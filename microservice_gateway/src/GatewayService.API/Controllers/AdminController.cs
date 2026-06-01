@@ -309,6 +309,24 @@ public sealed class AdminController : ControllerBase
     public Task<IActionResult> MarketWatcherLogs([FromBody] JsonElement? body, CancellationToken ct)
         => Forward(AdminTopics.MarketWatcherLogs, body, ct);
 
+    // ── Currency pairs center ───────────────────────────────────────────────
+
+    [HttpPost("pairs/list")]
+    public Task<IActionResult> PairsList([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.PairsList, body, ct);
+
+    [HttpPost("pairs/add")]
+    public Task<IActionResult> PairsAdd([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.PairsAdd, body, ct);
+
+    [HttpPost("pairs/remove")]
+    public Task<IActionResult> PairsRemove([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.PairsRemove, body, ct);
+
+    [HttpPost("pairs/set-active")]
+    public Task<IActionResult> PairsSetActive([FromBody] JsonElement? body, CancellationToken ct)
+        => Forward(AdminTopics.PairsSetActive, body, ct);
+
     // ── DB ────────────────────────────────────────────────────────────────────
 
     [HttpPost("dataset/db-ping")]

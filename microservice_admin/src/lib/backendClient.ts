@@ -86,6 +86,12 @@ const TOPIC_PATH: Readonly<Record<string, string>> = {
   [Topics.CMD_DATA_MARKET_WATCHER_ROWS]:         'market-watcher/rows',
   [Topics.CMD_DATA_MARKET_WATCHER_LOGS]:         'market-watcher/logs',
 
+  // Currency pairs center (single source of truth)
+  [Topics.CMD_DATA_PAIRS_LIST]:       'pairs/list',
+  [Topics.CMD_DATA_PAIRS_ADD]:        'pairs/add',
+  [Topics.CMD_DATA_PAIRS_REMOVE]:     'pairs/remove',
+  [Topics.CMD_DATA_PAIRS_SET_ACTIVE]: 'pairs/set-active',
+
   // DB
   [Topics.CMD_DATA_DB_PING]:  'dataset/db-ping',
 

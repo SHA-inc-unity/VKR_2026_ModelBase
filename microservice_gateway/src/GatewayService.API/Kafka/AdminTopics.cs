@@ -50,6 +50,12 @@ public static class AdminTopics
     public const string MarketWatcherRows        = "cmd.data.market_watcher.rows";
     public const string MarketWatcherLogs        = "cmd.data.market_watcher.logs";
 
+    // ── Currency pairs center (single source of truth) ───────────────────────
+    public const string PairsList      = "cmd.data.pairs.list";
+    public const string PairsAdd       = "cmd.data.pairs.add";
+    public const string PairsRemove    = "cmd.data.pairs.remove";
+    public const string PairsSetActive = "cmd.data.pairs.set_active";
+
     // ── DB ────────────────────────────────────────────────────────────────────
     public const string DbPing = "cmd.data.db.ping";
 
