@@ -148,19 +148,28 @@ public sealed class MinioClaimCheckService : IDisposable
 
         var signed = _client.GetPreSignedURL(req);
 
-        // Rewrite internal host ("http://minio:9000") → publicBaseUrl.
-        // Для browser-bound URL это внешний proxy origin
-        // (`http://localhost:8501`), для server-to-server — тот же
-        // `http://minio:9000`. AWSSDK подписывает против ServiceURL,
-        // который — внутренний hostname; заменяем только scheme+authority,
-        // path и query (включая SigV4 подпись) сохраняются как есть.
-        var internalPrefix = _endpoint.TrimEnd('/');
-        var publicPrefix   = publicBaseUrl.TrimEnd('/');
-        if (!string.IsNullOrEmpty(internalPrefix)
-            && !string.IsNullOrEmpty(publicPrefix)
-            && signed.StartsWith(internalPrefix, StringComparison.OrdinalIgnoreCase))
+        // Rewrite the signed URL's scheme+host+port with publicBaseUrl, keeping
+        // path+query (incl. the signature). MinIO SigV2 signs the resource path
+        // and query — NOT the Host header — so swapping the origin is safe.
+        //
+        // IMPORTANT: replace the whole authority by PARSING the URI, not by a
+        // string-prefix match against the internal endpoint. When publicBaseUrl
+        // is https but the MinIO ServiceURL is http, the SDK signs an
+        // "https://minio:9000/..." URL whose prefix does NOT match the http
+        // "http://minio:9000" endpoint — a prefix swap then silently no-ops and
+        // leaks the unreachable internal host ("minio:9000") to the browser.
+        var publicPrefix = publicBaseUrl.TrimEnd('/');
+        if (!string.IsNullOrEmpty(publicPrefix))
         {
-            signed = publicPrefix + signed[internalPrefix.Length..];
+            try
+            {
+                var signedUri = new Uri(signed);
+                signed = publicPrefix + signedUri.PathAndQuery;
+            }
+            catch (UriFormatException)
+            {
+                // Leave the SDK-signed URL untouched if it isn't a valid absolute URI.
+            }
         }
         return Task.FromResult(signed);
     }

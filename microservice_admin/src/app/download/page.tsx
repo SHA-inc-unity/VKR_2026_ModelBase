@@ -819,7 +819,13 @@ export default function DatasetPage() {
       });
     },
   });
-  useDatasetJobsFeed();
+  // Poll active jobs every 4s. In split deployment the admin can't reach the
+  // backend Redpanda, so the EVT_DATA_DATASET_JOB_* SSE stream never arrives —
+  // progress and (critically) completion must come from facade polling.
+  // refreshActiveJobs also reconciles a locally-running job that has dropped off
+  // the active list (i.e. finished) via JOBS_GET, so the bar reaches 100% even
+  // with no live events instead of freezing mid-run.
+  useDatasetJobsFeed(4000);
 
   const liveIngestJobIds = allJobs
     .filter(job => job.type === 'ingest' && !job.finished)
