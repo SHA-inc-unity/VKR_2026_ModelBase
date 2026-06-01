@@ -23,6 +23,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly KafkaProducer              _producer;
     private readonly DatasetRepository          _repo;
     private readonly DatasetJobsRepository      _jobsRepo;
+    private readonly CurrencyPairsRepository    _pairsRepo;
     private readonly MarketWatchRepository      _marketWatchRepo;
     private readonly MarketWatcherRuntimeState  _marketWatcher;
     private readonly MarketDataClientFactory    _markets;
@@ -92,6 +93,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         KafkaProducer producer,
         DatasetRepository repo,
         DatasetJobsRepository jobsRepo,
+        CurrencyPairsRepository pairsRepo,
         MarketWatchRepository marketWatchRepo,
         MarketWatcherRuntimeState marketWatcher,
         MarketDataClientFactory markets,
@@ -103,6 +105,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         _producer                = producer;
         _repo                    = repo;
         _jobsRepo                = jobsRepo;
+        _pairsRepo               = pairsRepo;
         _marketWatchRepo         = marketWatchRepo;
         _marketWatcher           = marketWatcher;
         _markets                 = markets;
@@ -371,6 +374,10 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataMarketWatcherRows      => await HandleMarketWatcherRowsAsync(payload, ct),
             Topics.CmdDataMarketWatcherLogs      => HandleMarketWatcherLogs(payload),
             Topics.CmdDataMarketWatcherTracked   => await HandleMarketWatcherTrackedSymbolsAsync(payload, ct),
+            Topics.CmdDataPairsList      => await HandlePairsListAsync(ct),
+            Topics.CmdDataPairsAdd       => await HandlePairsAddAsync(payload, ct),
+            Topics.CmdDataPairsRemove    => await HandlePairsRemoveAsync(payload, ct),
+            Topics.CmdDataPairsSetActive => await HandlePairsSetActiveAsync(payload, ct),
             _                                => new { error = $"Unknown topic: {topic}" },
         };
 
@@ -526,6 +533,76 @@ public sealed partial class KafkaConsumerService : BackgroundService
         // is something MW has previously written.
         var dbSymbols = await ListPersistedSymbolsAsync(normalizedExchange, ct);
         return new { exchange = normalizedExchange, symbols = dbSymbols };
+    }
+
+    // ── Currency pairs center (single source of truth) ──────────────────
+
+    private async Task<object> HandlePairsListAsync(CancellationToken ct) =>
+        await BuildPairsStateAsync(ct);
+
+    private async Task<object> HandlePairsAddAsync(JsonElement payload, CancellationToken ct)
+    {
+        var role = TryGetString(payload, "role");
+        var asset = TryGetString(payload, "asset");
+        if (string.IsNullOrWhiteSpace(role) || string.IsNullOrWhiteSpace(asset))
+            return new { error = "role and asset are required", code = "bad_request" };
+        try { await _pairsRepo.AddAsync(role!, asset!, ct); }
+        catch (ArgumentException ex) { return new { error = ex.Message, code = "bad_request" }; }
+        await NotifyPairsChangedAsync("add", role!, asset!, ct);
+        return await BuildPairsStateAsync(ct);
+    }
+
+    private async Task<object> HandlePairsRemoveAsync(JsonElement payload, CancellationToken ct)
+    {
+        var role = TryGetString(payload, "role");
+        var asset = TryGetString(payload, "asset");
+        if (string.IsNullOrWhiteSpace(role) || string.IsNullOrWhiteSpace(asset))
+            return new { error = "role and asset are required", code = "bad_request" };
+        try { await _pairsRepo.RemoveAsync(role!, asset!, ct); }
+        catch (ArgumentException ex) { return new { error = ex.Message, code = "bad_request" }; }
+        await NotifyPairsChangedAsync("remove", role!, asset!, ct);
+        return await BuildPairsStateAsync(ct);
+    }
+
+    private async Task<object> HandlePairsSetActiveAsync(JsonElement payload, CancellationToken ct)
+    {
+        var role = TryGetString(payload, "role");
+        var asset = TryGetString(payload, "asset");
+        var active = TryGetBool(payload, "active");
+        if (string.IsNullOrWhiteSpace(role) || string.IsNullOrWhiteSpace(asset) || active is null)
+            return new { error = "role, asset and active are required", code = "bad_request" };
+        try { await _pairsRepo.SetActiveAsync(role!, asset!, active.Value, ct); }
+        catch (ArgumentException ex) { return new { error = ex.Message, code = "bad_request" }; }
+        await NotifyPairsChangedAsync("set_active", role!, asset!, ct);
+        return await BuildPairsStateAsync(ct);
+    }
+
+    private async Task<object> BuildPairsStateAsync(CancellationToken ct)
+    {
+        var bases   = await _pairsRepo.ListAsync(CurrencyPairsRepository.RoleBase, ct);
+        var quotes  = await _pairsRepo.ListAsync(CurrencyPairsRepository.RoleQuote, ct);
+        var symbols = await _pairsRepo.GetActiveSymbolsAsync(ct);
+        return new
+        {
+            bases   = bases.Select(x => new { asset = x.Asset, active = x.Active }),
+            quotes  = quotes.Select(x => new { asset = x.Asset, active = x.Active }),
+            symbols,
+        };
+    }
+
+    private async Task NotifyPairsChangedAsync(string operation, string role, string asset, CancellationToken ct)
+    {
+        // Hot-reload the running market watcher so add/remove takes effect
+        // without a container restart, and emit a fire-and-forget event so the
+        // admin (and any other consumer) can live-refresh.
+        _marketWatcher.RequestReload();
+        await _producer.PublishEventAsync(Topics.EvtDataPairsChanged, new
+        {
+            operation,
+            role = role.Trim().ToLowerInvariant(),
+            asset = asset.Trim().ToUpperInvariant(),
+            at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        }, ct);
     }
 
     private async Task<IReadOnlyList<string>> ListPersistedSymbolsAsync(string exchange, CancellationToken ct)

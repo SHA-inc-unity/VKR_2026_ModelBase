@@ -66,6 +66,7 @@ try
     builder.Services.AddSingleton<PostgresConnectionFactory>();
     builder.Services.AddSingleton<DatasetRepository>();
     builder.Services.AddSingleton<DatasetJobsRepository>();
+    builder.Services.AddSingleton<CurrencyPairsRepository>();
     builder.Services.AddSingleton<DatasetJobsMutator>();
     builder.Services.AddSingleton<MarketWatchRepository>();
     builder.Services.AddSingleton<MarketWatcherRuntimeState>();

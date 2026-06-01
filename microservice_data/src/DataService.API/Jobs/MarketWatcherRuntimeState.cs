@@ -68,6 +68,7 @@ public sealed class MarketWatcherRuntimeState
     private string[] _timeframes = [];
     private string? _lastError;
     private long? _lastErrorAtMs;
+    private bool _reloadRequested;
 
     public bool DesiredEnabled
     {
@@ -120,6 +121,24 @@ public sealed class MarketWatcherRuntimeState
         {
             _exchanges = exchanges;
             _timeframes = timeframes;
+        }
+    }
+
+    /// <summary>Signal the running watcher loop to re-discover its universe and
+    /// re-subscribe — e.g. after the currency-pairs center changed. Consumed
+    /// once by the loop via <see cref="ConsumeReloadRequest"/>.</summary>
+    public void RequestReload()
+    {
+        lock (_gate) { _reloadRequested = true; }
+    }
+
+    public bool ConsumeReloadRequest()
+    {
+        lock (_gate)
+        {
+            if (!_reloadRequested) return false;
+            _reloadRequested = false;
+            return true;
         }
     }
 

@@ -29,6 +29,7 @@ public sealed class MarketWatcherService : BackgroundService
 
     private readonly MarketWatchRepository _repo;
     private readonly DatasetRepository _datasetRepo;
+    private readonly CurrencyPairsRepository _pairsRepo;
     private readonly MarketDataClientFactory _marketDataClientFactory;
     private readonly IOptions<DataServiceSettings> _options;
     private readonly MarketWatcherRuntimeState _state;
@@ -37,6 +38,7 @@ public sealed class MarketWatcherService : BackgroundService
     public MarketWatcherService(
         MarketWatchRepository repo,
         DatasetRepository datasetRepo,
+        CurrencyPairsRepository pairsRepo,
         MarketDataClientFactory marketDataClientFactory,
         IOptions<DataServiceSettings> options,
         MarketWatcherRuntimeState state,
@@ -44,6 +46,7 @@ public sealed class MarketWatcherService : BackgroundService
     {
         _repo = repo;
         _datasetRepo = datasetRepo;
+        _pairsRepo = pairsRepo;
         _marketDataClientFactory = marketDataClientFactory;
         _options = options;
         _state = state;
@@ -58,6 +61,7 @@ public sealed class MarketWatcherService : BackgroundService
         try
         {
             await _repo.EnsureSchemaAsync(stoppingToken);
+            await _pairsRepo.EnsureSchemaAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -128,7 +132,11 @@ public sealed class MarketWatcherService : BackgroundService
         CancellationToken stoppingToken)
     {
         var exchanges = NormalizeExchanges(settings.Exchanges);
-        var configuredSymbols = NormalizeSymbols(settings.Symbols);
+        // Configured symbols come from the currency-pairs center (active base ×
+        // active quote). Fall back to the static settings list only if the
+        // center is empty (e.g. before the first seed completes).
+        var centerSymbols = await LoadCenterSymbolsAsync(stoppingToken);
+        var configuredSymbols = NormalizeSymbols(centerSymbols.Count > 0 ? centerSymbols : settings.Symbols);
         var timeframes = NormalizeTimeframes(settings.Timeframes);
 
         if (exchanges.Count == 0)
@@ -264,6 +272,17 @@ public sealed class MarketWatcherService : BackgroundService
             }
 
             await Task.Delay(flushEvery, stoppingToken);
+
+            if (_state.ConsumeReloadRequest())
+            {
+                // Currency-pairs center changed: exit the inner loop so the
+                // finally below tears down the heartbeat, the method returns,
+                // old subscriptions are disposed (await using), and the outer
+                // ExecuteAsync loop re-enters RunWatcherLoopAsync to re-discover
+                // the universe and re-subscribe with the new pair list.
+                _state.AppendLog("info", "watch.reload", "Reloading watcher universe (currency pairs changed)");
+                break;
+            }
 
             var pending = CollectPendingSnapshots(state);
             if (pending.Count > 0)
@@ -939,6 +958,19 @@ public sealed class MarketWatcherService : BackgroundService
         }
 
         return result;
+    }
+
+    private async Task<IReadOnlyList<string>> LoadCenterSymbolsAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await _pairsRepo.GetActiveSymbolsAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to load symbols from currency-pairs center; falling back to settings whitelist");
+            return Array.Empty<string>();
+        }
     }
 
     private static HashSet<string> NormalizeSymbols(IEnumerable<string>? configured)

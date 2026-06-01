@@ -54,10 +54,20 @@ public static class Topics
     // {exchange}_{symbol}_{timeframe} tables are being filled in real time.
     public const string CmdDataMarketWatcherTracked   = "cmd.data.market_watcher.tracked_symbols";
 
+    // ── Currency pairs center (single source of truth) ───────────────────
+    // Admin manages two vocabularies (base assets + quote/stablecoins) via
+    // these req/reply commands; active pairs = active base × active quote.
+    // Every mutation publishes EvtDataPairsChanged so the watcher hot-reloads.
+    public const string CmdDataPairsList      = "cmd.data.pairs.list";
+    public const string CmdDataPairsAdd       = "cmd.data.pairs.add";
+    public const string CmdDataPairsRemove    = "cmd.data.pairs.remove";
+    public const string CmdDataPairsSetActive = "cmd.data.pairs.set_active";
+
     // ── Events (fire-and-forget, no correlation round-trip) ──────────────
     public const string EvtDataIngestProgress         = "events.data.ingest.progress";
     public const string EvtDataDatasetJobProgress     = "events.data.dataset.job.progress";
     public const string EvtDataDatasetJobCompleted    = "events.data.dataset.job.completed";
+    public const string EvtDataPairsChanged           = "events.data.pairs.changed";
 
     public static readonly string[] AllConsumed =
     [
@@ -99,5 +109,9 @@ public static class Topics
         CmdDataMarketWatcherRows,
         CmdDataMarketWatcherLogs,
         CmdDataMarketWatcherTracked,
+        CmdDataPairsList,
+        CmdDataPairsAdd,
+        CmdDataPairsRemove,
+        CmdDataPairsSetActive,
     ];
 }
