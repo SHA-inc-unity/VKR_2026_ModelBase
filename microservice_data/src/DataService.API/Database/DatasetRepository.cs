@@ -675,8 +675,9 @@ public sealed partial class DatasetRepository
 
         for (int offset = 0; offset < rows.Count; offset += batchSize)
         {
-            var slice = rows.Skip(offset).Take(batchSize).ToArray();
-            var n = slice.Length;
+            // Index directly into the IReadOnlyList — Skip(offset) is O(offset),
+            // which made batching O(n²) on large ingests.
+            var n = Math.Min(batchSize, rows.Count - offset);
 
             var ts       = new DateTime[n];
             var sym      = new string[n];
@@ -694,7 +695,7 @@ public sealed partial class DatasetRepository
 
             for (int i = 0; i < n; i++)
             {
-                var r = slice[i];
+                var r = rows[offset + i];
                 ts[i]     = ToUtc(r.TimestampMs);
                 sym[i]    = r.Symbol;
                 exch[i]   = r.Exchange;
@@ -838,8 +839,7 @@ public sealed partial class DatasetRepository
 
         for (int offset = 0; offset < rows.Count; offset += batchSize)
         {
-            var slice = rows.Skip(offset).Take(batchSize).ToArray();
-            var n = slice.Length;
+            var n = Math.Min(batchSize, rows.Count - offset);
 
             var ts     = new DateTime[n];
             var openP  = new decimal?[n];
@@ -851,7 +851,7 @@ public sealed partial class DatasetRepository
 
             for (int i = 0; i < n; i++)
             {
-                var r = slice[i];
+                var r = rows[offset + i];
                 ts[i]     = ToUtc(r.TimestampMs);
                 openP[i]  = r.Open;
                 highP[i]  = r.High;
@@ -934,8 +934,7 @@ public sealed partial class DatasetRepository
 
         for (int offset = 0; offset < rows.Count; offset += batchSize)
         {
-            var slice = rows.Skip(offset).Take(batchSize).ToArray();
-            var n = slice.Length;
+            var n = Math.Min(batchSize, rows.Count - offset);
 
             var ts = new DateTime[n];
             var openP = new decimal[n];
@@ -945,7 +944,7 @@ public sealed partial class DatasetRepository
 
             for (int i = 0; i < n; i++)
             {
-                var row = slice[i];
+                var row = rows[offset + i];
                 ts[i] = ToUtc(row.TimestampMs);
                 openP[i] = row.Open;
                 highP[i] = row.High;

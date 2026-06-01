@@ -59,6 +59,11 @@ public sealed class InternalController : ControllerBase
         var expected = _config["InternalApi:ApiKey"];
         if (string.IsNullOrWhiteSpace(expected)) return false;
         Request.Headers.TryGetValue("X-Internal-Api-Key", out var provided);
-        return provided == expected;
+        var providedValue = provided.ToString();
+        if (string.IsNullOrEmpty(providedValue)) return false;
+        // Constant-time compare so a timing side-channel can't reveal the key.
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(providedValue),
+            System.Text.Encoding.UTF8.GetBytes(expected));
     }
 }

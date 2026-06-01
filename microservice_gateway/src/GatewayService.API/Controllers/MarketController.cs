@@ -121,7 +121,12 @@ public sealed class MarketController : ControllerBase
             ? Array.Empty<string>()
             : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        var result = await _market.GetTickersAsync(page, pageSize, search, sortBy, sortDir, filteredSymbols, collection, ct);
+        // Clamp pagination on this public, unauthenticated endpoint so an
+        // arbitrary pageSize can't force huge downstream Kafka/DB result sets.
+        var safePage = Math.Max(1, page);
+        var safePageSize = Math.Clamp(pageSize, 1, 100);
+
+        var result = await _market.GetTickersAsync(safePage, safePageSize, search, sortBy, sortDir, filteredSymbols, collection, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid tickers request", HttpContext.GetCorrelationId()));

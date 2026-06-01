@@ -896,7 +896,11 @@ export default function DatasetPage() {
       disposed = true;
       clearInterval(timer);
     };
-  }, [trackedIngestJobIdsKey, ingestJobId, allJobs]); // eslint-disable-line react-hooks/exhaustive-deps
+    // NB: `allJobs` deliberately excluded. Including it re-created this interval
+    // (and fired pollTrackedJobs) on every single SSE progress event, turning a
+    // 5s safety-net poll into a per-event JOBS_LIST+JOBS_GET storm. SSE +
+    // useDatasetJobsFeed(4000) are the live path; this is only a slow fallback.
+  }, [trackedIngestJobIdsKey, ingestJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Tick re-render every second so elapsed timers in running slots update.
   useEffect(() => {

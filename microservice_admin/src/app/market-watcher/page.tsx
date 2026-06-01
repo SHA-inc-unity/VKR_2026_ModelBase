@@ -339,7 +339,12 @@ export default function MarketWatcherPage() {
   }, [cacheKey, logs, rows, totalRows, watcher]);
 
   useEffect(() => {
-    const id = window.setInterval(() => { void loadPage(false); }, POLL_MS);
+    const id = window.setInterval(() => {
+      // Don't hammer the backend (STATUS + 500-row ROWS + LOGS every second)
+      // while the tab is backgrounded — resume on the next focus/poll tick.
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void loadPage(false);
+    }, POLL_MS);
     return () => window.clearInterval(id);
   }, [loadPage]);
 
