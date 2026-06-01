@@ -7,6 +7,7 @@
  * plus a one-shot CMD_DATA_DATASET_JOBS_LIST hydration on page mount.
  */
 import { useDatasetJobs, cancelJob, dismissJob, type DatasetJobView } from '@/hooks/useDatasetJobs';
+import { useSmoothPercent } from '@/components/ui/smooth-progress';
 
 const STATUS_LABEL: Record<string, string> = {
   queued:    'в очереди',
@@ -83,6 +84,58 @@ function getJobNote(job: DatasetJobView): string | null {
   return job.detail ?? null;
 }
 
+/** The two progress tracks for one job, with smoothed/trickling widths so
+ *  coarse backend steps (50→70→85→90→100) don't freeze-then-jump. */
+function JobBars({
+  overallTarget,
+  stageTarget,
+  stageSummary,
+  running,
+  barClass,
+}: {
+  overallTarget: number;
+  stageTarget: number | null;
+  stageSummary: string | null;
+  running: boolean;
+  barClass: string;
+}): JSX.Element {
+  const overall = useSmoothPercent(overallTarget, running);
+  const stage = useSmoothPercent(stageTarget ?? 0, running);
+  return (
+    <div className="mt-2 space-y-2">
+      <div>
+        <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+          <span className="truncate">Этап</span>
+          <span className="shrink-0 tabular-nums">{stageSummary ?? 'live'}</span>
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-muted/60">
+          {stageTarget === null ? (
+            <div className={`h-full w-1/3 animate-pulse ${barClass}`} />
+          ) : (
+            <div
+              className={`h-full transition-[width] duration-300 ease-out ${barClass}`}
+              style={{ width: `${stage}%` }}
+            />
+          )}
+        </div>
+      </div>
+
+      <div>
+        <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+          <span className="truncate">Общий прогресс</span>
+          <span className="shrink-0 tabular-nums">{overallTarget}%</span>
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-muted/60">
+          <div
+            className={`h-full transition-[width] duration-300 ease-out ${barClass} opacity-60`}
+            style={{ width: `${overall}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DatasetJobsPanel(): JSX.Element | null {
   const jobs = useDatasetJobs();
   if (jobs.length === 0) return null;
@@ -138,37 +191,13 @@ export default function DatasetJobsPanel(): JSX.Element | null {
               <div className="shrink-0 text-[11px] text-muted-foreground">#{index + 1}</div>
             </div>
 
-            <div className="mt-2 space-y-2">
-              <div>
-                <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                  <span className="truncate">Этап</span>
-                  <span className="shrink-0 tabular-nums">{stageSummary ?? 'live'}</span>
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-muted/60">
-                  {stagePct === null ? (
-                    <div className={`h-full w-1/3 animate-pulse ${barClass}`} />
-                  ) : (
-                    <div
-                      className={`h-full transition-[width] duration-200 ease-linear ${barClass}`}
-                      style={{ width: `${stagePct}%` }}
-                    />
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                  <span className="truncate">Общий прогресс</span>
-                  <span className="shrink-0 tabular-nums">{overallPct}%</span>
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-muted/60">
-                  <div
-                    className={`h-full transition-[width] duration-200 ease-linear ${barClass} opacity-60`}
-                    style={{ width: `${overallPct}%` }}
-                  />
-                </div>
-              </div>
-            </div>
+            <JobBars
+              overallTarget={overallPct}
+              stageTarget={stagePct}
+              stageSummary={stageSummary}
+              running={j.status === 'running'}
+              barClass={barClass}
+            />
 
             {note ? (
               <div className="mt-2 break-words text-[11px] text-muted-foreground">{shortenMessage(note)}</div>

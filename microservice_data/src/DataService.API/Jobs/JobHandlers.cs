@@ -246,8 +246,20 @@ public sealed class IngestJobHandler : IDatasetJobHandler
 
         // ── upsert ─────────────────────────────────────────────
         var stageUp = await ctx.StartStageAsync("upsert");
-        await ctx.ReportAsync("upsert", 70, $"writing {rows.Count} rows");
-        var written = await ctx.RunCancelableAsync(token => _repo.BulkUpsertAsync(table, rows, token));
+        await ctx.ReportAsync("upsert", 70, $"writing {rows.Count} rows", stageProgress: 0, stageTotal: rows.Count, stageCompleted: 0);
+        var written = await ctx.RunCancelableAsync(token => _repo.BulkUpsertAsync(
+            table, rows, token,
+            onBatchWritten: (done, totalRows) =>
+            {
+                if (totalRows <= 0) return;
+                // Map upsert batches onto overall 70→85 and stage 0→100 so the
+                // bar moves with real data instead of jumping after the call.
+                var overall  = (int)Math.Min(85, 70 + (long)done * 15 / totalRows);
+                var stagePct = (int)Math.Min(100, (long)done * 100 / totalRows);
+                _ = ctx.ReportAsync(
+                    "upsert", overall, $"{done}/{totalRows} rows written",
+                    stageProgress: stagePct, stageTotal: (int)totalRows, stageCompleted: (int)done);
+            }));
         await ctx.EndStageAsync(stageUp, written);
         await ctx.ReportAsync(
             "upsert",

@@ -663,7 +663,8 @@ public sealed partial class DatasetRepository
     public async Task<long> BulkUpsertAsync(
         string tableName,
         IReadOnlyList<MarketRow> rows,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Action<long, long>? onBatchWritten = null)
     {
         if (rows.Count == 0) return 0;
         var tbl = Safe(tableName);
@@ -761,6 +762,9 @@ public sealed partial class DatasetRepository
             cmd.Parameters.Add(new NpgsqlParameter("rsi",    NpgsqlDbType.Array | NpgsqlDbType.Numeric)     { Value = rsi });
 
             total += await cmd.ExecuteNonQueryAsync(ct);
+            // Report rows processed so far (not affected-row count) so callers
+            // can surface real, granular upsert progress instead of one jump.
+            onBatchWritten?.Invoke(offset + n, rows.Count);
         }
         return total;
     }

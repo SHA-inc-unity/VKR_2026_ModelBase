@@ -32,6 +32,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
+import { SmoothProgress } from '@/components/ui/smooth-progress';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
@@ -232,42 +233,70 @@ function formatIngestScopeLabel(scopeKey: string): string {
   return [exchangeLabel, parsed.symbol, parsed.timeframe].filter(Boolean).join(' ');
 }
 
-function normalizeIngestJobStage(stage?: string | null): 'prepare' | 'fetch' | 'upsert' | 'compute_features' | null {
+// Strip rows, in execution order — matches INITIAL_STAGES ids one-to-one.
+const STRIP_STAGE_ORDER = ['prepare', 'fetch_klines', 'fetch_funding', 'fetch_oi', 'compute_rsi', 'upsert'] as const;
+
+/** Index of the strip row that the backend job stage currently maps to.
+ *  `compute_features`/`done` are past the strip (everything done); unknown → -1. */
+function jobStageToStripIndex(stage?: string | null): number {
   switch (stage) {
-    case 'prepare':
-      return 'prepare';
-    case 'fetch':
-    case 'fetch_klines':
-    case 'fetch_funding':
-    case 'fetch_oi':
-    case 'compute_rsi':
-      return 'fetch';
-    case 'upsert':
-      return 'upsert';
+    case 'starting':
+    case 'prepare':          return 0;
+    case 'fetch':            // legacy alias for the kline fetch
+    case 'fetch_klines':     return 1;
+    case 'fetch_funding':    return 2;
+    case 'fetch_oi':         return 3;
+    case 'compute_rsi':      return 4;
+    case 'upsert':           return 5;
     case 'compute_features':
-      return 'compute_features';
-    default:
-      return null;
+    case 'done':             return STRIP_STAGE_ORDER.length; // past the strip
+    default:                 return -1;
   }
 }
 
+// Slice of the overall progress each strip stage occupies. Used to derive a
+// smooth, monotonic local 0–100 for stages the backend does NOT report a
+// per-stage `stage_progress` for (prepare / funding / RSI). Monotonic because
+// overall progress is monotonic.
+const STRIP_STAGE_OVERALL_RANGE: Record<string, [number, number]> = {
+  prepare:       [0, 5],
+  fetch_klines:  [5, 40],
+  fetch_funding: [40, 42],
+  fetch_oi:      [42, 50],
+  compute_rsi:   [50, 70],
+  upsert:        [70, 90],
+};
+
+function clampPct(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+/** Local 0–100 for a running strip stage: prefer the backend's own
+ *  per-stage `stage_progress`; otherwise map the overall % onto the stage's
+ *  range so it still fills 0→100 within that stage. */
+function stripStageLocalPct(stageId: string, job: DatasetJobView): number {
+  if (typeof job.stage_progress === 'number') return clampPct(job.stage_progress);
+  const range = STRIP_STAGE_OVERALL_RANGE[stageId];
+  if (!range) return clampPct(job.progress);
+  const [lo, hi] = range;
+  if (hi <= lo) return 100;
+  return clampPct(((job.progress - lo) / (hi - lo)) * 100);
+}
+
 /** Map a running/finished job's state onto INITIAL_STAGES so IngestProgress
- * shows correct live stage status for job-based ingest. */
+ *  shows a sequential, per-stage strip for job-based ingest. Each stage fills
+ *  0→100 within itself; on completion every stage is marked done/100 (so the
+ *  strip never freezes mid-run when the terminal SSE/poll update arrives). */
 function mapJobToStages(prev: IngestStage[], job: DatasetJobView): IngestStage[] {
-  const stageOrder = ['prepare', 'fetch', 'upsert', 'compute_features'];
-  const normalizedJobStage = normalizeIngestJobStage(job.stage);
-  const curIdx = stageOrder.indexOf(normalizedJobStage ?? '');
-  return prev.map(s => {
-    const jobStageName =
-      s.id === 'fetch_klines' || s.id === 'fetch_funding' ||
-      s.id === 'fetch_oi'     || s.id === 'compute_rsi'
-        ? 'fetch' : s.id;
-    const sIdx = stageOrder.indexOf(jobStageName);
-    if (sIdx < 0)                return { ...s, status: 'pending' as const };
-    if (job.status === 'succeeded') return { ...s, status: 'done'  as const, progress: 100 };
-    if (job.status === 'failed') return { ...s, status: sIdx <= curIdx && curIdx >= 0 ? 'error' as const : 'pending' as const };
-    if (sIdx < curIdx)           return { ...s, status: 'done'  as const, progress: 100 };
-    if (jobStageName === normalizedJobStage) return { ...s, status: 'running' as const, progress: job.progress };
+  const succeeded = job.status === 'succeeded' || job.status === 'skipped';
+  const failed = job.status === 'failed';
+  const cur = jobStageToStripIndex(job.stage);
+  return prev.map((s, i) => {
+    if (succeeded) return { ...s, status: 'done' as const, progress: 100 };
+    if (failed)    return { ...s, status: i <= cur && cur >= 0 ? 'error' as const : 'pending' as const };
+    if (cur < 0)   return { ...s, status: 'pending' as const };
+    if (i < cur)   return { ...s, status: 'done' as const, progress: 100 };
+    if (i === cur) return { ...s, status: 'running' as const, progress: stripStageLocalPct(s.id, job) };
     return { ...s, status: 'pending' as const };
   });
 }
@@ -311,7 +340,7 @@ function IngestProgress({ stages }: { stages: IngestStage[] }) {
             )}
           </div>
           {s.status === 'running' && (
-            <Progress value={s.progress} className="h-0.5 w-full ml-6" />
+            <SmoothProgress value={s.progress} running className="h-0.5 w-full ml-6" />
           )}
         </div>
       ))}
@@ -473,7 +502,7 @@ function AllIngestProgress({
                     <div className="text-[10px] tabular-nums text-muted-foreground">{fmtDur(elapsed)}</div>
                   </div>
                 </div>
-                <Progress value={pct} className="h-1" />
+                <SmoothProgress value={pct} running className="h-1" />
               </div>
             );
           })}
@@ -1033,6 +1062,10 @@ export default function DatasetPage() {
       const job = allJobs.find(j => j.job_id === ingestJobId);
       if (job) {
         if (job.finished) {
+          // Drive the strip to its terminal state (all stages done/100 on
+          // success, error stage on failure) so it never freezes mid-run when
+          // the completion arrives via SSE or the reconcile poll.
+          setIngestStages(prev => mapJobToStages(prev ?? INITIAL_STAGES, job));
           setLoadingIngest(false);
           operationLockRef.current = false;
           const isSuccessful = job.status === 'succeeded' || job.status === 'skipped';
