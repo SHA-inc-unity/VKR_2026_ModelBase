@@ -20,4 +20,11 @@
 - ✅ **2026-06-01 — CORS `AllowAnyOrigin`.** Gateway сужен до `https://sha-trade.tech` + `https://www.sha-trade.tech` (нативные клиенты Origin не шлют — не затронуты).
 - ✅ **2026-06-01 — таймингованное сравнение `X-Internal-Api-Key`.** Переведено на `CryptographicOperations.FixedTimeEquals`.
 - ✅ **2026-06-01 — DoS-усиление на `/api/v1/market/tickers`.** `page`/`pageSize` клампятся.
-- 🔄 **Redpanda `:9092`/`:9644` наружу без auth, MinIO дефолт-креды + anonymous-bucket, TLS-проверка admin→facade отключена** — в работе (см. CHANGE_LOG; инфра-правки и TLS-серт).
+- ✅ **2026-06-01 — Redpanda `:9092`/`:9644` наружу без auth.** Биндятся на `127.0.0.1` (внешне закрыты; проверено — порты CLOSED с admin-хоста). Внутренний `redpanda:29092` не тронут.
+- ✅ **2026-06-01 — MinIO anonymous-bucket + порты наружу.** Bucket `modelline-blobs` → `private` (только presigned, выдаётся через admin-аутентифицированный экспорт); `:9000`/`:9001` на `127.0.0.1`. Скачивание идёт через nginx `:8443` (docker-сеть).
+- ✅ **2026-06-01 — TLS-проверка admin→facade.** Facade-серт пересоздан с `SAN=IP:95.165.27.159`; admin доверяет ему через `NODE_EXTRA_CA_CERTS` (`microservice_admin/certs/backend-facade.crt`), `ADMIN_BACKEND_TLS_INSECURE=0` — глобальный `NODE_TLS_REJECT_UNAUTHORIZED=0` больше не выставляется.
+
+## Defense-in-depth (низкий приоритет, отложено)
+
+- **[low/med] MinIO root-креды дефолтные (`modelline`/`modelline_secret`).** Теперь не критично (порт loopback + bucket private → доступ только с backend-хоста). Ротация требует синхронной смены у потребителей (`microservice_data` MinIO settings, `microservice_analitic`) — иначе сломается claim-check/экспорт. Делать отдельной координированной задачей.
+- **[note] Facade-серт самоподписанный, 10 лет, привязан к IP.** Если кто-то удалит/перегенерит серт на бэкенде — `microservice_admin/certs/backend-facade.crt` надо обновить и закоммитить заново (иначе admin→facade TLS упадёт). Альтернатива на будущее — реальный серт на DNS-имя бэкенда.
