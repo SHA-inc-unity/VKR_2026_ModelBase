@@ -180,6 +180,38 @@ public sealed class MarketWatcherRuntimeState
         }
     }
 
+    /// <summary>
+    /// Freshness heartbeat: forward-stamp the live-row timestamp for symbols on
+    /// exchanges whose feed is currently alive. For a bid/ask mid, no new tick
+    /// means the price has not changed, so the last observed price is still the
+    /// current price — this keeps the reported lag bounded to the heartbeat
+    /// interval for idle symbols without altering the price, candle aggregation
+    /// or DB state. Exchanges absent from <paramref name="aliveExchanges"/>
+    /// (stale/dead feed) are intentionally left to accrue lag so a broken feed
+    /// remains visible in the status snapshot.
+    /// </summary>
+    public void RefreshLiveRowFreshness(IReadOnlySet<string> aliveExchanges, long nowMs)
+    {
+        lock (_gate)
+        {
+            if (_rows.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var key in _rows.Keys.ToArray())
+            {
+                var row = _rows[key];
+                if (!aliveExchanges.Contains(row.Exchange) || row.LastPriceTimestampMs >= nowMs)
+                {
+                    continue;
+                }
+
+                _rows[key] = row with { LastPriceTimestampMs = nowMs, UpdatedAtMs = nowMs };
+            }
+        }
+    }
+
     public void RemoveMissingLiveRows(IReadOnlyCollection<(string Exchange, string Symbol)> trackedSymbols)
     {
         lock (_gate)

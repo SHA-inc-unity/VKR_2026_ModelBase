@@ -19,6 +19,14 @@ public sealed class MarketWatcherService : BackgroundService
     private static readonly TimeSpan SubscriptionRetryDelay = TimeSpan.FromSeconds(3);
     private const int SubscriptionStartAttempts = 3;
 
+    // Freshness heartbeat: re-stamp live rows this often so idle (non-moving)
+    // symbols report sub-second lag instead of "seconds since last book change".
+    private const int FreshnessHeartbeatMs = 400;
+    // Only re-stamp an exchange's rows while its feed is alive (received any
+    // update within this window). A dead feed stops re-stamping → lag grows →
+    // a broken feed stays observable instead of being masked.
+    private const long FeedAliveWindowMs = 10_000;
+
     private readonly MarketWatchRepository _repo;
     private readonly DatasetRepository _datasetRepo;
     private readonly MarketDataClientFactory _marketDataClientFactory;
@@ -175,6 +183,7 @@ public sealed class MarketWatcherService : BackgroundService
         }
 
         var state = new ConcurrentDictionary<string, SymbolLiveState>(StringComparer.OrdinalIgnoreCase);
+        var lastExchangeUpdateMs = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         long tickCount = 0;
         long lastTickAtMs = 0;
 
@@ -188,6 +197,7 @@ public sealed class MarketWatcherService : BackgroundService
             Interlocked.Increment(ref tickCount);
             var tickAtMs = timestampUtc.ToUnixTimeMilliseconds();
             Interlocked.Exchange(ref lastTickAtMs, tickAtMs);
+            lastExchangeUpdateMs[exchange] = tickAtMs;
         }
 
         var subscriptionStart = await StartSubscriptionsAsync(universe, settings, OnPrice, stoppingToken);
@@ -236,6 +246,14 @@ public sealed class MarketWatcherService : BackgroundService
             ["startupWarnings"] = subscriptionStart.Warnings.ToArray(),
         });
 
+        // Freshness heartbeat runs on its own cadence, independent of the
+        // flush/persist loop below, so a candle-rollover persist burst (which
+        // now includes ccxt fetches) can never delay it.
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var heartbeatTask = RunFreshnessHeartbeatAsync(lastExchangeUpdateMs, heartbeatCts.Token);
+
+        try
+        {
         while (!stoppingToken.IsCancellationRequested)
         {
             if (!_state.DesiredEnabled)
@@ -279,6 +297,45 @@ public sealed class MarketWatcherService : BackgroundService
                 });
                 nextReportAt = now.Add(reportEvery);
             }
+        }
+        }
+        finally
+        {
+            heartbeatCts.Cancel();
+            try { await heartbeatTask; } catch { /* shutting down */ }
+        }
+    }
+
+    private async Task RunFreshnessHeartbeatAsync(
+        ConcurrentDictionary<string, long> lastExchangeUpdateMs,
+        CancellationToken ct)
+    {
+        var interval = TimeSpan.FromMilliseconds(FreshnessHeartbeatMs);
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(interval, ct);
+
+                var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var alive = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var entry in lastExchangeUpdateMs)
+                {
+                    if (nowMs - entry.Value <= FeedAliveWindowMs)
+                    {
+                        alive.Add(entry.Key);
+                    }
+                }
+
+                if (alive.Count > 0)
+                {
+                    _state.RefreshLiveRowFreshness(alive, nowMs);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // normal shutdown
         }
     }
 
@@ -510,47 +567,49 @@ public sealed class MarketWatcherService : BackgroundService
         CancellationToken ct)
     {
         var socketClient = new BinanceSocketClient();
-        var disposers = new List<Func<ValueTask>>();
         var allowedSymbols = symbols
             .Select(item => item.RealtimeSymbol ?? item.Symbol)
             .Where(item => !string.IsNullOrWhiteSpace(item))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var chunk in allowedSymbols.Chunk(200))
-        {
-            var subscription = await socketClient.UsdFuturesApi.ExchangeData.SubscribeToBookTickerUpdatesAsync(chunk, update =>
+        // Fixed-cadence mark-price stream: a single subscription delivers every
+        // USDⓈ-M perpetual's mark price on a regular 1s interval regardless of
+        // book activity, so idle symbols no longer accrue lag. Replaces the
+        // event-driven bookTicker stream (which only pushed on best bid/ask
+        // changes, leaving thin symbols stale for seconds).
+        var subscription = await socketClient.UsdFuturesApi.ExchangeData.SubscribeToAllMarkPriceUpdatesAsync(
+            1000,
+            update =>
             {
-                if (string.IsNullOrWhiteSpace(update.Data.Symbol)
-                    || !allowedSymbols.Contains(update.Data.Symbol))
+                foreach (var item in update.Data)
                 {
-                    return;
+                    if (string.IsNullOrWhiteSpace(item.Symbol)
+                        || !allowedSymbols.Contains(item.Symbol)
+                        || item.MarkPrice <= 0)
+                    {
+                        continue;
+                    }
+
+                    onPrice("binance", item.Symbol, item.MarkPrice, DateTimeOffset.UtcNow);
                 }
+            },
+            ct);
 
-                var price = SelectMidPrice(update.Data.BestBidPrice, update.Data.BestAskPrice);
-                if (!price.HasValue)
-                {
-                    return;
-                }
-
-                onPrice("binance", update.Data.Symbol, price.Value, DateTimeOffset.UtcNow);
-            }, ct);
-
-            if (!subscription.Success)
-            {
-                socketClient.Dispose();
-                throw new InvalidOperationException($"Binance book ticker subscription failed: {subscription.Error}");
-            }
-
-            disposers.Add(() => new ValueTask(socketClient.UnsubscribeAsync(subscription.Data)));
-        }
-
-        disposers.Add(() =>
+        if (!subscription.Success)
         {
             socketClient.Dispose();
-            return ValueTask.CompletedTask;
-        });
+            throw new InvalidOperationException($"Binance mark price subscription failed: {subscription.Error}");
+        }
 
-        return new CompositeAsyncDisposable(disposers.Select(action => new AsyncDisposeAction(action)).ToArray());
+        return new CompositeAsyncDisposable(new IAsyncDisposable[]
+        {
+            new AsyncDisposeAction(() => new ValueTask(socketClient.UnsubscribeAsync(subscription.Data))),
+            new AsyncDisposeAction(() =>
+            {
+                socketClient.Dispose();
+                return ValueTask.CompletedTask;
+            }),
+        });
     }
 
     private static async Task<IAsyncDisposable> StartBybitAsync(
@@ -562,23 +621,28 @@ public sealed class MarketWatcherService : BackgroundService
         var socketClient = new BybitSocketClient();
         var disposers = new List<Func<ValueTask>>();
 
+        // Ticker stream (≈100ms cadence) instead of the event-driven depth-1
+        // orderbook: it carries best bid/ask (so the price stays a mid) plus
+        // last/mark as fallbacks, and pushes far more regularly for thin books.
         foreach (var chunk in symbols
             .Select(item => item.RealtimeSymbol ?? item.Symbol)
             .Where(item => !string.IsNullOrWhiteSpace(item))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Chunk(Math.Max(1, settings.BybitSymbolsPerSubscription)))
         {
-            var subscription = await socketClient.V5LinearApi.SubscribeToOrderbookUpdatesAsync(chunk, 1, update =>
+            var subscription = await socketClient.V5LinearApi.SubscribeToTickerUpdatesAsync(chunk, update =>
             {
                 if (string.IsNullOrWhiteSpace(update.Data.Symbol))
                 {
                     return;
                 }
 
-                var bestAsk = update.Data.Asks.FirstOrDefault(entry => entry.Quantity != 0);
-                var bestBid = update.Data.Bids.FirstOrDefault(entry => entry.Quantity != 0);
-                var price = SelectMidPrice(bestBid?.Price, bestAsk?.Price);
-                if (!price.HasValue)
+                // Ticker deltas carry only changed fields, so prefer a bid/ask
+                // mid, then last price, then mark price.
+                var price = SelectMidPrice(update.Data.BestBidPrice, update.Data.BestAskPrice)
+                    ?? update.Data.LastPrice
+                    ?? update.Data.MarkPrice;
+                if (!price.HasValue || price.Value <= 0)
                 {
                     return;
                 }
@@ -589,7 +653,7 @@ public sealed class MarketWatcherService : BackgroundService
             if (!subscription.Success)
             {
                 socketClient.Dispose();
-                throw new InvalidOperationException($"Bybit orderbook subscription failed: {subscription.Error}");
+                throw new InvalidOperationException($"Bybit ticker subscription failed: {subscription.Error}");
             }
 
             disposers.Add(() => new ValueTask(socketClient.UnsubscribeAsync(subscription.Data)));
