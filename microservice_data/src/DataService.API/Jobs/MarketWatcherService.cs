@@ -241,6 +241,7 @@ public sealed class MarketWatcherService : BackgroundService
 
         _state.MarkRunning(
             runningMessage,
+            configuredSymbols.Count,
             activeSymbolCount,
             0,
             0,
@@ -302,6 +303,7 @@ public sealed class MarketWatcherService : BackgroundService
                 var latestTickAtMs = Interlocked.Read(ref lastTickAtMs);
                 _state.MarkRunning(
                     runningMessage,
+                    configuredSymbols.Count,
                     activeSymbolCount,
                     state.Count,
                     ticksPerWindow,

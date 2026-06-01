@@ -26,8 +26,10 @@ interface WatcherStatus {
   lastHeartbeatAtMs?: number | null;
   lastFlushAtMs?: number | null;
   lastTickAtMs?: number | null;
+  configuredPairs?: number;
   trackedSymbols: number;
   liveRows: number;
+  perExchange?: { exchange: string; symbols: number }[];
   avgLagMs?: number | null;
   maxLagMs?: number | null;
   ticksInLastWindow: number;
@@ -432,8 +434,9 @@ export default function MarketWatcherPage() {
           <CardContent className="space-y-2 px-5 pb-5 text-sm">
             {loading || !watcher ? <Skeleton className="h-16 w-full" /> : (
               <>
-                <div>{t('marketWatcher.trackedSymbols')}: <span className="font-semibold">{watcher.trackedSymbols}</span></div>
-                <div>{t('marketWatcher.liveRows')}: <span className="font-semibold">{watcher.liveRows}</span></div>
+                <div>{t('marketWatcher.configuredPairs')}: <span className="font-semibold">{watcher.configuredPairs ?? '–'}</span></div>
+                <div>{t('marketWatcher.trackedSymbols')}: <span className="font-semibold">{watcher.trackedSymbols}</span>{typeof watcher.configuredPairs === 'number' ? <span className="text-muted-foreground"> / {watcher.configuredPairs}</span> : null}</div>
+                <div>{t('marketWatcher.liveRows')}: <span className="font-semibold">{watcher.liveRows}</span>{watcher.perExchange && watcher.perExchange.length > 0 ? <span className="text-muted-foreground"> ({watcher.perExchange.map(e => `${e.exchange} ${e.symbols}`).join(' · ')})</span> : null}</div>
                 <div>{t('marketWatcher.ticksWindow')}: <span className="font-semibold">{watcher.ticksInLastWindow}</span></div>
                 <div className="text-muted-foreground">{watcher.exchanges.join(', ') || '–'} / {watcher.timeframes.join(', ') || '–'}</div>
               </>

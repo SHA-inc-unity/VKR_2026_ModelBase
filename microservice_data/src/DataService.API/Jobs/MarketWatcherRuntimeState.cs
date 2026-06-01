@@ -24,8 +24,10 @@ public sealed record MarketWatcherStatusSnapshot(
     long? LastHeartbeatAtMs,
     long? LastFlushAtMs,
     long? LastTickAtMs,
+    int ConfiguredPairs,
     int TrackedSymbols,
     int LiveRows,
+    MarketWatcherExchangeCount[] PerExchange,
     long? AverageLagMs,
     long? MaxLagMs,
     long TicksInLastWindow,
@@ -34,6 +36,10 @@ public sealed record MarketWatcherStatusSnapshot(
     string[] Timeframes,
     string? LastError,
     long? LastErrorAtMs);
+
+/// <summary>Per-exchange distinct tracked-symbol count, so the per-exchange live
+/// feeds reconcile with the distinct-symbol / configured-pairs totals.</summary>
+public sealed record MarketWatcherExchangeCount(string Exchange, int Symbols);
 
 public sealed record MarketWatcherLogEntry(
     long Id,
@@ -60,6 +66,7 @@ public sealed class MarketWatcherRuntimeState
     private long? _lastFlushAtMs;
     private long? _lastTickAtMs;
     private int _trackedSymbols;
+    private int _configuredPairs;
     private int _liveRows;
     private readonly Dictionary<string, MarketWatcherLiveRowSnapshot> _rows = new(StringComparer.OrdinalIgnoreCase);
     private long _ticksInLastWindow;
@@ -166,6 +173,7 @@ public sealed class MarketWatcherRuntimeState
 
     public void MarkRunning(
         string message,
+        int configuredPairs,
         int trackedSymbols,
         int liveRows,
         long ticksInLastWindow,
@@ -181,6 +189,7 @@ public sealed class MarketWatcherRuntimeState
             _lastHeartbeatAtMs = now;
             _lastFlushAtMs = now;
             _lastTickAtMs = lastTickAtMs ?? _lastTickAtMs;
+            _configuredPairs = configuredPairs;
             _trackedSymbols = trackedSymbols;
             _liveRows = _rows.Count > 0 ? _rows.Count : liveRows;
             _ticksInLastWindow = ticksInLastWindow;
@@ -346,6 +355,21 @@ public sealed class MarketWatcherRuntimeState
         lock (_gate)
         {
             var (averageLagMs, maxLagMs) = ComputeLagSnapshotUnsafe();
+            // "Tracked symbols" is reported as DISTINCT symbols (pair-aligned with
+            // the currency-pairs center); "live rows" counts per-exchange feeds
+            // (same symbol on bybit + binance = two rows). PerExchange breaks the
+            // feeds down so e.g. 167 = 85 + 82 reconciles with the configured pairs.
+            var distinctSymbols = _rows.Values
+                .Select(r => r.Symbol)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+            var perExchange = _rows.Values
+                .GroupBy(r => r.Exchange, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new MarketWatcherExchangeCount(
+                    g.Key,
+                    g.Select(r => r.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).Count()))
+                .OrderBy(x => x.Exchange, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
             return new MarketWatcherStatusSnapshot(
                 DesiredEnabled: _desiredEnabled,
                 EffectiveEnabled: _effectiveEnabled,
@@ -355,8 +379,10 @@ public sealed class MarketWatcherRuntimeState
                 LastHeartbeatAtMs: _lastHeartbeatAtMs,
                 LastFlushAtMs: _lastFlushAtMs,
                 LastTickAtMs: _lastTickAtMs,
-                TrackedSymbols: _trackedSymbols,
+                ConfiguredPairs: _configuredPairs,
+                TrackedSymbols: distinctSymbols,
                 LiveRows: _liveRows,
+                PerExchange: perExchange,
                 AverageLagMs: averageLagMs,
                 MaxLagMs: maxLagMs,
                 TicksInLastWindow: _ticksInLastWindow,
