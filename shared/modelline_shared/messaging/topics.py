@@ -40,6 +40,14 @@ CMD_DATA_DATASET_CLEAN_PREVIEW     = "cmd.data.dataset.clean.preview"
 CMD_DATA_DATASET_CLEAN_APPLY       = "cmd.data.dataset.clean.apply"
 CMD_DATA_DATASET_AUDIT_LOG         = "cmd.data.dataset.audit_log"
 
+# ── data: currency pairs center (single source of truth) ─────────────────────
+# Active pairs = active base × active quote cross-product. Mutations publish
+# EVT_DATA_PAIRS_CHANGED so the market watcher hot-reloads.
+CMD_DATA_PAIRS_LIST       = "cmd.data.pairs.list"
+CMD_DATA_PAIRS_ADD        = "cmd.data.pairs.add"
+CMD_DATA_PAIRS_REMOVE     = "cmd.data.pairs.remove"
+CMD_DATA_PAIRS_SET_ACTIVE = "cmd.data.pairs.set_active"
+
 # ── analitic: dataset session + anomaly (Python-side) ────────────────────────
 CMD_ANALITIC_DATASET_LOAD     = "cmd.analitic.dataset.load"
 CMD_ANALITIC_DATASET_UNLOAD   = "cmd.analitic.dataset.unload"
@@ -59,6 +67,7 @@ CMD_DATA_DB_PING               = "cmd.data.db.ping"
 
 EVT_DATA_DATASET_UPDATED       = "events.data.dataset.updated"
 EVT_DATA_INGEST_PROGRESS       = "events.data.ingest.progress"
+EVT_DATA_PAIRS_CHANGED         = "events.data.pairs.changed"
 
 # ── analytics (Step 3) ───────────────────────────────────────────────────────
 CMD_ANALYTICS_TRAIN_START      = "cmd.analytics.train.start"

@@ -133,6 +133,14 @@ control topics, а `Duration` для terminal dataset jobs считается к
 время между `started_at` и `finished_at`, то есть `running → finished`, а не
 как round-trip отдельного admin-запроса.
 
+Единый центр валютных пар вынесен на страницу **Currency Pairs** (пункт меню
+после Dataset). Две колонки — базовые активы и котировки/стейблкоины — с
+add/remove/toggle и превью получаемых пар (cross-product). CRUD идёт через
+Kafka `cmd.data.pairs.{list,add,remove,set_active}` (хук `useCurrencyPairs`),
+data-service — единственный владелец списка. Символьные дропдауны на Dataset/
+Train/Compare/Anomaly больше не хардкодят `SYMBOLS`, а тянут активные символы
+из центра через `useSymbols`.
+
 Для live-market overlay добавлена отдельная страница **Market Watcher** —
 восьмой пункт меню после Queue. Она читает только dedicated Kafka topics
 `cmd.data.market_watcher.{status,set_enabled,rows,logs}` и показывает:

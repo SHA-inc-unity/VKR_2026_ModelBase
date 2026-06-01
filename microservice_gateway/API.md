@@ -47,7 +47,7 @@
 
 1. Получить access token через `POST /api/account/login` на gateway или напрямую у account-сервиса.
 2. На старте приложения вызвать `GET /api/app/bootstrap`.
-3. Для market-экрана сначала вызвать `GET /api/v1/market/config`.
+3. Для market-экрана сначала вызвать `GET /api/v1/market/config` — он отдаёт `symbols`, `timeframes`, `candleCounts`, `defaults` и `quotes` (активные стейблкоины из единого центра валютных пар; используются клиентом как источник стейбла, без хардкода USDT).
 4. Строить запросы `GET /api/v1/market/chart` только значениями из `/api/v1/market/config`.
 5. Для защищённых endpoint-ов передавать `Authorization: Bearer <accessToken>`.
 6. Не трактовать каждый `200` как «данные полные и готовы»: `dashboard`, `market/chart` и часть lightweight frontend routes могут возвращать fallback/cache-backed payload, а не durable downstream truth.
