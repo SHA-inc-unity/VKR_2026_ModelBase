@@ -50,7 +50,11 @@
 
 ### Ingest pipeline (`cmd.data.dataset.ingest`)
 
-Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handler routes requests through an exchange-specific market client. Supported exchanges today:
+Payload: `{ symbol, timeframe, start_ms, end_ms, exchange?="bybit" }`. The handler routes requests through an exchange-specific `IMarketDataClient`.
+
+**OHLCV provider (ccxt по умолчанию).** Исторические klines / funding / open interest загружаются через унифицированную библиотеку [`ccxt`](https://github.com/ccxt/ccxt) (официальный NuGet `ccxt`, адаптер `Markets/CcxtMarketDataClient.cs`), что позволяет подключать новые биржи конфигом, а не новым REST-адаптером. Провайдер выбирается флагом `DataService:Dataset:OhlcvProvider`: `ccxt` (default) либо `native` (рукописные `BybitApiClient`/`BinanceApiClient` — мгновенный откат к точным decimal-значениям из raw API). Список ccxt-бирж — `DataService:Dataset:CcxtExchanges` (default `bybit`, `binance`). Символы маппятся `BTCUSDT ⇄ BTC/USDT:USDT` на границе адаптера; имена таблиц и схема не меняются. **Caveat ccxt:** unified OHLCV не содержит quote-volume, поэтому `turnover` аппроксимируется как `close × volume`, а значения приходят как `double` (float-точность) — для точных decimal переключись на `native`. Live-websocket MarketWatcher остаётся на `Binance.Net`/`Bybit.Net`.
+
+Supported exchanges today:
 
 - `bybit` — full perpetual pipeline: klines + funding + open interest. Heavy `1m`/`3m` Bybit jobs remain scheduler-serialized per exchange, but inside one job the handler now uses a wider kline page fan-out under the shared Bybit token bucket, which materially speeds up long historical backfills without lifting the real IP budget.
 - `binance` — full USDT-margined futures pipeline: klines + funding + open interest. Binance HTTP calls now go through a process-local limiter, respect `Retry-After` on `418/429`, and clip/align `openInterestHist` requests to the upstream strict latest-30-day retention window instead of retrying impossible historical `startTime` values forever. Heavy `1m`/`3m` Binance jobs remain scheduler-serialized, but inside one job the client now uses a wider page fan-out plus a less conservative limiter budget, which materially speeds up long historical fetches without reopening the scheduler floodgate.

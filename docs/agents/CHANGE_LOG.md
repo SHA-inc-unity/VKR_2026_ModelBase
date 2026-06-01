@@ -2,6 +2,12 @@
 
 Журнал коротких записей о заметных изменениях, которые влияют на разработку, маршруты чтения документации и агентный workflow.
 
+## 2026-06
+
+### 2026-06-01
+
+- `microservice_data/src/DataService.API/{Markets/CcxtMarketDataClient.cs,Markets/MarketDataClientFactory.cs,Settings/DataServiceSettings.cs,Program.cs,DataService.API.csproj,appsettings.json}`, `microservice_data/{README.md,STRUCTURE.md}`: dataset OHLCV / funding / open-interest ingest переведён на унифицированную библиотеку **ccxt** (официальный NuGet `ccxt`, .NET Standard 2.0 → совместим с net8.0). Новый `CcxtMarketDataClient : IMarketDataClient` грузит klines/funding/OI через ccxt (`Exchange.DynamicallyCreateInstance(id)`, `defaultType=swap`) для `bybit`+`binance`; провайдер выбирается флагом `DataService:Dataset:OhlcvProvider` (`ccxt` default \| `native` — откат к рукописным `BybitApiClient`/`BinanceApiClient` с точными decimal). Список ccxt-бирж — `DataService:Dataset:CcxtExchanges`, поэтому новая биржа подключается конфигом без нового REST-адаптера. Символы маппятся `BTCUSDT ⇄ BTC/USDT:USDT`; `turnover` аппроксимируется `close×volume` (в unified OHLCV нет quote-volume), значения `double` (float-точность). Live-websocket MarketWatcher остался на `Binance.Net`/`Bybit.Net`. Свап изолирован за существующим seam `IMarketDataClient`/`MarketDataClientFactory` — джобы, репозиторий, имена таблиц, экспорт и Kafka-контракты не тронуты. Проверка на backend-host (`95.165.27.159`, dotnet 8.0.127): `dotnet build src/DataService.API/DataService.API.csproj -c Release` → 0 warn / 0 err; docker rebuild + restart `microservice_data`; в логах `MarketDataClientFactory: OhlcvProvider=ccxt; clients=[bybit->CcxtMarketDataClient, binance->CcxtMarketDataClient]`; e2e через gateway `GET /api/v1/market/chart` — свежие свечи легли в `btcusdt_5m` с сигнатурой `turnover==close*volume` и реальными ценами, ccxt-ошибок в логах нет.
+
 ## 2026-05
 
 ### 2026-05-24
