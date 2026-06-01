@@ -47,9 +47,13 @@ services:
       - 0.0.0.0:33145
       - --advertise-rpc-addr
       - redpanda:33145
+    # Loopback-only by default: backend services use the internal listener
+    # redpanda:29092 (docker network); nothing off-host needs the external
+    # :9092/:9644 (the admin head reads events via the gateway SSE relay, not
+    # Kafka directly). Set REDPANDA_BIND_ADDR=0.0.0.0 to expose if ever needed.
     ports:
-      - "${REDPANDA_BIND_ADDR:-0.0.0.0}:${REDPANDA_EXTERNAL_PORT:-9092}:9092"
-      - "${REDPANDA_BIND_ADDR:-0.0.0.0}:${REDPANDA_ADMIN_PORT:-9644}:9644"
+      - "${REDPANDA_BIND_ADDR:-127.0.0.1}:${REDPANDA_EXTERNAL_PORT:-9092}:9092"
+      - "${REDPANDA_BIND_ADDR:-127.0.0.1}:${REDPANDA_ADMIN_PORT:-9644}:9644"
     volumes:
       - type: bind
         source: ../.runtime-data/microservice_infra/redpanda
@@ -158,9 +162,12 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-modelline_secret}
+    # Loopback-only by default: object downloads go through the infra nginx
+    # facade (:8443 /modelline-blobs/* → minio:9000 over the docker network),
+    # never the host port. Set MINIO_BIND_ADDR=0.0.0.0 to expose if ever needed.
     ports:
-      - "${MINIO_BIND_ADDR:-0.0.0.0}:${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${MINIO_BIND_ADDR:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_BIND_ADDR:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - type: bind
         source: ../.runtime-data/microservice_infra/minio
@@ -183,8 +190,8 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
       mc mb --ignore-existing local/modelline-blobs &&
-      mc anonymous set download local/modelline-blobs &&
-      echo '✓ bucket modelline-blobs ready'
+      mc anonymous set none local/modelline-blobs &&
+      echo '✓ bucket modelline-blobs ready (private; access via presigned URLs only)'
       "
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-modelline}
