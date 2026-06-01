@@ -14,6 +14,8 @@
     <PackageReference Include="AWSSDK.S3" Version="3.*" />
     <PackageReference Include="Binance.Net" Version="12.*" />
     <PackageReference Include="Bybit.Net" Version="6.*" />
+    <!-- Unified exchange API: backs CcxtMarketDataClient for dataset OHLCV/funding/OI ingest. -->
+    <PackageReference Include="ccxt" Version="4.5.*" />
     <PackageReference Include="Serilog.AspNetCore" Version="8.*" />
     <PackageReference Include="Serilog.Settings.Configuration" Version="8.*" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.*" />

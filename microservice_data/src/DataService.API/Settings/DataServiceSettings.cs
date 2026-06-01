@@ -13,9 +13,25 @@ public sealed class DataServiceSettings
     public MinioSettings Minio { get; set; } = new();
     public ApiSettings Api { get; set; } = new();
     public MarketWatchSettings MarketWatch { get; set; } = new();
+    public DatasetSettings Dataset { get; set; } = new();
 
     public string ServiceName => "microservice_data";
     public string Version => "1.0.0";
+}
+
+public sealed class DatasetSettings
+{
+    /// <summary>Source for dataset OHLCV / funding / open-interest ingest:
+    /// <c>"ccxt"</c> (unified ccxt library — default) or <c>"native"</c> (the
+    /// hand-written Bybit/Binance REST adapters). Flip to <c>"native"</c> for an
+    /// instant rollback to the exact-decimal raw-REST path.</summary>
+    public string OhlcvProvider { get; set; } = "ccxt";
+
+    /// <summary>Exchange ids served by the ccxt client. Each must be a valid
+    /// ccxt exchange id. Add an id here to enable ccxt-backed dataset ingest for
+    /// a new exchange (also add it to <c>DatasetJobRunner.IngestExchanges</c> if
+    /// it needs dedicated per-exchange ingest concurrency slots).</summary>
+    public string[] CcxtExchanges { get; set; } = ["bybit", "binance"];
 }
 
 public sealed class MarketWatchSettings

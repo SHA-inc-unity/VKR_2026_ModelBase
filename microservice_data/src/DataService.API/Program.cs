@@ -93,6 +93,22 @@ try
     {
         client.Timeout = TimeSpan.FromSeconds(DataService.API.Dataset.DatasetConstants.RequestTimeoutSeconds);
     });
+
+    // ccxt-backed market-data clients — one per configured exchange id. These
+    // back the dataset OHLCV/funding/OI ingest when DataService:Dataset:
+    // OhlcvProvider="ccxt" (the default); the factory chooses native vs ccxt.
+    var ccxtExchanges = (builder.Configuration
+            .GetSection("DataService:Dataset:CcxtExchanges").Get<string[]>()
+            ?? ["bybit", "binance"])
+        .Select(e => e.Trim().ToLowerInvariant())
+        .Where(e => e.Length > 0)
+        .Distinct(StringComparer.OrdinalIgnoreCase);
+    foreach (var exId in ccxtExchanges)
+    {
+        builder.Services.AddSingleton<CcxtMarketDataClient>(sp =>
+            new CcxtMarketDataClient(exId, sp.GetRequiredService<ILogger<CcxtMarketDataClient>>()));
+    }
+
     builder.Services.AddSingleton<MarketDataClientFactory>();
 
     // ── Kafka consumer (hosted service) ───────────────────────────────────
