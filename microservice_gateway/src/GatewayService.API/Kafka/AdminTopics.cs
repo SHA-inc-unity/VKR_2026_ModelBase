@@ -76,4 +76,29 @@ public static class AdminTopics
     public const string AnalyticsModelList   = "cmd.analytics.model.list";
     public const string AnalyticsModelLoad   = "cmd.analytics.model.load";
     public const string AnalyticsPredict     = "cmd.analytics.predict";
+
+    // ── Events relayed to the admin head over SSE (GET /api/admin/events) ─────
+    // Mirrors the EVT_* entries in microservice_admin/src/lib/topics.ts. In split
+    // mode the admin's Kafka consumer can't reach the backend broker, so the
+    // gateway (which IS in the broker network) consumes these and streams them to
+    // the admin over the authenticated HTTPS facade. Keep in sync with topics.ts.
+    public const string EvtAnalyticsTrainProgress        = "events.analytics.train.progress";
+    public const string EvtAnalyticsModelReady           = "events.analytics.model.ready";
+    public const string EvtDataIngestProgress            = "events.data.ingest.progress";
+    public const string EvtAnaliticDatasetRepairProgress = "events.analitic.dataset.repair.progress";
+    public const string EvtDataDatasetJobProgress        = "events.data.dataset.job.progress";
+    public const string EvtDataDatasetJobCompleted       = "events.data.dataset.job.completed";
+    public const string EvtDataPairsChanged              = "events.data.pairs.changed";
+
+    /// <summary>All EVT_* topics the relay subscribes to and forwards to the admin.</summary>
+    public static readonly string[] AllEvents =
+    [
+        EvtAnalyticsTrainProgress,
+        EvtAnalyticsModelReady,
+        EvtDataIngestProgress,
+        EvtAnaliticDatasetRepairProgress,
+        EvtDataDatasetJobProgress,
+        EvtDataDatasetJobCompleted,
+        EvtDataPairsChanged,
+    ];
 }

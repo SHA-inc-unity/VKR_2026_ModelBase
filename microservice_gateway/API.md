@@ -136,12 +136,21 @@ Gateway сериализует JSON в `camelCase`.
 
 | Правило | Значение |
 | ------- | -------- |
-| Method | все `/api/admin/*` endpoint-ы используют `POST`, даже когда операция логически read-only |
+| Method | все `/api/admin/*` endpoint-ы используют `POST`, даже когда операция логически read-only. **Единственное исключение — `GET /api/admin/events`** (SSE, см. ниже) |
 | Request body | gateway принимает JSON body и проксирует его в Kafka payload без переформатирования; если payload не нужен, можно послать `{}` |
 | Success payload | `200 OK` возвращает JSON downstream-владельца как есть, без envelope/wrapper от gateway |
 | Auth | `Authorization: Bearer <admin JWT>` |
 | Gateway-managed failures | `401`, `503`, `504` нормализуются в `ErrorResponse` |
 | Browser CORS | intentionally disabled |
+
+#### `GET /api/admin/events` — live SSE релей событий
+
+Поток Server-Sent Events со всеми backend `events.*` (EVT_*) топиками. Нужен для split-деплоя: admin-head на отдельном хосте не достаёт backend-Redpanda напрямую, а gateway живёт внутри broker-сети. Gateway держит **один** Kafka-consumer на все EVT_* и fan-out'ит их всем подключённым SSE-клиентам (`AdminEventRelayHub`); admin reverse-проксирует этот поток в браузер под JWT залогиненного admin-пользователя — никакой Redpanda-креденшл не покидает backend-хост.
+
+- Auth: тот же `Authorization: Bearer <admin JWT>`, что и у `POST /api/admin/*`.
+- Формат кадра: `data: {"type":"<topic>","payload":<json>}\n\n` — ровно то, что потребляет браузерный `EventSource` admin'а, поэтому admin пробрасывает байты verbatim.
+- Heartbeat: `: keepalive` каждые 20 с (сбрасывает nginx `proxy_read_timeout 310s`).
+- Буферизация: ответ выставляет `X-Accel-Buffering: no`, чтобы infra-nginx (`:8443`) не буферизовал стрим (отдельный `proxy_buffering off` в nginx не требуется).
 
 ### Degraded vs Error
 
@@ -293,6 +302,7 @@ UID в теле запроса не используется как источн
 | GET | `/api/admin/users` | Admin JWT | lightweight mobile-admin users view |
 | GET | `/api/admin/services` | Admin JWT | lightweight mobile-admin services view |
 | GET | `/api/admin/statistics` | Admin JWT | lightweight mobile-admin statistics |
+| GET | `/api/admin/events` | Admin JWT | SSE-релей backend `events.*` (EVT_*) для split-mode admin; единственный `GET` среди `/api/admin/*` |
 | POST | `/api/admin/health/*` | Admin JWT | backend facade для health-check команд admin |
 | POST | `/api/admin/dataset/*` | Admin JWT | backend facade для dataset/data-service команд |
 | POST | `/api/admin/market-watcher/*` | Admin JWT | backend facade для dedicated market watcher control-plane |

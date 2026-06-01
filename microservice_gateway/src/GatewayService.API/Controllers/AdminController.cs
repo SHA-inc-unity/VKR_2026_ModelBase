@@ -7,6 +7,7 @@ using GatewayService.API.Middleware;
 using GatewayService.API.Settings;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 
@@ -80,19 +81,86 @@ public sealed class AdminController : ControllerBase
     private const string KafkaUnavailableCode = "admin_kafka_unavailable";
 
     private readonly IKafkaRequestClient _kafka;
+    private readonly AdminEventRelayHub _eventRelay;
     private readonly ILogger<AdminController> _log;
     private readonly TimeSpan _defaultTimeout;
     private readonly TimeSpan _longTimeout;
 
     public AdminController(
         IKafkaRequestClient kafka,
+        AdminEventRelayHub eventRelay,
         IOptions<AdminSettings> opts,
         ILogger<AdminController> log)
     {
         _kafka          = kafka;
+        _eventRelay     = eventRelay;
         _log            = log;
         _defaultTimeout = TimeSpan.FromSeconds(opts.Value.DefaultTimeoutSeconds);
         _longTimeout    = TimeSpan.FromSeconds(opts.Value.LongTimeoutSeconds);
+    }
+
+    // ── Live events (SSE) ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// GET /api/admin/events — Server-Sent Events stream of all backend EVT_*
+    /// events. Requires the same admin JWT as every other facade route.
+    ///
+    /// The split-mode admin head reverse-proxies this stream to the browser
+    /// (lib/sseHub-relay), so it cannot reach the broker directly. Each frame is
+    /// <c>data: {"type":"&lt;topic&gt;","payload":&lt;json&gt;}</c> — the exact shape the
+    /// admin's browser EventSource already consumes. A <c>:keepalive</c> comment
+    /// is sent every 20 s so idle proxies don't drop the connection.
+    /// </summary>
+    [HttpGet("events")]
+    public async Task Events(CancellationToken ct)
+    {
+        Response.ContentType = "text/event-stream";
+        Response.Headers["Cache-Control"] = "no-cache, no-transform";
+        Response.Headers["X-Accel-Buffering"] = "no";
+        HttpContext.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        var reader = _eventRelay.Subscribe(out var subId);
+        try
+        {
+            await Response.WriteAsync(": connected\n\n", ct);
+            await Response.Body.FlushAsync(ct);
+
+            while (!ct.IsCancellationRequested)
+            {
+                using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                heartbeatCts.CancelAfter(TimeSpan.FromSeconds(20));
+                try
+                {
+                    // Completes false only when the hub is shutting down.
+                    if (!await reader.WaitToReadAsync(heartbeatCts.Token)) break;
+
+                    while (reader.TryRead(out var line))
+                    {
+                        await Response.WriteAsync($"data: {line}\n\n", ct);
+                    }
+                    await Response.Body.FlushAsync(ct);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // 20 s heartbeat tick (no events arrived in the window).
+                    await Response.WriteAsync(": keepalive\n\n", ct);
+                    await Response.Body.FlushAsync(ct);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Client disconnected — normal SSE teardown.
+        }
+        catch (Exception ex)
+        {
+            // Broken pipe / write after the client vanished — log and clean up.
+            _log.LogDebug(ex, "AdminFacade events stream ended subId={SubId}", subId);
+        }
+        finally
+        {
+            _eventRelay.Unsubscribe(subId);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

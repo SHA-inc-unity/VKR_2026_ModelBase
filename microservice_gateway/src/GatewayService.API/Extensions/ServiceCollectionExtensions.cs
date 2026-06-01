@@ -73,6 +73,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IKafkaRequestClientProbe>(sp => sp.GetRequiredService<KafkaRequestClient>());
         services.AddHostedService(sp => sp.GetRequiredService<KafkaRequestClient>());
 
+        // Admin event relay — single EVT_* consumer fanned out to admin SSE clients
+        // (GET /api/admin/events). Lets the split-mode admin head receive live
+        // events without reaching the backend broker directly.
+        services.AddSingleton<AdminEventRelayHub>();
+        services.AddHostedService(sp => sp.GetRequiredService<AdminEventRelayHub>());
+
         // Redis distributed cache (falls back to in-memory when Redis section is absent)
         var redisConfig = configuration["Redis:Configuration"];
         if (!string.IsNullOrWhiteSpace(redisConfig))
