@@ -2,14 +2,13 @@
 import dynamic from 'next/dynamic';
 import { useEffect, useRef, useState } from 'react';
 import { cacheRead, cacheWrite } from '@/lib/cacheClient';
-import { AlertTriangle, CheckCircle2, Database, Download, DownloadCloud, Loader2, RefreshCw, ShieldCheck, Trash2, Wrench, XCircle } from 'lucide-react';
+import { CheckCircle2, Database, Download, DownloadCloud, Loader2, RefreshCw, ShieldCheck, Trash2, Wrench, XCircle } from 'lucide-react';
 import { kafkaCall, newCorrelationId } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
 import { useEvents } from '@/hooks/useEvents';
 import { refreshActiveJobs, refreshJobsByIds, seedQueuedJob, useDatasetJobs } from '@/hooks/useDatasetJobs';
 import { useDatasetJobsFeed } from '@/hooks/useDatasetJobsFeed';
-import type { DatasetJobView } from '@/hooks/useDatasetJobs';
 import {
   TIMEFRAMES,
   TIMEFRAMES_ALL,
@@ -32,583 +31,53 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
-import { SmoothProgress } from '@/components/ui/smooth-progress';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
 import type { BarDatum } from '@/components/charts/CoverageBar';
+import { IngestProgress } from './_components/IngestProgress';
+import { AllIngestProgress } from './_components/AllIngestProgress';
+import {
+  PARAMS_KEY,
+  PARAMS_TTL,
+  CACHE_TABLES_KEY,
+  CACHE_TABLES_TTL,
+  CACHE_COVERAGE_TTL,
+  ALL_INGEST_ERROR_RETENTION_MS,
+  ACTIVE_EXCHANGES,
+  EXCHANGES,
+  coverageCacheKey,
+  allCoverageCacheKey,
+  todayStr,
+  daysAgoStr,
+  shortenMessage,
+  loadParams,
+  formatRows,
+  INITIAL_STAGES,
+  INITIAL_REPAIR_STAGES_OHLCV,
+  INITIAL_REPAIR_STAGES_RECOMPUTE,
+  parseTableName,
+  buildIngestScopeKey,
+  parseIngestScopeKey,
+  mapJobToStages,
+  formatIngestSuccessToast,
+  formatErrorHint,
+  type DatasetExchange,
+  type DatasetPageParams,
+  type DataTableInfo,
+  type CoverageResult,
+  type AllCoverageItem,
+  type TfStatus,
+  type TfMeta,
+} from './_lib/datasetHelpers';
 
 // Dynamic import — avoids Recharts SSR errors
 const CoverageBar = dynamic(
   () => import('@/components/charts/CoverageBar').then(m => m.CoverageBar),
   { ssr: false, loading: () => <Skeleton className="h-[100px] w-full" /> },
 );
-
-const PARAMS_KEY = 'modelline:params:dataset';
-const PARAMS_TTL = 60 * 60 * 24 * 365 * 5;
-const CACHE_TABLES_KEY         = 'modelline:dataset-tables:v1';
-const CACHE_TABLES_TTL         = 3600; // 60 minutes
-const CACHE_COVERAGE_TTL       = 1800; // 30 minutes
-const ALL_INGEST_ERROR_RETENTION_MS = 10_000;
-const ACTIVE_EXCHANGES = [
-  { value: 'bybit', label: 'Bybit' },
-  { value: 'binance', label: 'Binance' },
-  { value: 'kraken', label: 'Kraken' },
-] as const;
-const EXCHANGES = [
-  { value: 'all', label: 'ALL' },
-  ...ACTIVE_EXCHANGES,
-] as const;
-type DatasetExchange = typeof EXCHANGES[number]['value'];
-
-function coverageCacheKey(symbol: string, timeframe: string, exchange: DatasetExchange) {
-  return `modelline:dataset-coverage:v1:${exchange}:${symbol}:${timeframe}`;
-}
-function allCoverageCacheKey(symbol: string, exchange: DatasetExchange) {
-  return `modelline:dataset-allcoverage:v1:${exchange}:${symbol}`;
-}
-
-function todayStr() { return new Date().toISOString().slice(0, 10); }
-function daysAgoStr(n: number) {
-  const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10);
-}
-
-function shortenMessage(value: string | null | undefined, max = 180): string {
-  const normalized = (value ?? '').replace(/\s+/g, ' ').trim();
-  if (!normalized) return '';
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
-}
-
-interface DatasetPageParams {
-  symbol?: string;
-  timeframe?: string;
-  dateFrom?: string;
-  dateTo?: string;
-  exchange?: DatasetExchange;
-}
-
-function loadParams(): DatasetPageParams | null {
-  if (typeof window === 'undefined') return null;
-  try { const r = localStorage.getItem(PARAMS_KEY); return r ? JSON.parse(r) : null; }
-  catch { return null; }
-}
-
-interface DataTableInfo {
-  table_name: string;
-  rows: number;
-  rows_known?: boolean;
-  coverage_pct?: number | null;
-  date_from?: string;
-  date_to?: string;
-}
-
-interface CoverageResult {
-  table_name: string;
-  rows: number;
-  rows_known?: boolean;
-  expected: number | null;
-  coverage_pct?: number | null;
-  gaps: number | null;
-}
-
-interface AllCoverageItem {
-  tf: string;
-  rows: number;
-  rows_known?: boolean;
-  coverage_pct?: number | null;
-  date_from?: string;
-  date_to?: string;
-}
-
-function formatRows(rows: number | undefined, rowsKnown?: boolean): string {
-  if (!rows || rows <= 0) return '—';
-  return rowsKnown === false ? `~${rows.toLocaleString()}` : rows.toLocaleString();
-}
-
-// 'pending'  — local placeholder before kafkaCall returns (or before queue insert)
-// 'queued'   — job persisted in DB, scheduler hasn't picked it up yet
-// 'running'  — scheduler dispatched it; first progress event arrived
-// 'done'/'error' — terminal
-type TfStatus = 'pending' | 'queued' | 'running' | 'done' | 'error';
-
-interface TfMeta {
-  startedAt: number;
-  runningAt?: number;
-  endedAt?: number;
-  rows?: number;
-  pct?: number;    // live job progress 0–100
-  stage?: string;  // current job stage label
-  detail?: string; // backend-provided detail for the current step
-  error?: string;  // error message for failed jobs
-}
-
-/**
- * Adaptive timeout: ~800 ms per 1 000 candles + 45 s base, capped at 10 min.
- * For 1m × 90 days ≈ 149 s; for 1d × 90 days ≈ 45 s.
- */
-function calcIngestTimeout(stepMs: number, startMs: number, endMs: number): number {
-  const candles = Math.ceil((endMs - startMs) / stepMs);
-  return Math.min(Math.round(candles / 1_000 * 800) + 45_000, 600_000);
-}
-
-const INITIAL_STAGES: IngestStage[] = [
-  { id: 'prepare',       label: 'Подготовка таблицы',    status: 'pending', progress: 0 },
-  { id: 'fetch_klines',  label: 'Загрузка свечей',       status: 'pending', progress: 0 },
-  { id: 'fetch_funding', label: 'Загрузка funding rate', status: 'pending', progress: 0 },
-  { id: 'fetch_oi',      label: 'Загрузка open interest',status: 'pending', progress: 0 },
-  { id: 'compute_rsi',   label: 'Вычисление RSI',        status: 'pending', progress: 0 },
-  { id: 'upsert',        label: 'Запись в базу',         status: 'pending', progress: 0 },
-];
-
-// Stage templates for the two repair flows. The audit/repair pipeline emits
-// only a subset of these IDs depending on which "Исправить" button was used.
-const INITIAL_REPAIR_STAGES_OHLCV: RepairStage[] = [
-  { id: 'prepare', label: 'Подготовка',     status: 'pending', progress: 0 },
-  { id: 'fetch',   label: 'Загрузка свечей', status: 'pending', progress: 0 },
-  { id: 'upsert',  label: 'Запись в базу',   status: 'pending', progress: 0 },
-];
-
-const INITIAL_REPAIR_STAGES_RECOMPUTE: RepairStage[] = [
-  { id: 'prepare',   label: 'Подготовка',  status: 'pending', progress: 0 },
-  { id: 'recompute', label: 'Пересчёт фич', status: 'pending', progress: 0 },
-];
-
-// Parse the canonical table name back into (exchange, SYMBOL, timeframe).
-// Legacy Bybit tables remain `{symbol}_{timeframe}`; other exchanges are
-// stored as `{exchange}_{symbol}_{timeframe}`.
-function parseTableName(table: string): { exchange: DatasetExchange; symbol: string; timeframe: string } | null {
-  const parts = table.split('_');
-  if (parts.length < 2) return null;
-  const timeframe = parts.at(-1);
-  if (!timeframe) return null;
-  let exchange: DatasetExchange = 'bybit';
-  let symbolParts = parts.slice(0, -1);
-  const maybeExchange = symbolParts[0]?.toLowerCase();
-  if (maybeExchange && ACTIVE_EXCHANGES.some((item) => item.value === maybeExchange)) {
-    exchange = maybeExchange as DatasetExchange;
-    symbolParts = symbolParts.slice(1);
-  }
-  if (symbolParts.length === 0) return null;
-  return {
-    exchange,
-    symbol: symbolParts.join('_').toUpperCase(),
-    timeframe,
-  };
-}
-
-function buildIngestScopeKey(exchange: DatasetExchange, symbol: string, timeframe: string): string {
-  return `${exchange}::${symbol}::${timeframe}`;
-}
-
-function parseIngestScopeKey(scopeKey: string): { exchange: DatasetExchange | null; symbol: string | null; timeframe: string } {
-  const parts = scopeKey.split('::');
-  if (parts.length >= 3) {
-    return {
-      exchange: parts[0] as DatasetExchange,
-      symbol: parts[1] || null,
-      timeframe: parts.slice(2).join('::'),
-    };
-  }
-  if (parts.length === 2) {
-    return {
-      exchange: null,
-      symbol: parts[0] || null,
-      timeframe: parts[1],
-    };
-  }
-  return {
-    exchange: null,
-    symbol: null,
-    timeframe: scopeKey,
-  };
-}
-
-function formatIngestScopeLabel(scopeKey: string): string {
-  const parsed = parseIngestScopeKey(scopeKey);
-  const exchangeLabel = parsed.exchange
-    ? EXCHANGES.find((item) => item.value === parsed.exchange)?.label ?? parsed.exchange.toUpperCase()
-    : null;
-  return [exchangeLabel, parsed.symbol, parsed.timeframe].filter(Boolean).join(' ');
-}
-
-// Strip rows, in execution order — matches INITIAL_STAGES ids one-to-one.
-const STRIP_STAGE_ORDER = ['prepare', 'fetch_klines', 'fetch_funding', 'fetch_oi', 'compute_rsi', 'upsert'] as const;
-
-/** Index of the strip row that the backend job stage currently maps to.
- *  `compute_features`/`done` are past the strip (everything done); unknown → -1. */
-function jobStageToStripIndex(stage?: string | null): number {
-  switch (stage) {
-    case 'starting':
-    case 'prepare':          return 0;
-    case 'fetch':            // legacy alias for the kline fetch
-    case 'fetch_klines':     return 1;
-    case 'fetch_funding':    return 2;
-    case 'fetch_oi':         return 3;
-    case 'compute_rsi':      return 4;
-    case 'upsert':           return 5;
-    case 'compute_features':
-    case 'done':             return STRIP_STAGE_ORDER.length; // past the strip
-    default:                 return -1;
-  }
-}
-
-// Slice of the overall progress each strip stage occupies. Used to derive a
-// smooth, monotonic local 0–100 for stages the backend does NOT report a
-// per-stage `stage_progress` for (prepare / funding / RSI). Monotonic because
-// overall progress is monotonic.
-const STRIP_STAGE_OVERALL_RANGE: Record<string, [number, number]> = {
-  prepare:       [0, 5],
-  fetch_klines:  [5, 40],
-  fetch_funding: [40, 42],
-  fetch_oi:      [42, 50],
-  compute_rsi:   [50, 70],
-  upsert:        [70, 90],
-};
-
-function clampPct(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-/** Local 0–100 for a running strip stage: prefer the backend's own
- *  per-stage `stage_progress`; otherwise map the overall % onto the stage's
- *  range so it still fills 0→100 within that stage. */
-function stripStageLocalPct(stageId: string, job: DatasetJobView): number {
-  if (typeof job.stage_progress === 'number') return clampPct(job.stage_progress);
-  const range = STRIP_STAGE_OVERALL_RANGE[stageId];
-  if (!range) return clampPct(job.progress);
-  const [lo, hi] = range;
-  if (hi <= lo) return 100;
-  return clampPct(((job.progress - lo) / (hi - lo)) * 100);
-}
-
-/** Map a running/finished job's state onto INITIAL_STAGES so IngestProgress
- *  shows a sequential, per-stage strip for job-based ingest. Each stage fills
- *  0→100 within itself; on completion every stage is marked done/100 (so the
- *  strip never freezes mid-run when the terminal SSE/poll update arrives). */
-function mapJobToStages(prev: IngestStage[], job: DatasetJobView): IngestStage[] {
-  const succeeded = job.status === 'succeeded' || job.status === 'skipped';
-  const failed = job.status === 'failed';
-  const cur = jobStageToStripIndex(job.stage);
-  return prev.map((s, i) => {
-    if (succeeded) return { ...s, status: 'done' as const, progress: 100 };
-    if (failed)    return { ...s, status: i <= cur && cur >= 0 ? 'error' as const : 'pending' as const };
-    if (cur < 0)   return { ...s, status: 'pending' as const };
-    if (i < cur)   return { ...s, status: 'done' as const, progress: 100 };
-    if (i === cur) return { ...s, status: 'running' as const, progress: stripStageLocalPct(s.id, job) };
-    return { ...s, status: 'pending' as const };
-  });
-}
-
-function IngestProgress({ stages }: { stages: IngestStage[] }) {
-  return (
-    <div className="flex flex-col gap-2 pt-2">
-      {stages.map(s => (
-        <div key={s.id} className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
-            <div className="flex-shrink-0 w-3.5 h-3.5 flex items-center justify-center">
-              {s.status === 'pending' && (
-                <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/30" />
-              )}
-              {s.status === 'running' && (
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
-              )}
-              {s.status === 'done' && (
-                <CheckCircle2 className="w-3.5 h-3.5 text-success" />
-              )}
-              {s.status === 'error' && (
-                <XCircle className="w-3.5 h-3.5 text-destructive" />
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <span className={cn(
-                'text-xs',
-                s.status === 'pending' && 'text-muted-foreground',
-                s.status === 'error' && 'text-destructive',
-              )}>
-                {s.label}
-              </span>
-              {s.detail && s.status !== 'pending' && (
-                <div className="text-[10px] text-muted-foreground truncate">{s.detail}</div>
-              )}
-            </div>
-            {s.status === 'running' && (
-              <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
-                {s.progress}%
-              </span>
-            )}
-          </div>
-          {s.status === 'running' && (
-            <SmoothProgress value={s.progress} running className="h-0.5 w-full ml-6" />
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function humanizeJobStage(stage?: string | null): string {
-  switch (stage) {
-    case 'starting':
-      return 'Запуск job';
-    case 'prepare':
-      return 'Подготовка таблицы';
-    case 'fetch':
-      return 'Загрузка источников';
-    case 'fetch_klines':
-      return 'Загрузка свечей';
-    case 'fetch_funding':
-      return 'Загрузка funding';
-    case 'fetch_oi':
-      return 'Загрузка open interest';
-    case 'compute_rsi':
-      return 'Расчёт RSI';
-    case 'upsert':
-      return 'Запись в БД';
-    case 'compute_features':
-      return 'Пересчёт фич';
-    default:
-      return stage ? stage.replace(/_/g, ' ') : 'Ожидание статуса';
-  }
-}
-
-const INGEST_EXECUTION_SLOT_COUNT = 4;
-
-function AllIngestProgress({
-  statuses,
-  meta,
-  jobs,
-  jobIds,
-}: {
-  statuses: Record<string, TfStatus>;
-  meta:     Record<string, TfMeta>;
-  jobs:     DatasetJobView[];
-  jobIds:   Record<string, string>;
-}) {
-  const [, setTick] = useState(0);
-  const hasActive = Object.values(statuses).some(s => s === 'running' || s === 'queued');
-  useEffect(() => {
-    if (!hasActive) return;
-    const id = setInterval(() => setTick(t => t + 1), 1_000);
-    return () => clearInterval(id);
-  }, [hasActive]);
-
-  function fmtDur(ms: number): string {
-    if (ms < 1_000) return '<1с';
-    if (ms < 60_000) return `${Math.round(ms / 1_000)}с`;
-    const m = Math.floor(ms / 60_000);
-    const s = Math.round((ms % 60_000) / 1_000);
-    return `${m}м${s}с`;
-  }
-
-  const jobsById = new Map(jobs.map(job => [job.job_id, job]));
-  const rows = Object.keys(statuses).map(scopeKey => {
-    const jobId = jobIds[scopeKey];
-    const job = jobId ? jobsById.get(jobId) : undefined;
-    const m = meta[scopeKey];
-    return {
-      scopeKey,
-      label: formatIngestScopeLabel(scopeKey),
-      status: statuses[scopeKey],
-      meta: m,
-      job,
-      jobId,
-    };
-  });
-
-  const runningRows = rows
-    .filter(row => row.status === 'running')
-    .sort((a, b) => (a.meta?.runningAt ?? a.meta?.startedAt ?? 0) - (b.meta?.runningAt ?? b.meta?.startedAt ?? 0));
-  const queuedRows = rows
-    .filter(row => row.status === 'queued')
-    .sort((a, b) => (a.meta?.startedAt ?? 0) - (b.meta?.startedAt ?? 0));
-  const doneRows = rows.filter(row => row.status === 'done');
-  const errorRows = rows.filter(row => row.status === 'error');
-  const recentRows = [...doneRows, ...errorRows]
-    .sort((a, b) => (b.meta?.endedAt ?? 0) - (a.meta?.endedAt ?? 0))
-    .slice(0, 6);
-
-  const stalledMs = queuedRows.length > 0 && runningRows.length === 0
-    ? Date.now() - Math.min(...queuedRows.map(row => row.meta?.startedAt ?? Date.now()))
-    : null;
-  const isStalled = stalledMs != null && stalledMs >= 15_000;
-
-  return (
-    <div className="pt-2 space-y-3">
-      <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-4">
-        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
-          <div className="text-muted-foreground">Execution slots</div>
-          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{runningRows.length} / {INGEST_EXECUTION_SLOT_COUNT}</div>
-        </div>
-        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
-          <div className="text-muted-foreground">Queue</div>
-          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{queuedRows.length}</div>
-        </div>
-        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
-          <div className="text-muted-foreground">Done</div>
-          <div className="mt-0.5 font-semibold tabular-nums text-foreground">{doneRows.length}</div>
-        </div>
-        <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
-          <div className="text-muted-foreground">Errors</div>
-          <div className="mt-0.5 font-semibold tabular-nums text-destructive">{errorRows.length}</div>
-        </div>
-      </div>
-
-      {isStalled && (
-        <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-[11px] text-yellow-200">
-          Очередь есть, но ни один execution slot не активен уже {fmtDur(stalledMs ?? 0)}. Это похоже на stalled-state между queue и scheduler.
-        </div>
-      )}
-
-      <div className="space-y-2">
-        <div className="text-[11px] font-medium text-foreground">Execution slots</div>
-        <div className="grid gap-2">
-          {Array.from({ length: Math.max(INGEST_EXECUTION_SLOT_COUNT, runningRows.length) }, (_, slotIdx) => {
-            const row = runningRows[slotIdx];
-            if (!row) {
-              return (
-                <div key={slotIdx} className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Slot {slotIdx + 1}</span>
-                    <span className="text-[10px] text-muted-foreground">idle</span>
-                  </div>
-                  <div className="mt-1 text-[11px] text-muted-foreground">
-                    {queuedRows.length > 0 ? 'Ожидает следующую queued job' : 'Нет активных ingest jobs'}
-                  </div>
-                </div>
-              );
-            }
-
-            const stage = humanizeJobStage(row.meta?.stage ?? row.job?.stage);
-            const detail = row.job?.detail ?? row.meta?.detail ?? 'Job исполняется в microservice_data';
-            const pct = row.job?.progress ?? row.meta?.pct ?? 0;
-            const elapsed = Date.now() - (row.meta?.runningAt ?? row.meta?.startedAt ?? Date.now());
-
-            return (
-              <div key={row.scopeKey} className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Slot {slotIdx + 1}</span>
-                      <span className="text-xs font-mono text-foreground">{row.label}</span>
-                      <span className="text-[10px] text-muted-foreground">{row.jobId ? `job ${row.jobId.slice(0, 8)}` : 'job'}</span>
-                    </div>
-                    <div className="mt-1 text-[11px] font-medium text-foreground">{stage}</div>
-                    <div className="break-words text-[10px] text-muted-foreground">{shortenMessage(detail)}</div>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <div className="text-xs font-semibold tabular-nums text-primary">{pct}%</div>
-                    <div className="text-[10px] tabular-nums text-muted-foreground">{fmtDur(elapsed)}</div>
-                  </div>
-                </div>
-                <SmoothProgress value={pct} running className="h-1" />
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {queuedRows.length > 0 && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="font-medium text-foreground">Queue</span>
-            <span className="tabular-nums text-muted-foreground">{queuedRows.length} jobs</span>
-          </div>
-          <div className="rounded-md border border-border bg-muted/20 px-3 py-2.5">
-            <div className="flex flex-col gap-1.5">
-              {queuedRows.slice(0, 6).map(row => {
-                const waitMs = Date.now() - (row.meta?.startedAt ?? Date.now());
-                return (
-                  <div key={row.scopeKey} className="flex items-center justify-between gap-2 text-[11px]">
-                    <div className="min-w-0 flex items-center gap-2">
-                      <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/60 bg-muted-foreground/20" />
-                      <span className="font-mono text-foreground">{row.label}</span>
-                      <span className="truncate text-muted-foreground">ждёт планировщика</span>
-                    </div>
-                    <span className="shrink-0 tabular-nums text-muted-foreground">{fmtDur(waitMs)}</span>
-                  </div>
-                );
-              })}
-              {queuedRows.length > 6 && (
-                <div className="text-[10px] text-muted-foreground">+{queuedRows.length - 6} ещё в очереди</div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {recentRows.length > 0 && (
-        <div className="space-y-2">
-          <div className="text-[11px] font-medium text-foreground">Recent results</div>
-          <div className="rounded-md border border-border bg-muted/20 px-3 py-2.5">
-            <div className="flex flex-col gap-1.5">
-              {recentRows.map(row => {
-                const elapsed = row.meta?.endedAt != null
-                  ? row.meta.endedAt - (row.meta.runningAt ?? row.meta.startedAt)
-                  : undefined;
-                const isError = row.status === 'error';
-                const completedRows = row.meta?.rows ?? 0;
-                const recentMessage = isError
-                  ? shortenMessage(row.meta?.error ?? 'Job failed')
-                  : shortenMessage(row.meta?.detail ?? (completedRows > 0 ? 'Job завершена' : 'Дозагрузка не потребовалась'));
-                return (
-                  <div key={row.scopeKey} className="flex items-start justify-between gap-3 text-[11px]">
-                    <div className="min-w-0 flex items-start gap-2">
-                      {isError
-                        ? <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
-                        : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />}
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className={cn('font-mono', isError ? 'text-destructive' : 'text-foreground')}>{row.label}</span>
-                          {row.meta?.rows !== undefined && !isError && (
-                            <span className="tabular-nums text-muted-foreground">
-                              {completedRows > 0 ? `${completedRows.toLocaleString()} новых строк` : 'без новых строк'}
-                            </span>
-                          )}
-                        </div>
-                        <div className={cn('break-words text-[10px]', isError ? 'text-destructive/80' : 'text-muted-foreground')}>
-                          {recentMessage}
-                        </div>
-                      </div>
-                    </div>
-                    {elapsed !== undefined && (
-                      <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">{fmtDur(elapsed)}</span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {!hasActive && recentRows.length === 0 && (
-        <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2.5 text-[11px] text-muted-foreground">
-          Ingest jobs ещё не стартовали для выбранного диапазона.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function formatIngestSuccessToast(rows?: number | null): string {
-  const completedRows = rows ?? 0;
-  return completedRows > 0
-    ? `Ingest завершён: ${completedRows.toLocaleString()} новых строк`
-    : 'Ingest завершён: новых строк не потребовалось';
-}
-
-function formatErrorHint(msg: string): string {
-  if (/timeout|timed out/i.test(msg)) return 'Таймаут ответа';
-  if (/table not found/i.test(msg))   return 'Таблица не найдена';
-  const colonIdx = msg.indexOf('column_stats failed:');
-  if (colonIdx !== -1) {
-    const tail = msg.slice(colonIdx + 'column_stats failed:'.length).trim();
-    return tail.length > 45 ? tail.slice(0, 45) + '…' : tail;
-  }
-  return msg.length > 45 ? msg.slice(0, 45) + '…' : msg;
-}
 
 export default function DatasetPage() {
   const { toast } = useToast();

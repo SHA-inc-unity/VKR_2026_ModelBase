@@ -20,6 +20,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
 import type { BarDatum } from '@/components/charts/CoverageBar';
+import {
+  HEALTH_TIMEOUT,
+  TABLES_TIMEOUT,
+  COVERAGE_TIMEOUT,
+  DASHBOARD_CACHE_KEY,
+  DASHBOARD_CACHE_TTL,
+  DASHBOARD_EXCHANGES,
+  hasTableRows,
+  getTableExchange,
+  type DashboardCache,
+  type DashboardExchangeFilter,
+} from './_dashboard/constants';
+import { ServiceCard } from './_dashboard/ServiceCard';
+import { StatCard } from './_dashboard/StatCard';
 
 // Dynamic import - avoids Recharts SSR errors in Next.js
 const CoverageBar = dynamic(
@@ -27,142 +41,7 @@ const CoverageBar = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-[220px] w-full" /> },
 );
 
-const HEALTH_TIMEOUT   = 5_000;
-const TABLES_TIMEOUT   = 8_000;
-const COVERAGE_TIMEOUT = 5_000;
-
-const DASHBOARD_CACHE_KEY = 'modelline:dashboard:v1';
-const DASHBOARD_CACHE_TTL = 3600; // 1 hour
-
-interface DashboardCache {
-  tables: string[];
-  coverage: Record<string, TableCoverage>;
-  modelCount: number | null;
-}
-
-function hasTableRows(cv: TableCoverage | undefined): boolean {
-  if (!cv?.exists) return false;
-  if (cv.rows_known === false) return cv.max_ts_ms !== null;
-  return (cv.rows ?? 0) > 0;
-}
-
-type DashboardExchange = 'bybit' | 'binance' | 'kraken';
-type DashboardExchangeFilter = 'all' | DashboardExchange;
-
-const DASHBOARD_EXCHANGES: DashboardExchange[] = ['bybit', 'binance', 'kraken'];
-
-function getTableExchange(table: string): DashboardExchange {
-  if (table.startsWith('binance_')) return 'binance';
-  if (table.startsWith('kraken_')) return 'kraken';
-  return 'bybit';
-}
-
-// в”Ђв”Ђ Sub-components в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-type AccentColor = 'primary' | 'success' | 'warning' | 'destructive';
-
-const ACCENT_BORDER: Record<AccentColor, string> = {
-  primary:     'border-l-primary',
-  success:     'border-l-success',
-  warning:     'border-l-warning',
-  destructive: 'border-l-destructive',
-};
-
-// в”Ђв”Ђ Service card (horizontal, bento row) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-function ServiceCard({
-  name, stack, health, loading, lastSuccess,
-}: {
-  name: string;
-  stack: string[];
-  health: ServiceHealth | null;
-  loading: boolean;
-  lastSuccess: Date | null;
-}) {
-  const ok = health?.status === 'ok';
-  const hasData = health !== null;
-
-  return (
-    <Card className="flex flex-col xs:flex-row xs:items-center gap-3 xs:gap-5 px-4 xs:px-6 py-4">
-      {/* Left - name + stack */}
-      <div className="flex-1 min-w-0">
-        <div className="font-semibold text-sm truncate">{name}</div>
-        <div className="flex gap-1.5 mt-1.5 flex-wrap">
-          {stack.map(s => (
-            <Badge key={s} variant="secondary" className="text-[10px] px-1.5 py-0">{s}</Badge>
-          ))}
-        </div>
-      </div>
-
-      {/* Center - status dot + label */}
-      <div className="flex items-center gap-2.5 flex-shrink-0 xs:min-w-[110px]">
-        {!hasData && loading ? (
-          <>
-            <Skeleton className="w-2.5 h-2.5 rounded-full" />
-            <Skeleton className="h-4 w-12" />
-          </>
-        ) : (
-          <>
-            <span
-              className={cn(
-                'w-2.5 h-2.5 rounded-full flex-shrink-0',
-                ok ? 'bg-success status-dot-ok' : 'bg-destructive',
-              )}
-            />
-            <span className={cn('text-sm font-medium', ok ? 'text-success' : 'text-destructive')}>
-              {ok ? 'Online' : 'Error'}
-            </span>
-          </>
-        )}
-      </div>
-
-      {/* Right - last seen */}
-      <div className="flex-shrink-0 text-left xs:text-right xs:min-w-[140px]">
-        {!hasData && loading ? (
-          <Skeleton className="h-4 w-28 ml-auto" />
-        ) : ok && lastSuccess ? (
-          <div>
-            <div className="text-xs text-muted-foreground">Last seen</div>
-            <div className="text-xs font-medium mt-0.5">{lastSuccess.toLocaleTimeString()}</div>
-          </div>
-        ) : health?.error ? (
-          <span className="text-xs text-destructive truncate max-w-[140px]">{health.error}</span>
-        ) : (
-          <span className="text-xs text-muted-foreground">–</span>
-        )}
-      </div>
-    </Card>
-  );
-}
-
-// в”Ђв”Ђ Stat card в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-function StatCard({
-  label, value, loading, icon: Icon, accentColor,
-}: {
-  label: string;
-  value: string;
-  loading: boolean;
-  icon: React.ComponentType<{ className?: string }>;
-  accentColor?: AccentColor;
-}) {
-  return (
-    <Card className={cn('border-l-4', accentColor && ACCENT_BORDER[accentColor])}>
-      <CardHeader className="pb-2 pt-5 px-5">
-        <CardTitle className="text-xs font-medium text-muted-foreground flex items-center gap-2">
-          <Icon className="w-3.5 h-3.5" />
-          {label}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="px-5 pb-5">
-        {loading ? (
-          <Skeleton className="h-8 w-24" />
-        ) : (
-          <div className="text-3xl font-bold tracking-tight">{value}</div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-// в”Ђв”Ђ Page в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+// в”Ђв”Ђ Page в”Ђв”Ђ
 export default function DashboardPage() {
   const { t } = useLocale();
   const [dataHealth,      setDataHealth]      = useState<ServiceHealth | null>(null);

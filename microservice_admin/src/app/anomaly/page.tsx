@@ -2,7 +2,7 @@
 import dynamic from 'next/dynamic';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { cacheRead, cacheWrite } from '@/lib/cacheClient';
-import { Download, Info, Loader2, RefreshCw, ShieldAlert, Wand2 } from 'lucide-react';
+import { Download, Loader2, RefreshCw, ShieldAlert, Wand2 } from 'lucide-react';
 import { kafkaCall } from '@/lib/kafkaClient';
 import { Topics } from '@/lib/topics';
 import { useToast } from '@/components/Toast';
@@ -17,7 +17,7 @@ import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Collapsible } from '@/components/ui/collapsible';
-import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { downloadCsv, downloadJson, buildReportFilename } from '@/lib/exportFile';
 import { cn } from '@/lib/utils';
@@ -31,6 +31,41 @@ import {
   localizeAnomalyDetails,
   localizeAnomalyRuntimeMessage,
 } from '@/lib/anomalyTranslations';
+import type {
+  ColumnStat,
+  ColumnStatsResponse,
+  HistogramResponse,
+  BrowseResponse,
+  TimeSeriesResponse,
+  DetectAnomaliesResponse,
+  CleanPreviewResponse,
+  CleanApplyResponse,
+  DatasetStatusResponse,
+  DbscanResponse,
+  IForestResponse,
+  DistributionResponse,
+  AuditLogResponse,
+  CleanOpKey,
+} from './_lib/types';
+import {
+  PARAMS_KEY,
+  ANOMALY_CACHE_TTL,
+  anomalyCacheKey,
+  loadParams,
+  isNumeric,
+  fmtNum,
+  metaFor,
+  TIMELINE_TYPE_ORDER,
+} from './_lib/constants';
+import {
+  InfoTip,
+  ParamSection,
+  ParamRow,
+  NumInput,
+  NumField,
+  Stat,
+  CleanOpCard,
+} from './_components/controls';
 
 // Dynamic import — avoids Recharts SSR errors
 const HistogramChart = dynamic(
@@ -52,263 +87,6 @@ const ReturnDistributionChart = dynamic(
   () => import('@/components/charts/ReturnDistributionChart').then(m => m.ReturnDistributionChart),
   { ssr: false, loading: () => <Skeleton className="h-[260px] w-full" /> },
 );
-
-const PARAMS_KEY = 'modelline:params:anomaly';
-const ANOMALY_CACHE_TTL = 1800; // 30 minutes
-
-function anomalyCacheKey(symbol: string, timeframe: string): string {
-  return `modelline:anomaly:v1:${symbol}:${timeframe}`;
-}
-
-function loadParams() {
-  if (typeof window === 'undefined') return null;
-  try { const r = localStorage.getItem(PARAMS_KEY); return r ? JSON.parse(r) : null; }
-  catch { return null; }
-}
-
-// ── Backend response shapes ──────────────────────────────────────────────────
-
-interface ColumnStat {
-  name: string;
-  dtype: string;
-  non_null: number;
-  null_count: number;
-  null_pct: number;
-  min: number | null;
-  max: number | null;
-  mean: number | null;
-  std: number | null;
-}
-
-interface ColumnStatsResponse {
-  table: string;
-  total_rows: number;
-  columns: ColumnStat[];
-  error?: string;
-}
-
-interface HistogramBucket {
-  range_start: number;
-  range_end: number;
-  count: number;
-}
-
-interface HistogramResponse {
-  column: string;
-  min: number | null;
-  max: number | null;
-  buckets: HistogramBucket[];
-  error?: string;
-}
-
-interface BrowseResponse {
-  table: string;
-  page: number;
-  page_size: number;
-  /**
-   * Exact COUNT(*). Source of truth for pagination math.
-   * Only present when the backend computed it (typically page 0).
-   * Once received, the UI must pin this value and IGNORE the estimate
-   * across subsequent pages — exact never gets overwritten by estimate.
-   */
-  total_rows: number | null;
-  /**
-   * pg_class.reltuples — informational only. May lag by a few percent.
-   * Must NOT drive page-count math or button availability.
-   */
-  total_rows_estimate?: number | null;
-  total_rows_known?: boolean;
-  rows: Record<string, unknown>[];
-  error?: string;
-}
-
-interface TimeSeriesPoint {
-  timestamp_ms: number;
-  value: number | null;
-  min?: number | null;
-  max?: number | null;
-  count?: number | null;
-}
-
-interface TimeSeriesResponse {
-  table: string;
-  column: string;
-  max_points: number;
-  source_rows: number;
-  start_ms: number | null;
-  end_ms: number | null;
-  downsampled: boolean;
-  points: TimeSeriesPoint[];
-  error?: string;
-}
-
-// ── Anomaly + clean response shapes ─────────────────────────────────────────
-
-interface AnomalyRow {
-  ts_ms: number;
-  anomaly_type: string;
-  severity: 'critical' | 'warning';
-  column: string | null;
-  value: number | null;
-  details: string | null;
-}
-
-interface DetectAnomaliesResponse {
-  table: string;
-  total: number;
-  critical: number;
-  warning: number;
-  by_type: Record<string, number>;
-  /** Populated only when page/page_size are given in the request. */
-  rows?: AnomalyRow[] | null;
-  /** Up-to-200-row priority sample always returned by DataService. */
-  sample?: AnomalyRow[];
-  report_url?: string;
-  has_more?: boolean;
-  page?: number;
-  page_size?: number;
-  error?: string;
-}
-
-interface CleanPreviewResponse {
-  table: string;
-  counts: {
-    drop_duplicates:      number;
-    fix_ohlc:             number;
-    fill_zero_streaks:    number;
-    delete_by_timestamps: number;
-    fill_gaps:            number;
-  };
-  error?: string;
-}
-
-interface CleanApplyResponse {
-  table: string;
-  audit_id: number;
-  rows_affected: Record<string, number>;
-  total: number;
-  error?: string;
-}
-
-interface DatasetStatusResponse {
-  loaded: boolean;
-  symbol?: string;
-  timeframe?: string;
-  table_name?: string;
-  row_count?: number;
-  memory_mb_on_disk?: number;
-  loaded_at?: number;
-  error?: string;
-}
-
-interface DbscanResponse {
-  summary?: {
-    total_rows:  number;
-    sample_size: number;
-    n_clusters:  number;
-    n_anomalies: number;
-    eps:         number;
-    min_samples: number;
-    columns:     string[];
-  };
-  anomaly_timestamps_ms?: number[];
-  error?: string;
-}
-
-interface IForestResponse {
-  summary?: {
-    total_rows:    number;
-    sample_size:   number;
-    n_anomalies:   number;
-    contamination: number;
-    n_estimators:  number;
-    columns:       string[];
-  };
-  anomaly_timestamps_ms?: number[];
-  error?: string;
-}
-
-interface DistributionBin { x: number; count: number; normal: number }
-interface DistributionResponse {
-  column?:   string;
-  n?:        number;
-  mean?:     number;
-  std?:      number;
-  skewness?: number;
-  kurtosis?: number;
-  jb_stat?:  number;
-  jb_p?:     number;
-  verdict?:  string;
-  bins?:     DistributionBin[];
-  error?:    string;
-}
-
-interface AuditLogEntry {
-  id: number;
-  table_name: string;
-  operation: string;
-  params: string;
-  rows_affected: number;
-  applied_at_ms: number;
-}
-interface AuditLogResponse { entries: AuditLogEntry[]; error?: string }
-
-// ── Numeric dtype detection (mirrors backend whitelist) ──────────────────────
-
-const NUMERIC_TYPES = new Set([
-  'numeric', 'double precision', 'real', 'integer', 'bigint', 'smallint',
-]);
-const isNumeric = (dtype: string) => NUMERIC_TYPES.has(dtype.toLowerCase());
-
-function fmtNum(v: number | null | undefined, digits = 4): string {
-  if (v === null || v === undefined || !isFinite(v)) return '–';
-  const abs = Math.abs(v);
-  if (abs === 0)     return '0';
-  if (abs >= 1e6)    return v.toExponential(2);
-  if (abs >= 1000)   return v.toFixed(0);
-  if (abs >= 1)      return v.toFixed(Math.min(4, digits));
-  return v.toPrecision(digits);
-}
-
-// ── Severity ranking for Smart Suggestions ──────────────────────────────────
-//
-// Map each backend anomaly_type → (rank, recommendedOp). Lower rank = higher
-// priority (critical first). The recommendedOp is a Clean-section checkbox
-// key that the "Apply" button will toggle on before triggering Apply.
-
-type CleanOpKey = 'drop_duplicates' | 'fix_ohlc' | 'fill_zero_streaks'
-                | 'delete_by_timestamps' | 'fill_gaps';
-
-interface AnomalyTypeMeta {
-  rank: number;          // 0 = critical, 1 = warning, 2 = info
-  recommendedOp?: CleanOpKey;
-}
-
-const ANOMALY_TYPE_META: Record<string, AnomalyTypeMeta> = {
-  duplicate:                { rank: 0, recommendedOp: 'drop_duplicates' },
-  ohlc_violation:           { rank: 0, recommendedOp: 'fix_ohlc' },
-  negative_value:           { rank: 0 },
-  stale_price:              { rank: 0 },
-  return_outlier:           { rank: 0 },
-  gap:                      { rank: 1, recommendedOp: 'fill_gaps' },
-  zero_streak:              { rank: 1, recommendedOp: 'fill_zero_streaks' },
-  iqr:                      { rank: 1 },
-  zscore:                   { rank: 1 },
-  rolling_zscore:           { rank: 1 },
-  rolling_iqr:              { rank: 1 },
-  volume_turnover_mismatch: { rank: 1 },
-};
-
-function metaFor(type: string): AnomalyTypeMeta {
-  return ANOMALY_TYPE_META[type] ?? { rank: 2 };
-}
-
-// ── Stable order of anomaly type rows on the timeline chart ─────────────────
-const TIMELINE_TYPE_ORDER: string[] = [
-  'duplicate', 'ohlc_violation', 'negative_value', 'stale_price', 'return_outlier',
-  'gap', 'zero_streak', 'rolling_zscore', 'rolling_iqr',
-  'iqr', 'zscore', 'volume_turnover_mismatch',
-];
 
 export default function AnomalyPage() {
   const { toast } = useToast();
@@ -2068,173 +1846,5 @@ export default function AnomalyPage() {
       </Collapsible>
     </div>
     </TooltipProvider>
-  );
-}
-
-// ── InfoTip ─────────────────────────────────────────────────────────────────
-
-function InfoTip({ text }: { text: string }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex items-center cursor-help text-muted-foreground/60 hover:text-muted-foreground">
-          <Info className="w-3 h-3" />
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-xs text-xs">
-        <p>{text}</p>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
-// ── Tiny helper components (kept inline to avoid extra files) ────────────────
-
-function ParamSection({
-  title, enabled, onToggle, children, info,
-}: {
-  title: string;
-  enabled: boolean;
-  onToggle: (v: boolean) => void;
-  children: React.ReactNode;
-  info?: string;
-}) {
-  return (
-    <div className={cn(
-      'rounded-md border p-3 space-y-2',
-      enabled ? 'border-border' : 'border-border opacity-60',
-    )}>
-      <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer">
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={e => onToggle(e.target.checked)}
-        />
-        {title}
-        {info && <InfoTip text={info} />}
-      </label>
-      {enabled && <div className="pl-6 space-y-1.5">{children}</div>}
-    </div>
-  );
-}
-
-function ParamRow({ label, children, info }: { label: string; children: React.ReactNode; info?: string }) {
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="text-muted-foreground w-32 flex-shrink-0 flex items-center gap-0.5">
-        {label}{info && <InfoTip text={info} />}
-      </span>
-      {children}
-    </div>
-  );
-}
-
-function NumInput({
-  value, onChange, min, max, step,
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-}) {
-  return (
-    <input
-      type="number"
-      value={value}
-      min={min}
-      max={max}
-      step={step}
-      onChange={e => {
-        const v = parseFloat(e.target.value);
-        onChange(Number.isFinite(v) ? v : 0);
-      }}
-      className="h-8 w-28 rounded-md border bg-background px-2 text-xs"
-    />
-  );
-}
-
-function NumField({
-  label, value, onChange, min, max, step, width, info,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-  width?: string;
-  info?: string;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-xs text-muted-foreground flex items-center gap-0.5">{label}{info && <InfoTip text={info} />}</label>
-      <input
-        type="number"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={e => {
-          const v = parseFloat(e.target.value);
-          onChange(Number.isFinite(v) ? v : 0);
-        }}
-        className="h-9 rounded-md border bg-background px-2 text-sm"
-        style={{ width }}
-      />
-    </div>
-  );
-}
-
-function Stat({
-  label, value, accent,
-}: {
-  label: string;
-  value: string;
-  accent?: 'destructive' | 'warning';
-}) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={cn(
-        'text-lg font-bold tabular-nums',
-        accent === 'destructive' && 'text-destructive',
-        accent === 'warning'     && 'text-warning',
-      )}>
-        {value}
-      </p>
-    </div>
-  );
-}
-
-function CleanOpCard({
-  checked, onCheck, label, count, children,
-}: {
-  checked: boolean;
-  onCheck: (v: boolean) => void;
-  label: string;
-  count?: number;
-  children?: React.ReactNode;
-}) {
-  return (
-    <div className={cn(
-      'rounded-md border p-3 space-y-2',
-      checked ? 'border-primary/40 bg-primary/5' : 'border-border',
-    )}>
-      <label className="flex items-center gap-2 text-sm cursor-pointer">
-        <input
-          type="checkbox"
-          checked={checked}
-          onChange={e => onCheck(e.target.checked)}
-        />
-        <span className="flex-1">{label}</span>
-        {count !== undefined && (
-          <Badge variant="outline" className="tabular-nums">
-            {count.toLocaleString()}
-          </Badge>
-        )}
-      </label>
-      {children}
-    </div>
   );
 }
