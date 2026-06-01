@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace DataService.API.Jobs;
 
 public sealed record MarketWatcherLiveRowSnapshot(
@@ -64,11 +66,14 @@ public sealed class MarketWatcherRuntimeState
     private long? _startedAtMs;
     private long? _lastHeartbeatAtMs;
     private long? _lastFlushAtMs;
-    private long? _lastTickAtMs;
     private int _trackedSymbols;
     private int _configuredPairs;
-    private int _liveRows;
-    private readonly Dictionary<string, MarketWatcherLiveRowSnapshot> _rows = new(StringComparer.OrdinalIgnoreCase);
+    // Hot-path live-price rows: lock-free so per-tick UpsertLiveRow and the
+    // 400ms freshness heartbeat never serialize against each other or against
+    // status polls. Values are immutable records (whole-snapshot publish).
+    private readonly ConcurrentDictionary<string, MarketWatcherLiveRowSnapshot> _rows = new(StringComparer.OrdinalIgnoreCase);
+    // Last observed tick time, written lock-free on the hot path (0 = never).
+    private long _lastTickAtMs;
     private long _ticksInLastWindow;
     private int _lastFlushRows;
     private string[] _exchanges = [];
@@ -160,9 +165,8 @@ public sealed class MarketWatcherRuntimeState
             _startedAtMs = now;
             _lastHeartbeatAtMs = now;
             _lastFlushAtMs = null;
-            _lastTickAtMs = null;
+            Interlocked.Exchange(ref _lastTickAtMs, 0);
             _trackedSymbols = 0;
-            _liveRows = 0;
             _rows.Clear();
             _ticksInLastWindow = 0;
             _lastFlushRows = 0;
@@ -188,10 +192,11 @@ public sealed class MarketWatcherRuntimeState
             _message = message;
             _lastHeartbeatAtMs = now;
             _lastFlushAtMs = now;
-            _lastTickAtMs = lastTickAtMs ?? _lastTickAtMs;
+            // Tick time is owned lock-free by UpsertLiveRow; only forward it here
+            // if the caller explicitly supplied a value.
+            if (lastTickAtMs is long tickMs) Interlocked.Exchange(ref _lastTickAtMs, tickMs);
             _configuredPairs = configuredPairs;
             _trackedSymbols = trackedSymbols;
-            _liveRows = _rows.Count > 0 ? _rows.Count : liveRows;
             _ticksInLastWindow = ticksInLastWindow;
             _lastFlushRows = lastFlushRows;
         }
@@ -199,13 +204,11 @@ public sealed class MarketWatcherRuntimeState
 
     public void UpsertLiveRow(MarketWatcherLiveRowSnapshot row)
     {
-        var key = BuildRowKey(row.Exchange, row.Symbol);
-        lock (_gate)
-        {
-            _rows[key] = row;
-            _liveRows = _rows.Count;
-            _lastTickAtMs = row.LastPriceTimestampMs;
-        }
+        // Hot path — no lock. ConcurrentDictionary indexer-set is safe for
+        // concurrent writers (Binance + each Bybit chunk run on their own
+        // socket threads); the value is an immutable record.
+        _rows[BuildRowKey(row.Exchange, row.Symbol)] = row;
+        Interlocked.Exchange(ref _lastTickAtMs, row.LastPriceTimestampMs);
     }
 
     /// <summary>
@@ -220,51 +223,42 @@ public sealed class MarketWatcherRuntimeState
     /// </summary>
     public void RefreshLiveRowFreshness(IReadOnlySet<string> aliveExchanges, long nowMs)
     {
-        lock (_gate)
+        // Lock-free: enumerate the concurrent dict (weakly-consistent snapshot)
+        // and CAS each stale row. TryUpdate only overwrites if no fresher tick
+        // replaced it meanwhile, so we never clobber a newer price.
+        foreach (var kvp in _rows)
         {
-            if (_rows.Count == 0)
+            var row = kvp.Value;
+            if (!aliveExchanges.Contains(row.Exchange) || row.LastPriceTimestampMs >= nowMs)
             {
-                return;
+                continue;
             }
 
-            foreach (var key in _rows.Keys.ToArray())
-            {
-                var row = _rows[key];
-                if (!aliveExchanges.Contains(row.Exchange) || row.LastPriceTimestampMs >= nowMs)
-                {
-                    continue;
-                }
-
-                _rows[key] = row with { LastPriceTimestampMs = nowMs, UpdatedAtMs = nowMs };
-            }
+            _rows.TryUpdate(kvp.Key, row with { LastPriceTimestampMs = nowMs, UpdatedAtMs = nowMs }, row);
         }
     }
 
     public void RemoveMissingLiveRows(IReadOnlyCollection<(string Exchange, string Symbol)> trackedSymbols)
     {
-        lock (_gate)
+        // Lock-free: runs only at startup/resubscribe. A symbol re-added by a
+        // concurrent tick right after we mark it missing simply survives — it is
+        // in fact still feeding.
+        if (trackedSymbols.Count == 0)
         {
-            if (trackedSymbols.Count == 0)
+            _rows.Clear();
+            return;
+        }
+
+        var allowed = trackedSymbols
+            .Select(item => BuildRowKey(item.Exchange, item.Symbol))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var key in _rows.Keys)
+        {
+            if (!allowed.Contains(key))
             {
-                _rows.Clear();
-                _liveRows = 0;
-                return;
+                _rows.TryRemove(key, out _);
             }
-
-            var allowed = trackedSymbols
-                .Select(item => BuildRowKey(item.Exchange, item.Symbol))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            var staleKeys = _rows.Keys
-                .Where(key => !allowed.Contains(key))
-                .ToArray();
-
-            foreach (var key in staleKeys)
-            {
-                _rows.Remove(key);
-            }
-
-            _liveRows = _rows.Count;
         }
     }
 
@@ -283,26 +277,24 @@ public sealed class MarketWatcherRuntimeState
             ? null
             : search.Trim();
 
-        lock (_gate)
-        {
-            var filtered = _rows.Values
-                .Where(row => normalizedExchange is null
-                    || string.Equals(row.Exchange, normalizedExchange, StringComparison.OrdinalIgnoreCase))
-                .Where(row => normalizedSearch is null
-                    || row.Symbol.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)
-                    || row.Exchange.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)
-                    || (!string.IsNullOrWhiteSpace(row.RealtimeSymbol)
-                        && row.RealtimeSymbol.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)))
-                .OrderBy(row => row.Symbol, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(row => row.Exchange, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+        // Lock-free read over the concurrent dict's point-in-time snapshot.
+        var filtered = _rows.Values
+            .Where(row => normalizedExchange is null
+                || string.Equals(row.Exchange, normalizedExchange, StringComparison.OrdinalIgnoreCase))
+            .Where(row => normalizedSearch is null
+                || row.Symbol.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)
+                || row.Exchange.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrWhiteSpace(row.RealtimeSymbol)
+                    && row.RealtimeSymbol.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(row => row.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(row => row.Exchange, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
-            return new MarketWatcherLiveRowsPage(
-                Items: filtered.Skip(safeOffset).Take(safeLimit).ToArray(),
-                Total: filtered.Length,
-                Limit: safeLimit,
-                Offset: safeOffset);
-        }
+        return new MarketWatcherLiveRowsPage(
+            Items: filtered.Skip(safeOffset).Take(safeLimit).ToArray(),
+            Total: filtered.Length,
+            Limit: safeLimit,
+            Offset: safeOffset);
     }
 
     public void MarkDegraded(string message, string? error = null)
@@ -352,24 +344,30 @@ public sealed class MarketWatcherRuntimeState
 
     public MarketWatcherStatusSnapshot GetSnapshot()
     {
+        // Live rows read off-lock from the concurrent dict (point-in-time
+        // snapshot of immutable records); only scalar status fields are read
+        // under the (now tiny) status lock.
+        // "Tracked symbols" = DISTINCT symbols (pair-aligned with the
+        // currency-pairs center); "live rows" counts per-exchange feeds (same
+        // symbol on bybit + binance = two rows). PerExchange breaks the feeds
+        // down so e.g. 167 = 85 + 82 reconciles with the configured pairs.
+        var rows = _rows.Values.ToArray();
+        var (averageLagMs, maxLagMs) = ComputeLagSnapshot(rows);
+        var distinctSymbols = rows
+            .Select(r => r.Symbol)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        var perExchange = rows
+            .GroupBy(r => r.Exchange, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new MarketWatcherExchangeCount(
+                g.Key,
+                g.Select(r => r.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).Count()))
+            .OrderBy(x => x.Exchange, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var lastTick = Interlocked.Read(ref _lastTickAtMs);
+
         lock (_gate)
         {
-            var (averageLagMs, maxLagMs) = ComputeLagSnapshotUnsafe();
-            // "Tracked symbols" is reported as DISTINCT symbols (pair-aligned with
-            // the currency-pairs center); "live rows" counts per-exchange feeds
-            // (same symbol on bybit + binance = two rows). PerExchange breaks the
-            // feeds down so e.g. 167 = 85 + 82 reconciles with the configured pairs.
-            var distinctSymbols = _rows.Values
-                .Select(r => r.Symbol)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Count();
-            var perExchange = _rows.Values
-                .GroupBy(r => r.Exchange, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new MarketWatcherExchangeCount(
-                    g.Key,
-                    g.Select(r => r.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).Count()))
-                .OrderBy(x => x.Exchange, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
             return new MarketWatcherStatusSnapshot(
                 DesiredEnabled: _desiredEnabled,
                 EffectiveEnabled: _effectiveEnabled,
@@ -378,10 +376,10 @@ public sealed class MarketWatcherRuntimeState
                 StartedAtMs: _startedAtMs,
                 LastHeartbeatAtMs: _lastHeartbeatAtMs,
                 LastFlushAtMs: _lastFlushAtMs,
-                LastTickAtMs: _lastTickAtMs,
+                LastTickAtMs: lastTick == 0 ? null : lastTick,
                 ConfiguredPairs: _configuredPairs,
                 TrackedSymbols: distinctSymbols,
-                LiveRows: _liveRows,
+                LiveRows: rows.Length,
                 PerExchange: perExchange,
                 AverageLagMs: averageLagMs,
                 MaxLagMs: maxLagMs,
@@ -407,15 +405,12 @@ public sealed class MarketWatcherRuntimeState
             return Array.Empty<string>();
         }
 
-        lock (_gate)
-        {
-            return _rows.Values
-                .Where(row => string.Equals(row.Exchange, exchange, StringComparison.OrdinalIgnoreCase))
-                .Select(row => row.Symbol)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-        }
+        return _rows.Values
+            .Where(row => string.Equals(row.Exchange, exchange, StringComparison.OrdinalIgnoreCase))
+            .Select(row => row.Symbol)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     public IReadOnlyList<MarketWatcherLogEntry> ReadLogs(int limit)
@@ -454,9 +449,10 @@ public sealed class MarketWatcherRuntimeState
 
     private static string BuildRowKey(string exchange, string symbol) => $"{exchange}:{symbol}";
 
-    private (long? AverageLagMs, long? MaxLagMs) ComputeLagSnapshotUnsafe()
+    private static (long? AverageLagMs, long? MaxLagMs) ComputeLagSnapshot(
+        IReadOnlyList<MarketWatcherLiveRowSnapshot> rows)
     {
-        if (_rows.Count == 0)
+        if (rows.Count == 0)
         {
             return (null, null);
         }
@@ -464,7 +460,7 @@ public sealed class MarketWatcherRuntimeState
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         long totalLag = 0;
         long maxLag = 0;
-        foreach (var row in _rows.Values)
+        foreach (var row in rows)
         {
             var lag = Math.Max(0, now - row.LastPriceTimestampMs);
             totalLag += lag;
@@ -474,6 +470,6 @@ public sealed class MarketWatcherRuntimeState
             }
         }
 
-        return (Math.Round((double)totalLag / _rows.Count) is var avg ? (long)avg : null, maxLag);
+        return ((long)Math.Round((double)totalLag / rows.Count), maxLag);
     }
 }

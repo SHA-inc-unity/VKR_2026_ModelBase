@@ -47,16 +47,27 @@ interface SseMessage {
   payload: unknown;
 }
 
-export function useEvents(handlers: EventHandlers): void {
-  // Keep the latest handlers without triggering reconnect
+export interface UseEventsOptions {
+  /** Notified on connect (true) / disconnect (false) so a UI can surface a
+   *  "live feed reconnecting" indicator. */
+  onConnectionChange?: (connected: boolean) => void;
+}
+
+export function useEvents(handlers: EventHandlers, options?: UseEventsOptions): void {
+  // Keep the latest handlers/options without triggering reconnect
   const handlersRef = useRef<EventHandlers>(handlers);
   handlersRef.current = handlers;
+  const optionsRef = useRef<UseEventsOptions | undefined>(options);
+  optionsRef.current = options;
 
   useEffect(() => {
     const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-    const es = new EventSource(`${base}/api/events`);
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let closedByUs = false;
+    let backoffMs = 1_000;
 
-    es.onmessage = (event: MessageEvent<string>) => {
+    const dispatch = (event: MessageEvent<string>) => {
       let msg: SseMessage;
       try {
         msg = JSON.parse(event.data) as SseMessage;
@@ -92,12 +103,33 @@ export function useEvents(handlers: EventHandlers): void {
       }
     };
 
-    es.onerror = () => {
-      // EventSource reconnects automatically; no action needed
+    const connect = () => {
+      es = new EventSource(`${base}/api/events`);
+      es.onopen = () => {
+        backoffMs = 1_000;
+        optionsRef.current?.onConnectionChange?.(true);
+      };
+      es.onmessage = dispatch;
+      es.onerror = () => {
+        // Not silent: surface the disconnect so a stale feed is visible.
+        optionsRef.current?.onConnectionChange?.(false);
+        // If the browser gave up (CLOSED), recreate with capped backoff rather
+        // than leaving a permanently dead stream.
+        if (es && es.readyState === EventSource.CLOSED && !closedByUs) {
+          es.close();
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connect, backoffMs);
+          backoffMs = Math.min(backoffMs * 2, 30_000);
+        }
+      };
     };
 
+    connect();
+
     return () => {
-      es.close();
+      closedByUs = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      es?.close();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // open once on mount, close on unmount

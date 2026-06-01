@@ -1483,10 +1483,13 @@ export default function DatasetPage() {
         const msg = `Deleted ${totalDeleted.toLocaleString()} rows across ${successes} timeframes`;
         toast(msg, 'success');
         addEntry({ action: 'Check', params: { symbol, timeframe: 'ALL', exchange }, result: msg, durationMs: Date.now() - t0 });
-        handleListTables();
       } finally {
         operationLockRef.current = false;
         setLoadingDelete(false);
+        // Refresh AFTER releasing the lock — handleListTables early-returns while
+        // operationLockRef is held, so calling it inside the try was a no-op
+        // (the table list stayed stale after a delete).
+        void handleListTables();
       }
     } else {
       const table = makeTableName(symbol, timeframe, exchange);
@@ -1507,7 +1510,6 @@ export default function DatasetPage() {
         const msg = `Deleted ${count.toLocaleString()} rows from ${table}`;
         toast(msg, 'success');
         addEntry({ action: 'Check', params: { symbol, timeframe, exchange }, result: msg, durationMs: Date.now() - t0 });
-        handleListTables();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         toast(msg, 'error');
@@ -1515,6 +1517,8 @@ export default function DatasetPage() {
       } finally {
         operationLockRef.current = false;
         setLoadingDelete(false);
+        // Refresh after the lock is released (see ALL-branch note above).
+        void handleListTables();
       }
     }
   };

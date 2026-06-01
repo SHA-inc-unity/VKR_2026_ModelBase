@@ -231,6 +231,20 @@ public static class MigrationExtensions
 
         if (user is null)
         {
+            // Block creating the insecure default admin/admin account outside
+            // Development. An operator must supply AdminBootstrap:Password (the
+            // launcher prompts for it on a fresh start). Existing admin users are
+            // untouched — this only guards seeding a brand-new default account.
+            var isDevelopment = string.Equals(
+                Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"),
+                "Development", StringComparison.OrdinalIgnoreCase);
+            if (useDefaultBootstrap && !isDevelopment)
+            {
+                throw new InvalidOperationException(
+                    "Refusing to seed the default admin/admin account outside Development. " +
+                    "Set AdminBootstrap:Password (env ADMIN_BOOTSTRAP_PASSWORD).");
+            }
+
             user = User.Create(email, normalizedUsername, passwordService.Hash(password));
             await db.Users.AddAsync(user);
             await db.UserSettings.AddAsync(UserSettings.CreateDefault(user.Id));

@@ -67,9 +67,21 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IAccountService, AccountAppService>();
         services.AddScoped<IExchangeApiKeyService, ExchangeApiKeyService>();
 
-        // AES-GCM encryption singleton (master key from env / config)
+        // AES-GCM encryption singleton (master key from env / config).
+        // Refuse to start on the built-in dev fallback key outside Development —
+        // exchange API secrets would otherwise be encrypted with a key published
+        // in the repo. (Live deployments pass ACCOUNT_API_KEY_MASTER_KEY via env.)
         var masterKey = config["ApiKeyEncryption:MasterKey"]
                         ?? Environment.GetEnvironmentVariable("ACCOUNT_API_KEY_MASTER_KEY");
+        var isDevelopment = string.Equals(
+            Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"),
+            "Development", StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(masterKey) && !isDevelopment)
+        {
+            throw new InvalidOperationException(
+                "ApiKeyEncryption:MasterKey (env ACCOUNT_API_KEY_MASTER_KEY) is required outside Development. " +
+                "Refusing to start with the insecure built-in fallback key.");
+        }
         services.AddSingleton<IAesGcmEncryption>(_ => new AesGcmEncryption(masterKey));
 
         // FluentValidation

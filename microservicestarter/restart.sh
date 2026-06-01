@@ -137,6 +137,48 @@ ensure_env_file() {
     printf '%s' "$env_file"
 }
 
+# See start.sh — prompt once (fresh interactive run) for the account service's
+# admin bootstrap password + API-key master key instead of insecure defaults.
+# Idempotent, no secret echo, data-safe on non-interactive runs.
+configure_account_secrets_env() {
+    local svc_dir env_file
+    svc_dir="$(get_service_directory "microservice_account")" || return 0
+    env_file="$(ensure_env_file "$svc_dir")"
+
+    if [[ -z "$(get_env_value "$env_file" "ADMIN_BOOTSTRAP_PASSWORD")" ]]; then
+        if [[ -t 0 ]]; then
+            local p1 p2
+            while true; do
+                read -rsp "[microservice_account] Пароль admin-пользователя (bootstrap): " p1; echo
+                read -rsp "[microservice_account] Повторите пароль: " p2; echo
+                if [[ -n "$p1" && "$p1" == "$p2" ]]; then break; fi
+                warn "[microservice_account] Пусто или не совпадает — повторите."
+            done
+            set_env_value "$env_file" "ADMIN_BOOTSTRAP_PASSWORD" "$p1"
+            [[ -n "$(get_env_value "$env_file" "ADMIN_BOOTSTRAP_USERNAME")" ]] || set_env_value "$env_file" "ADMIN_BOOTSTRAP_USERNAME" "admin"
+            [[ -n "$(get_env_value "$env_file" "ADMIN_BOOTSTRAP_EMAIL")" ]] || set_env_value "$env_file" "ADMIN_BOOTSTRAP_EMAIL" "admin@modelline.local"
+            info "[microservice_account] Пароль admin сохранён в .env."
+        else
+            warn "[microservice_account] ADMIN_BOOTSTRAP_PASSWORD не задан и нет TTY — вне Development сервис откажется создавать дефолтный admin/admin."
+        fi
+    fi
+
+    if [[ -z "$(get_env_value "$env_file" "ACCOUNT_API_KEY_MASTER_KEY")" ]]; then
+        if [[ -t 0 ]]; then
+            local mk internal_key
+            internal_key="$(get_env_value "$env_file" "INTERNAL_API_KEY")"
+            read -rsp "[microservice_account] Мастер-ключ шифрования API-ключей (Enter — оставить текущий/совместимый): " mk; echo
+            if [[ -z "$mk" ]]; then
+                if [[ -n "$internal_key" ]]; then mk="$internal_key"; else mk="$(openssl rand -base64 32 2>/dev/null)"; fi
+            fi
+            if [[ -n "$mk" ]]; then
+                set_env_value "$env_file" "ACCOUNT_API_KEY_MASTER_KEY" "$mk"
+                info "[microservice_account] Мастер-ключ сохранён в .env."
+            fi
+        fi
+    fi
+}
+
 is_wildcard_bind_addr() {
     local bind_addr="${1:-}"
     [[ -z "$bind_addr" || "$bind_addr" == "0.0.0.0" || "$bind_addr" == "::" || "$bind_addr" == "[::]" ]]
@@ -748,6 +790,9 @@ else
         if [[ " ${selected_services[*]} " == *" microservice_infra "* ]]; then
             if [[ "$MODE" == "noadmin" ]]; then
                 configure_backend_http_facade_env
+            fi
+            if [[ " ${selected_services[*]} " == *" microservice_account "* ]]; then
+                configure_account_secrets_env
             fi
             restart_service "microservice_infra" "$dispatch_mode"
 
