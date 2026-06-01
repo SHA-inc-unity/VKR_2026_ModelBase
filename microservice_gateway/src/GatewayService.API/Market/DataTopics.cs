@@ -14,4 +14,6 @@ public static class DataTopics
     public const string CmdDataDatasetJobsGet   = "cmd.data.dataset.jobs.get";
     public const string CmdDataMarketWatcherRows = "cmd.data.market_watcher.rows";
     public const string CmdDataMarketWatcherTracked = "cmd.data.market_watcher.tracked_symbols";
+    // Currency pairs center (single source of truth) — base/quote vocabularies + cross-product symbols.
+    public const string CmdDataPairsList = "cmd.data.pairs.list";
 }

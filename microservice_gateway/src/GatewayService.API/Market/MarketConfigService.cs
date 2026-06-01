@@ -35,7 +35,7 @@ public sealed class MarketConfigService : IMarketConfigService
     {
         var normalized = NormalizeExchange(exchange);
         var ttl = TimeSpan.FromSeconds(_settings.ConfigCacheTtlSeconds);
-        var key = $"market:config:full:{normalized}:v3";
+        var key = $"market:config:full:{normalized}:v4";
 
         var cached = await _cache.GetAsync<MarketConfigResponse>(key, ct);
         if (cached is { Symbols.Count: > 0 })
@@ -54,7 +54,7 @@ public sealed class MarketConfigService : IMarketConfigService
     /// <inheritdoc />
     public async Task<bool> IsKnownSymbolAsync(string symbol, string? exchange = null, CancellationToken ct = default)
     {
-        var symbols = await GetOrFetchSymbolsAsync(NormalizeExchange(exchange), ct);
+        var symbols = await GetOrFetchSymbolsAsync(NormalizeExchange(exchange), Array.Empty<string>(), ct);
         return symbols.Contains(symbol, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -63,7 +63,8 @@ public sealed class MarketConfigService : IMarketConfigService
     private async Task<MarketConfigResponse> BuildConfigAsync(string exchange, CancellationToken ct)
     {
         var symbolsUpdatedAt = DateTimeOffset.UtcNow;
-        var symbols = await GetOrFetchSymbolsAsync(exchange, ct);
+        var centerPairs = await TryFetchCenterPairsAsync(ct);
+        var symbols = await GetOrFetchSymbolsAsync(exchange, centerPairs.Symbols, ct);
 
         var timeframeDtos = TimeframeMap.All
             .Select(tf => new TimeframeDto(
@@ -98,6 +99,7 @@ public sealed class MarketConfigService : IMarketConfigService
         var response = new MarketConfigResponse
         {
             Symbols          = symbols,
+            Quotes           = centerPairs.Quotes,
             Timeframes       = timeframeDtos,
             CandleCounts     = constraints,
             Defaults         = defaults,
@@ -112,7 +114,7 @@ public sealed class MarketConfigService : IMarketConfigService
         return response;
     }
 
-    private async Task<IReadOnlyList<string>> GetOrFetchSymbolsAsync(string exchange, CancellationToken ct)
+    private async Task<IReadOnlyList<string>> GetOrFetchSymbolsAsync(string exchange, IReadOnlyList<string> centerFallback, CancellationToken ct)
     {
         var ttl = TimeSpan.FromSeconds(_settings.SymbolsCacheTtlSeconds);
         var key = $"market:config:symbols:{exchange}:v2";
@@ -126,7 +128,7 @@ public sealed class MarketConfigService : IMarketConfigService
 
         // Cold or empty cache: rebuild. Do NOT cache empty results — MW may be
         // mid-startup and would otherwise stay empty for the full TTL window.
-        var fresh = await FetchSymbolsForExchangeAsync(exchange, ct);
+        var fresh = await FetchSymbolsForExchangeAsync(exchange, centerFallback, ct);
         if (fresh.Count > 0)
         {
             await _cache.SetAsync(key, new SymbolListWrapper(fresh.ToList()), ttl, ct);
@@ -134,17 +136,32 @@ public sealed class MarketConfigService : IMarketConfigService
         return fresh;
     }
 
-    private async Task<IReadOnlyList<string>> FetchSymbolsForExchangeAsync(string exchange, CancellationToken ct)
+    private async Task<IReadOnlyList<string>> FetchSymbolsForExchangeAsync(string exchange, IReadOnlyList<string> centerFallback, CancellationToken ct)
     {
-        // 1) Try MW (single source of truth for what's actually persisted).
+        // 1) Try MW (what's actually being tracked live — itself driven by the
+        //    currency-pairs center).
         var mwSymbols = await TryFetchTrackedFromMarketWatcherAsync(exchange, ct);
         if (mwSymbols.Count > 0)
         {
             return mwSymbols;
         }
 
-        // 2) Fallback: Bybit instrument list (only meaningful for bybit) so the
-        //    dropdown never goes empty during MW startup / cold-deploy.
+        // 2) Fall back to the currency-pairs center directly (same authoritative
+        //    source MW uses) so the dropdown reflects configured pairs even while
+        //    MW is mid-startup.
+        if (centerFallback.Count > 0)
+        {
+            _log.LogInformation(
+                "MW empty for {Exchange}; using currency-pairs center fallback ({Count} symbols)",
+                exchange, centerFallback.Count);
+            return centerFallback
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        // 3) Last resort (total center+MW outage): Bybit live instrument list
+        //    (only meaningful for bybit) so the dropdown never goes empty.
         if (string.Equals(exchange, "bybit", StringComparison.OrdinalIgnoreCase))
         {
             var bybitList = await _bybit.GetActiveSymbolsAsync(ct);
@@ -213,6 +230,63 @@ public sealed class MarketConfigService : IMarketConfigService
             _log.LogWarning(ex, "MW tracked-symbols request for {Exchange} failed", exchange);
             return Array.Empty<string>();
         }
+    }
+
+    /// <summary>
+    /// Fetch the currency-pairs center state (cmd.data.pairs.list): the
+    /// cross-product symbols and the active quote/stablecoin vocabulary. Used to
+    /// populate config Quotes and as the symbol fallback. Soft-fails to empty.
+    /// </summary>
+    private async Task<(IReadOnlyList<string> Symbols, IReadOnlyList<string> Quotes)> TryFetchCenterPairsAsync(CancellationToken ct)
+    {
+        var timeout = TimeSpan.FromSeconds(Math.Max(2, _settings.KafkaTimeoutSeconds));
+        try
+        {
+            var reply = await _kafka.RequestAsync(DataTopics.CmdDataPairsList, new { }, timeout, ct);
+            if (reply.ValueKind != JsonValueKind.Object)
+            {
+                return (Array.Empty<string>(), Array.Empty<string>());
+            }
+            return (ReadStringArray(reply, "symbols"), ReadActiveAssets(reply, "quotes"));
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Currency-pairs center request (cmd.data.pairs.list) failed");
+            return (Array.Empty<string>(), Array.Empty<string>());
+        }
+    }
+
+    private static IReadOnlyList<string> ReadStringArray(JsonElement obj, string prop)
+    {
+        if (!obj.TryGetProperty(prop, out var el) || el.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<string>();
+        }
+        var list = new List<string>(el.GetArrayLength());
+        foreach (var item in el.EnumerateArray())
+        {
+            var v = item.GetString();
+            if (!string.IsNullOrWhiteSpace(v)) list.Add(v.Trim().ToUpperInvariant());
+        }
+        return list;
+    }
+
+    private static IReadOnlyList<string> ReadActiveAssets(JsonElement obj, string prop)
+    {
+        if (!obj.TryGetProperty(prop, out var el) || el.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<string>();
+        }
+        var list = new List<string>(el.GetArrayLength());
+        foreach (var item in el.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var active = !item.TryGetProperty("active", out var a) || a.ValueKind != JsonValueKind.False;
+            if (!active) continue;
+            var asset = item.TryGetProperty("asset", out var ae) ? ae.GetString() : null;
+            if (!string.IsNullOrWhiteSpace(asset)) list.Add(asset.Trim().ToUpperInvariant());
+        }
+        return list;
     }
 
     private static string NormalizeExchange(string? exchange)

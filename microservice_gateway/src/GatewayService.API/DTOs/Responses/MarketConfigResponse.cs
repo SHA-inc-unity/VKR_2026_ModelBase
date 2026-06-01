@@ -12,6 +12,11 @@ public sealed record MarketConfigResponse
     /// <summary>Sorted list of active tradeable USDT-perpetual symbols.</summary>
     public IReadOnlyList<string> Symbols { get; init; } = [];
 
+    /// <summary>Active quote assets / stablecoins from the currency-pairs center
+    /// (e.g. USDT). Lets the client populate convertible-currency lists without
+    /// hardcoding a stablecoin.</summary>
+    public IReadOnlyList<string> Quotes { get; init; } = [];
+
     /// <summary>All supported timeframes in display order.</summary>
     public IReadOnlyList<TimeframeDto> Timeframes { get; init; } = [];
 
