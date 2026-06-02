@@ -243,7 +243,8 @@ private async Task<FearGreedSnapshot?> TryFetchFearGreedAsync(CancellationToken 
         var losers = 0;
         var contributingCount = 0;
         decimal volumeSum = 0m;
-        decimal changeSum = 0m;
+        decimal changeSum = 0m;            // equal-weight fallback
+        decimal weightedChangeSum = 0m;    // Σ (change · volume)
         var missingChangeData = new List<string>();
 
         foreach (var symbol in tracked)
@@ -255,6 +256,7 @@ private async Task<FearGreedSnapshot?> TryFetchFearGreedAsync(CancellationToken 
             }
 
             volumeSum += ticker.Volume24h;
+            weightedChangeSum += ticker.Change24h * ticker.Volume24h;
 
             // Treat zero-change as neither gainer nor loser (matches the
             // existing UI semantics).
@@ -270,9 +272,14 @@ private async Task<FearGreedSnapshot?> TryFetchFearGreedAsync(CancellationToken 
             contributingCount++;
         }
 
-        var averageChange = contributingCount > 0
-            ? decimal.Round(changeSum / contributingCount, 2, MidpointRounding.AwayFromZero)
-            : 0m;
+        // Volume-weighted average 24h change — bigger-turnover pairs move the
+        // number more (reflects how the market moved by money, not by coin
+        // count). Falls back to a plain mean only if total volume is zero.
+        var averageChange = volumeSum > 0
+            ? decimal.Round(weightedChangeSum / volumeSum, 2, MidpointRounding.AwayFromZero)
+            : (contributingCount > 0
+                ? decimal.Round(changeSum / contributingCount, 2, MidpointRounding.AwayFromZero)
+                : 0m);
 
         // Sentiment: prefer canonical Fear&Greed; otherwise synthesise
         // from breadth (gainers / contributing) and clamped average
@@ -326,7 +333,11 @@ private async Task<FearGreedSnapshot?> TryFetchFearGreedAsync(CancellationToken 
             Meta = new FrontendResponseMetaDto
             {
                 GeneratedAt = DateTimeOffset.UtcNow,
-                UpdatedAt = ResolveCompositeUpdatedAt(snapshot.UpdatedAt, canonical.UpdatedAt),
+                // Freshness must reflect the LIVE price snapshot, not the daily
+                // Fear&Greed timestamp. The old composite took the OLDEST of the
+                // two, so the once-a-day F&G stamp dragged the card to look ~22h
+                // stale every day even though prices were seconds old.
+                UpdatedAt = snapshot.UpdatedAt,
                 DegradedFields = degradedFields,
                 DegradedSections = missingChangeData.Count > 0
                     ? new[] { "trackedChange" }

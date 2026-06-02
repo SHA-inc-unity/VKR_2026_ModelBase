@@ -30,7 +30,46 @@ public sealed partial class MarketServiceClient
             .Select(static item => item.Trim().ToUpperInvariant())
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var url = $"{_settings.BybitBaseUrl}/v5/market/tickers?category=linear";
+        var updatedAt = DateTimeOffset.UtcNow;
+
+        // Linear (perpetuals) is the primary source. Spot fills the symbols Bybit
+        // lists ONLY on spot (e.g. PEPE, SHIB, FET, NEXO) — without it those
+        // tracked pairs fell back to a zero ticker, which both showed $0 on the
+        // market board and left them out of the gainers/losers breakdown
+        // (the "92 tracked vs 85 measured" inconsistency).
+        var linearTask = FetchBybitCategoryAsync("linear", activeSet, updatedAt, ct);
+        var spotTask = FetchBybitCategoryAsync("spot", activeSet, updatedAt, ct);
+        await Task.WhenAll(linearTask, spotTask);
+        var linear = await linearTask;
+        var spot = await spotTask;
+
+        var items = activeSymbols
+            .Select(symbol =>
+                linear.TryGetValue(symbol, out var l) ? l
+                : spot.TryGetValue(symbol, out var s) ? s
+                : BuildFallbackTicker(symbol, updatedAt))
+            .ToArray();
+
+        // If neither category yielded anything the whole snapshot is fallback.
+        var allFallback = linear.Count == 0 && spot.Count == 0;
+        if (allFallback)
+        {
+            _logger.LogWarning("Market snapshot fetch failed for both linear and spot; serving empty snapshot");
+        }
+        var degradedFields = BuildDegradedFields(items, allFallback);
+        return FinalizeSnapshot(items, updatedAt, degradedFields);
+    }
+
+    /// <summary>
+    /// Fetches one Bybit ticker category (linear/spot) and returns the tracked
+    /// symbols it carries. Soft-fails to an empty map so a single category
+    /// outage can't take down the whole snapshot.
+    /// </summary>
+    private async Task<Dictionary<string, SnapshotTicker>> FetchBybitCategoryAsync(
+        string category, HashSet<string> activeSet, DateTimeOffset updatedAt, CancellationToken ct)
+    {
+        var tickers = new Dictionary<string, SnapshotTicker>(StringComparer.OrdinalIgnoreCase);
+        var url = $"{_settings.BybitBaseUrl}/v5/market/tickers?category={category}";
         try
         {
             using var http = _httpClientFactory.CreateClient(nameof(MarketServiceClient));
@@ -41,17 +80,14 @@ public sealed partial class MarketServiceClient
             using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
             if (!doc.RootElement.TryGetProperty("retCode", out var retCodeEl) || retCodeEl.GetInt32() != 0)
             {
-                throw new InvalidOperationException("Bybit tickers endpoint returned non-zero retCode");
+                return tickers;
             }
-
             if (!doc.RootElement.TryGetProperty("result", out var resultEl)
                 || !resultEl.TryGetProperty("list", out var listEl))
             {
-                throw new InvalidOperationException("Bybit tickers endpoint returned no result.list");
+                return tickers;
             }
 
-            var updatedAt = DateTimeOffset.UtcNow;
-            var tickers = new Dictionary<string, SnapshotTicker>(StringComparer.OrdinalIgnoreCase);
             foreach (var item in listEl.EnumerateArray())
             {
                 var symbol = GetString(item, "symbol")?.Trim().ToUpperInvariant();
@@ -59,26 +95,14 @@ public sealed partial class MarketServiceClient
                 {
                     continue;
                 }
-
                 tickers[symbol] = BuildTicker(symbol, item, updatedAt);
             }
-
-            var items = activeSymbols
-                .Select(symbol => tickers.TryGetValue(symbol, out var ticker)
-                    ? ticker
-                    : BuildFallbackTicker(symbol, updatedAt))
-                .ToArray();
-
-            var degradedFields = BuildDegradedFields(items, allFallback: false);
-            return FinalizeSnapshot(items, updatedAt, degradedFields);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Market snapshot fetch failed; falling back to gateway-local empty snapshot");
-            var updatedAt = DateTimeOffset.UtcNow;
-            var fallback = activeSymbols.Select(symbol => BuildFallbackTicker(symbol, updatedAt)).ToArray();
-            return FinalizeSnapshot(fallback, updatedAt, BuildDegradedFields(fallback, allFallback: true));
+            _logger.LogWarning(ex, "Bybit {Category} tickers fetch failed", category);
         }
+        return tickers;
     }
 
     private static SnapshotEnvelope FinalizeSnapshot(IReadOnlyList<SnapshotTicker> items, DateTimeOffset updatedAt, IReadOnlyList<string> degradedFields)
