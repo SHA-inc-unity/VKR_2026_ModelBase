@@ -91,5 +91,16 @@ public sealed class MarketControllerTests
         {
             return Task.FromResult(_result);
         }
+
+        public Task<ServiceResult<ChartResponse>> GetChartBeforeAsync(
+            string symbol,
+            string timeframe,
+            int limit,
+            long beforeMs,
+            string exchange = "bybit",
+            CancellationToken ct = default)
+        {
+            return Task.FromResult(_result);
+        }
     }
 }

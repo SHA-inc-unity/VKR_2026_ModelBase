@@ -177,6 +177,53 @@ internal sealed class FakeChartService : IChartService
         };
         return Task.FromResult(ServiceResult<ChartResponse>.Ok(resp));
     }
+
+    public Task<ServiceResult<ChartResponse>> GetChartBeforeAsync(
+        string symbol, string timeframe, int limit, long beforeMs,
+        string exchange = "bybit", CancellationToken ct = default)
+    {
+        if (!new[] { "BTCUSDT", "ETHUSDT", "SOLUSDT" }
+                .Contains(symbol, StringComparer.OrdinalIgnoreCase))
+            return Task.FromResult(ServiceResult<ChartResponse>.Fail($"INVALID_SYMBOL: '{symbol}'"));
+
+        if (!TimeframeMap.IsValid(timeframe))
+            return Task.FromResult(ServiceResult<ChartResponse>.Fail($"INVALID_TIMEFRAME: '{timeframe}'"));
+
+        if (!TimeframeMap.TryGetById(timeframe, out var tf) ||
+            !CandleCountGrid.IsValid(limit, tf.Class))
+            return Task.FromResult(ServiceResult<ChartResponse>.Fail($"INVALID_LIMIT: {limit}"));
+
+        if (beforeMs <= 0)
+            return Task.FromResult(ServiceResult<ChartResponse>.Fail("INVALID_CURSOR"));
+
+        // `limit` candles ending strictly before the cursor.
+        var endMs   = beforeMs - 1;
+        var candles = Enumerable.Range(0, limit)
+            .Select(i => new CandleDto(
+                T:  endMs - (long)(limit - 1 - i) * tf.StepMs,
+                O:  40000m, H: 41000m, L: 39000m, C: 40500m,
+                V:  100m,   Tv: 4050000m))
+            .ToList();
+
+        var resp = new ChartResponse
+        {
+            Symbol    = symbol.ToUpperInvariant(),
+            Timeframe = timeframe,
+            Limit     = limit,
+            Candles   = candles,
+            Meta = new ChartMetaDto
+            {
+                Requested = limit,
+                Available = candles.Count,
+                FromMs    = candles[0].T,
+                ToMs      = candles[^1].T,
+                Coverage  = "full",
+            },
+            Status       = "ok",
+            RetryAfterMs = null,
+        };
+        return Task.FromResult(ServiceResult<ChartResponse>.Ok(resp));
+    }
 }
 
 internal sealed class FakeMarketServiceClient : IMarketServiceClient

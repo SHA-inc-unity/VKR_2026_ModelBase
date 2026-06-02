@@ -264,7 +264,9 @@ public partial class ChartService : IChartService
         TimeframeInfo tfInfo,
         RowsFetchResult rowsResult,
         string exchange,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? cacheKeyOverride = null,
+        TimeSpan? cacheTtlOverride = null)
     {
         var candles = rowsResult.Rows
             .OrderBy(r => r.TimestampMs)
@@ -305,9 +307,11 @@ public partial class ChartService : IChartService
             RetryAfterMs = retryAfterMs,
         };
 
-        // Cache only when data is complete; partial results get a shorter TTL
-        var cacheTtl = CacheTtlFor(tfInfo, isFullCoverage);
-        var cacheKey = BuildCacheKey(symbol, tfInfo, limit, exchange);
+        // Cache only when data is complete; partial results get a shorter TTL.
+        // Historical pagination overrides both (immutable page → long TTL under
+        // a cursor-scoped key) via the optional override parameters.
+        var cacheTtl = cacheTtlOverride ?? CacheTtlFor(tfInfo, isFullCoverage);
+        var cacheKey = cacheKeyOverride ?? BuildCacheKey(symbol, tfInfo, limit, exchange);
         await _cache.SetAsync(cacheKey, response, cacheTtl, ct);
 
         return response;

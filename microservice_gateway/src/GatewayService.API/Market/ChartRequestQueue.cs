@@ -28,6 +28,10 @@ namespace GatewayService.API.Market;
 /// Graceful Redis fallback: the fast-path cache check is done via
 /// <see cref="IMarketCacheService"/>, which silently falls back to no-op when Redis is
 /// unavailable. In that case coalescing still protects the service within a single process.
+///
+/// Both the latest-window (<see cref="GetChartAsync"/>) and the historical-page
+/// (<see cref="GetChartBeforeAsync"/>, used for infinite left-panning) paths go through the
+/// same coalescing + concurrency machinery via <see cref="RunCoalescedAsync"/>.
 /// </summary>
 public sealed class ChartRequestQueue : IChartService
 {
@@ -91,7 +95,8 @@ public sealed class ChartRequestQueue : IChartService
 
         // ── 2. Fast-path cache check (avoids TCS allocation on cache hit) ─
 
-        if (TimeframeMap.TryGetById(normalizedTf, out var tfInfo))
+        TimeframeMap.TryGetById(normalizedTf, out var tfInfo);
+        if (tfInfo is not null)
         {
             var cacheKey = string.Format(
                 ChartCacheKeyFmt, normalizedExchange, normalizedSymbol, tfInfo.BybitInterval, limit);
@@ -104,7 +109,50 @@ public sealed class ChartRequestQueue : IChartService
             }
         }
 
-        // ── 3. Coalesce: try to become the creator ────────────────────────
+        // ── 3. Coalesce + run ─────────────────────────────────────────────
+
+        var isHeavy = tfInfo?.Class == TimeframeClass.Heavy;
+        return await RunCoalescedAsync(
+            requestKey,
+            isHeavy,
+            workCt => _inner.GetChartAsync(normalizedSymbol, normalizedTf, limit, normalizedExchange, workCt),
+            ct);
+    }
+
+    /// <inheritdoc />
+    public async Task<ServiceResult<ChartResponse>> GetChartBeforeAsync(
+        string symbol, string timeframe, int limit, long beforeMs,
+        string exchange = "bybit", CancellationToken ct = default)
+    {
+        var normalizedSymbol   = symbol.ToUpperInvariant();
+        var normalizedTf       = timeframe.ToLowerInvariant();
+        var normalizedExchange = DataServiceClient.NormalizeExchange(exchange);
+        // Cursor-scoped key so distinct pages don't coalesce into each other.
+        var requestKey =
+            $"page:{normalizedExchange}:{normalizedSymbol}:{normalizedTf}:{limit}:{beforeMs}:v1";
+
+        // No separate fast-path here: the inner GetChartBeforeAsync checks its
+        // own cursor-scoped page cache first thing. Coalescing still prevents a
+        // burst of pan events from launching duplicate backfills for one page.
+        TimeframeMap.TryGetById(normalizedTf, out var tfInfo);
+        var isHeavy = tfInfo?.Class == TimeframeClass.Heavy;
+        return await RunCoalescedAsync(
+            requestKey,
+            isHeavy,
+            workCt => _inner.GetChartBeforeAsync(
+                normalizedSymbol, normalizedTf, limit, beforeMs, normalizedExchange, workCt),
+            ct);
+    }
+
+    // ── Shared coalescing + concurrency machinery ─────────────────────────
+
+    private async Task<ServiceResult<ChartResponse>> RunCoalescedAsync(
+        string requestKey,
+        bool isHeavy,
+        Func<CancellationToken, Task<ServiceResult<ChartResponse>>> pipeline,
+        CancellationToken ct)
+    {
+        // ── Coalesce: try to become the creator ───────────────────────────
 
         var entry    = new InFlightEntry();
         var existing = _inflight.GetOrAdd(requestKey, entry);
@@ -132,9 +180,8 @@ public sealed class ChartRequestQueue : IChartService
             }
         }
 
-        // ── 4. Creator path: acquire semaphore, run pipeline ──────────────
+        // ── Creator path: acquire semaphore, run pipeline ─────────────────
 
-        var isHeavy      = tfInfo?.Class == TimeframeClass.Heavy;
         var downstreamSw = Stopwatch.StartNew();
         bool totalAcquired = false;
         bool heavyAcquired = false;
@@ -178,8 +225,7 @@ public sealed class ChartRequestQueue : IChartService
 
             _log.LogDebug("[queue:downstream-start] {Key}", requestKey);
 
-            var result = await _inner.GetChartAsync(
-                normalizedSymbol, normalizedTf, limit, normalizedExchange, workCts.Token);
+            var result = await pipeline(workCts.Token);
 
             downstreamSw.Stop();
             _log.LogInformation(

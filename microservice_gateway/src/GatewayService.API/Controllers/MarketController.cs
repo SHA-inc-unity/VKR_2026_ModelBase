@@ -315,12 +315,18 @@ public sealed class MarketController : ControllerBase
         [FromQuery] string timeframe,
         [FromQuery] int limit,
         [FromQuery] string? exchange,
+        [FromQuery] long? before,
         CancellationToken ct)
     {
         var correlationId = HttpContext.GetCorrelationId();
         var exchangeKey = DataServiceClient.NormalizeExchange(exchange);
 
-        var result = await _chart.GetChartAsync(symbol, timeframe, limit, exchangeKey, ct);
+        // `before` (unix ms) requests the page of candles strictly OLDER than
+        // that cursor — the building block for infinite left-panning. Without
+        // it the latest fixed-width window is returned (unchanged behaviour).
+        var result = before is > 0
+            ? await _chart.GetChartBeforeAsync(symbol, timeframe, limit, before.Value, exchangeKey, ct)
+            : await _chart.GetChartAsync(symbol, timeframe, limit, exchangeKey, ct);
 
         if (!result.IsSuccess)
         {

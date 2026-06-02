@@ -28,4 +28,16 @@ public interface IChartService
     Task<ServiceResult<ChartResponse>> GetChartAsync(
         string symbol, string timeframe, int limit,
         string exchange = "bybit", CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the page of <paramref name="limit"/> candles immediately OLDER
+    /// than the <paramref name="beforeMs"/> cursor (exclusive) — used for
+    /// infinite left-panning. Backfills the requested historical window from
+    /// the exchange on demand. An empty page signals the start of available
+    /// history; failures use the same reason codes as <see cref="GetChartAsync"/>
+    /// plus "INVALID_CURSOR" for a non-positive cursor.
+    /// </summary>
+    Task<ServiceResult<ChartResponse>> GetChartBeforeAsync(
+        string symbol, string timeframe, int limit, long beforeMs,
+        string exchange = "bybit", CancellationToken ct = default);
 }
