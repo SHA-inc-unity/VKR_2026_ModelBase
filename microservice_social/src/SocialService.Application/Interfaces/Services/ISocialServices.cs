@@ -10,6 +10,9 @@ public interface IFavoritesAppService
     Task<bool> AddAsync(Guid userId, string symbol, CancellationToken ct);
     Task<bool> RemoveAsync(Guid userId, string symbol, CancellationToken ct);
     Task<IReadOnlyList<Guid>> UsersBySymbolAsync(string symbol, CancellationToken ct);
+
+    /// All distinct favorited symbols across users (for the notification watcher).
+    Task<IReadOnlyList<string>> AllFavoritedSymbolsAsync(CancellationToken ct);
 }
 
 public interface ICommentsAppService

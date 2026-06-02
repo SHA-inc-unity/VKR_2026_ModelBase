@@ -61,10 +61,17 @@ public sealed class PriceDriftWatcherService : BackgroundService
         var notif = scope.ServiceProvider.GetRequiredService<INotificationsAppService>();
         var settingsRepo = scope.ServiceProvider.GetRequiredService<INotificationSettingsRepository>();
 
-        // For v1 we discover symbols-of-interest reactively — pull a stable list of common assets,
-        // ask the social service who favorites each, and only then ping the market. This keeps the
-        // watcher O(symbols) rather than O(users).
-        var trackedSymbols = WellKnownSymbols;
+        // Track exactly the symbols people actually favorited (from social),
+        // unioned with a small well-known baseline. This replaces the old
+        // hard-coded-only list, so a favorite outside the common 20 still gets
+        // price alerts. We then ask social who favorites each and ping the
+        // market — keeping the watcher O(symbols) rather than O(users).
+        var favorited = await social.GetAllFavoritedSymbolsAsync(ct);
+        var trackedSymbols = WellKnownSymbols
+            .Concat(favorited.Select(s => s.Trim().ToUpperInvariant()))
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
         var prices = await market.GetSnapshotAsync(trackedSymbols, ct);
         if (prices.Count == 0) return;

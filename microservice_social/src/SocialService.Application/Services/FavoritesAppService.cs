@@ -52,4 +52,7 @@ public sealed class FavoritesAppService : IFavoritesAppService
         symbol = symbol.Trim().ToUpperInvariant();
         return _repo.GetUsersBySymbolAsync(symbol, ct);
     }
+
+    public Task<IReadOnlyList<string>> AllFavoritedSymbolsAsync(CancellationToken ct) =>
+        _repo.GetAllDistinctSymbolsAsync(ct);
 }

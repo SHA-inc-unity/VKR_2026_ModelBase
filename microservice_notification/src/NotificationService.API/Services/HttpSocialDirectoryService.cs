@@ -69,4 +69,34 @@ public sealed class HttpSocialDirectoryService : ISocialDirectoryService
             return Array.Empty<Guid>();
         }
     }
+
+    public async Task<IReadOnlyList<string>> GetAllFavoritedSymbolsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await _client.GetAsync("/internal/favorites/symbols", ct);
+            if (!resp.IsSuccessStatusCode) return Array.Empty<string>();
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("symbols", out var symbols) ||
+                symbols.ValueKind != JsonValueKind.Array)
+                return Array.Empty<string>();
+
+            var result = new List<string>();
+            foreach (var s in symbols.EnumerateArray())
+            {
+                if (s.ValueKind == JsonValueKind.String)
+                {
+                    var value = s.GetString();
+                    if (!string.IsNullOrWhiteSpace(value)) result.Add(value!);
+                }
+            }
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to fetch favorited symbols");
+            return Array.Empty<string>();
+        }
+    }
 }

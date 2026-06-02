@@ -9,4 +9,11 @@ public interface IFavoriteRepository
     Task AddAsync(Favorite favorite, CancellationToken ct);
     Task<bool> RemoveAsync(Guid userId, string symbol, CancellationToken ct);
     Task<IReadOnlyList<Guid>> GetUsersBySymbolAsync(string symbol, CancellationToken ct);
+
+    /// <summary>
+    /// Every distinct favorited symbol across all users. Used by the
+    /// notification price-drift watcher to track exactly the symbols people
+    /// actually care about (instead of a hard-coded list).
+    /// </summary>
+    Task<IReadOnlyList<string>> GetAllDistinctSymbolsAsync(CancellationToken ct);
 }

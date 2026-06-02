@@ -42,6 +42,16 @@ public sealed class InternalController : ControllerBase
         return Ok(new { symbol = symbol.ToUpperInvariant(), users });
     }
 
+    /// <summary>All distinct favorited symbols across users — the notification
+    /// price-drift watcher tracks exactly these instead of a hard-coded list.</summary>
+    [HttpGet("favorites/symbols")]
+    public async Task<IActionResult> FavoritesSymbols(CancellationToken ct)
+    {
+        if (!IsAuthorized()) return Unauthorized();
+        var symbols = await _favorites.AllFavoritedSymbolsAsync(ct);
+        return Ok(new { symbols });
+    }
+
     private bool IsAuthorized()
     {
         var expected = _config["InternalApi:ApiKey"];

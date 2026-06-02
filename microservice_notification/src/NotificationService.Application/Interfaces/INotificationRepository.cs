@@ -33,6 +33,10 @@ public interface ISocialDirectoryService
 {
     Task<Guid?> GetCommentAuthorAsync(Guid commentId, CancellationToken ct);
     Task<IReadOnlyList<Guid>> GetFavoriteUsersBySymbolAsync(string symbol, CancellationToken ct);
+
+    /// All distinct favorited symbols across users — lets the price-drift
+    /// watcher track exactly what people favorited instead of a static list.
+    Task<IReadOnlyList<string>> GetAllFavoritedSymbolsAsync(CancellationToken ct);
 }
 
 public interface IMarketSnapshotService
