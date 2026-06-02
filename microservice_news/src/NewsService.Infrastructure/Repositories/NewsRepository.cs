@@ -52,4 +52,21 @@ public sealed class NewsRepository : INewsRepository
         // No-op update — keep first ingest as canonical row.
         return false;
     }
+
+    public async Task<IReadOnlyList<NewsArticle>> ListNeedingEnrichmentAsync(int limit, CancellationToken ct)
+    {
+        // Tracked (no AsNoTracking) so ApplyEnrichment + UpdateAsync persist.
+        // Only articles never attempted yet → each gets exactly one backfill try.
+        return await _db.NewsArticles
+            .Where(x => x.EnrichmentAttemptedAt == null && (x.Content == null || x.ImageUrl == null))
+            .OrderByDescending(x => x.PublishedAt)
+            .Take(limit)
+            .ToListAsync(ct);
+    }
+
+    public async Task UpdateAsync(NewsArticle article, CancellationToken ct)
+    {
+        _db.NewsArticles.Update(article);
+        await _db.SaveChangesAsync(ct);
+    }
 }

@@ -19,6 +19,7 @@ public sealed class NewsArticleConfiguration : IEntityTypeConfiguration<NewsArti
         b.Property(x => x.ImageUrl).HasColumnName("image_url").HasMaxLength(1024);
         b.Property(x => x.Content).HasColumnName("content").HasColumnType("text");
         b.Property(x => x.PublishedAt).HasColumnName("published_at");
+        b.Property(x => x.EnrichmentAttemptedAt).HasColumnName("enrichment_attempted_at");
         b.Property(x => x.Tags).HasColumnName("tags").HasColumnType("text[]").IsRequired();
         b.Property(x => x.IngestedAt).HasColumnName("ingested_at");
 

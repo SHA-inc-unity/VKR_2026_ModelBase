@@ -147,6 +147,7 @@ public sealed class CryptoPanicIngesterService : BackgroundService
                 // Pull the full readable body + a hero image from the source
                 // page, time-boxed so one slow site can't stall the tick. Best
                 // effort: on failure the article still lands with its RSS summary.
+                article.MarkEnrichmentAttempted();
                 try
                 {
                     using var enrichCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -172,8 +173,44 @@ public sealed class CryptoPanicIngesterService : BackgroundService
             }
         }
 
-        _log.LogInformation("News tick: fetched={Fetched} unique={Unique} new={Created} enriched={Enriched}",
-            articles.Count, unique.Count, created, enriched);
+        // Backfill: give a small batch of older, never-attempted articles one
+        // enrichment try each. This gradually heals the existing history (full
+        // text + the missing hero images) without hammering the sources —
+        // bounded per tick, and it terminates because every article is stamped
+        // attempted (persisted even when the scrape yields nothing).
+        var backfilled = 0;
+        try
+        {
+            var backlog = await repo.ListNeedingEnrichmentAsync(8, ct);
+            foreach (var article in backlog)
+            {
+                article.MarkEnrichmentAttempted();
+                try
+                {
+                    using var enrichCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    enrichCts.CancelAfter(TimeSpan.FromSeconds(12));
+                    var enrichment = await enricher.EnrichAsync(article.SourceUrl, enrichCts.Token);
+                    article.ApplyEnrichment(enrichment.Content, enrichment.ImageUrl);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogDebug(ex, "Backfill enrichment failed for {Url}", article.SourceUrl);
+                }
+
+                // Persist the result AND the attempt stamp (so a permanently
+                // unreadable page is not retried forever).
+                try { await repo.UpdateAsync(article, ct); backfilled++; }
+                catch (Exception ex) { _log.LogDebug(ex, "Backfill save failed for {Url}", article.SourceUrl); }
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "News backfill pass failed");
+        }
+
+        _log.LogInformation(
+            "News tick: fetched={Fetched} unique={Unique} new={Created} enriched={Enriched} backfilled={Backfilled}",
+            articles.Count, unique.Count, created, enriched, backfilled);
     }
 
     // ── RSS parsing ────────────────────────────────────────────────────────

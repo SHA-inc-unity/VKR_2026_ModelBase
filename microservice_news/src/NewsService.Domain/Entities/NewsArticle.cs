@@ -20,7 +20,19 @@ public sealed class NewsArticle
     public string[] Tags { get; private set; } = Array.Empty<string>();
     public DateTime IngestedAt { get; private set; }
 
+    /// <summary>
+    /// When the readability enrichment pass last tried to scrape this article's
+    /// source page (success or failure). Null = never attempted. Used to give
+    /// each backlog article exactly one backfill attempt so the limited
+    /// per-tick budget rotates through the whole history instead of getting
+    /// stuck retrying the same permanently-unreadable pages.
+    /// </summary>
+    public DateTime? EnrichmentAttemptedAt { get; private set; }
+
     private NewsArticle() { }
+
+    /// <summary>Stamp that an enrichment attempt was made (regardless of outcome).</summary>
+    public void MarkEnrichmentAttempted() => EnrichmentAttemptedAt = DateTime.UtcNow;
 
     /// <summary>
     /// Backfill the readable body and/or hero image discovered by the
