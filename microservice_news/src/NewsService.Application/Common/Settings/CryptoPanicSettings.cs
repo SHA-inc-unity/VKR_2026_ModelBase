@@ -19,12 +19,22 @@ public sealed class CryptoPanicSettings
     public bool Enabled { get; set; } = true;
 
     /// <summary>
-    /// Additional RSS feeds polled on every tick. The defaults are reliable public crypto news
-    /// feeds that ship `media:content` / `enclosure` images, which we extract as hero images
-    /// for the frontend cards.
+    /// RSS feeds polled on every tick. Two groups:
+    /// * Full-text feeds (dailyhodl, coinjournal) ship the whole article in
+    ///   `content:encoded` — the reliable primary source for the detail body
+    ///   (no scraping needed); coinjournal also carries media images and
+    ///   dailyhodl embeds an inline `&lt;img&gt;` we extract as the hero.
+    /// * Image-rich headline feeds (Cointelegraph, CoinDesk, Decrypt, Bitcoin
+    ///   Magazine) ship `media:content`/`enclosure` hero images but only a short
+    ///   description — their full body is filled in (best-effort) by the
+    ///   readability scrape fallback.
     /// </summary>
     public string[] RssFeeds { get; set; } =
     {
+        // Full article body via content:encoded.
+        "https://dailyhodl.com/feed/",
+        "https://coinjournal.net/feed/",
+        // Headline feeds with hero images (body via scrape fallback).
         "https://cointelegraph.com/rss",
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
         "https://decrypt.co/feed",
