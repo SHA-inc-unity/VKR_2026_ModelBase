@@ -366,6 +366,61 @@ public sealed class MarketController : ControllerBase
     }
 
     /// <summary>
+    /// Batch sparklines: one short close-price series per requested symbol,
+    /// assembled server-side by fanning out to the (cached) chart service. Lets
+    /// a client render sparklines for a whole market page / trending row with a
+    /// single call instead of N per-row chart requests.
+    /// </summary>
+    /// <response code="200">Sparklines response (symbols with no data are omitted).</response>
+    [HttpGet("sparklines")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetSparklines(
+        [FromQuery] string? symbols = null,
+        [FromQuery] string timeframe = "1h",
+        [FromQuery] int points = 24,
+        [FromQuery] string? exchange = null,
+        CancellationToken ct = default)
+    {
+        var requested = string.IsNullOrWhiteSpace(symbols)
+            ? Array.Empty<string>()
+            : symbols.Split(',',
+                StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (requested.Length == 0)
+        {
+            return Ok(new MarketSparklinesResponse());
+        }
+
+        // Bound the fan-out and series length so a huge list can't hammer the
+        // chart service / data layer.
+        var capped = requested.Take(60).ToArray();
+        var safePoints = Math.Clamp(points, 2, 96);
+        var exchangeKey = DataServiceClient.NormalizeExchange(exchange);
+
+        var tasks = capped.Select(async symbol =>
+        {
+            try
+            {
+                var r = await _chart.GetChartAsync(symbol, timeframe, safePoints, exchangeKey, ct);
+                var closes = (r.IsSuccess && r.Value is not null)
+                    ? r.Value.Candles.Select(c => c.C).ToList()
+                    : new List<decimal>();
+                return new SparklineDto { Symbol = symbol, Points = closes };
+            }
+            catch
+            {
+                return new SparklineDto { Symbol = symbol, Points = new List<decimal>() };
+            }
+        });
+        var items = await Task.WhenAll(tasks);
+
+        Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=120";
+        return Ok(new MarketSparklinesResponse
+        {
+            Items = items.Where(i => i.Points.Count >= 2).ToList(),
+        });
+    }
+
+    /// <summary>
     /// Returns OHLCV chart data for the same symbol/timeframe across multiple
     /// exchanges, fetched in parallel. Used by the frontend "Compare exchanges"
     /// overlay so the client doesn't need 3 separate roundtrips.

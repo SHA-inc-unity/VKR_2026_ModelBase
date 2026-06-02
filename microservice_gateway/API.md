@@ -77,6 +77,7 @@
 | `GET /api/v1/market/top-movers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/chart` | status-dependent cache policy: `ok` uses short public cache (`Heavy=10s`, `Medium=30s`, `Light=60s`), `partial=3s`, `pending=1s`; weak `ETag` + `If-None-Match` are enabled |
 | `POST /api/v1/market/quotes/batch` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
+| `GET /api/v1/market/sparklines` | batch close-series per symbol (`?symbols=&timeframe=1h&points=24`), server-side fan-out over the chart service; `Cache-Control: public, max-age=30, stale-while-revalidate=120` |
 | `GET /api/v1/market/quotes/realtime` | `Cache-Control: public, max-age=1, stale-while-revalidate=2`; watcher-backed live price with snapshot fallback |
 | `GET /api/v1/market/converter/quote` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/v1/market/convert` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
