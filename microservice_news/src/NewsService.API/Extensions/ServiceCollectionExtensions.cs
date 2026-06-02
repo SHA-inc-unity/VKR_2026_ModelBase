@@ -8,6 +8,7 @@ using NewsService.Application.Common.Settings;
 using NewsService.Application.Interfaces;
 using NewsService.Application.Services;
 using NewsService.Infrastructure.Data;
+using NewsService.Infrastructure.Enrichment;
 using NewsService.Infrastructure.Repositories;
 
 namespace NewsService.API.Extensions;
@@ -31,6 +32,7 @@ public static class ServiceCollectionExtensions
 
         services.AddScoped<INewsRepository, NewsRepository>();
         services.AddScoped<INewsAppService, NewsAppService>();
+        services.AddScoped<IArticleContentEnricher, SmartReaderContentEnricher>();
 
         services.AddHttpClient("cryptopanic", c =>
         {

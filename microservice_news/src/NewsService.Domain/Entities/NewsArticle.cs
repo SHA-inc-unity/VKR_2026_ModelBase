@@ -7,12 +7,42 @@ public sealed class NewsArticle
     public string SourceUrl { get; private set; } = string.Empty;
     public string Title { get; private set; } = string.Empty;
     public string Summary { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// Full readable article body (plain text, paragraphs separated by blank
+    /// lines), scraped from the source page via readability. Null until the
+    /// enrichment pass fills it. Kept out of list responses (heavy); served
+    /// only on the single-article detail endpoint.
+    /// </summary>
+    public string? Content { get; private set; }
     public string? ImageUrl { get; private set; }
     public DateTime PublishedAt { get; private set; }
     public string[] Tags { get; private set; } = Array.Empty<string>();
     public DateTime IngestedAt { get; private set; }
 
     private NewsArticle() { }
+
+    /// <summary>
+    /// Backfill the readable body and/or hero image discovered by the
+    /// post-fetch enrichment pass. Only fills fields that are still empty —
+    /// never overwrites data the feed already supplied. Returns true when at
+    /// least one field changed (so the caller can persist the update).
+    /// </summary>
+    public bool ApplyEnrichment(string? content, string? imageUrl)
+    {
+        var changed = false;
+        if (string.IsNullOrWhiteSpace(Content) && !string.IsNullOrWhiteSpace(content))
+        {
+            Content = content.Trim();
+            changed = true;
+        }
+        if (string.IsNullOrWhiteSpace(ImageUrl) && !string.IsNullOrWhiteSpace(imageUrl))
+        {
+            ImageUrl = imageUrl.Trim();
+            changed = true;
+        }
+        return changed;
+    }
 
     public static NewsArticle Create(
         string source,

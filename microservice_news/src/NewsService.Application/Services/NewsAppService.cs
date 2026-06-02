@@ -24,7 +24,8 @@ public sealed class NewsAppService : INewsAppService
         var slice = await _repo.ListAsync(symbol, page, pageSize, ct);
         return new NewsListResponse
         {
-            Items = slice.Items.Select(Map).ToList(),
+            // List rows omit the heavy Content body (detail-only).
+            Items = slice.Items.Select(a => Map(a, includeContent: false)).ToList(),
             Total = slice.Total,
             Page = page,
             PageSize = pageSize,
@@ -34,16 +35,17 @@ public sealed class NewsAppService : INewsAppService
     public async Task<NewsArticleResponse?> GetAsync(Guid id, CancellationToken ct)
     {
         var article = await _repo.GetByIdAsync(id, ct);
-        return article is null ? null : Map(article);
+        return article is null ? null : Map(article, includeContent: true);
     }
 
-    private static NewsArticleResponse Map(NewsArticle a) => new()
+    private static NewsArticleResponse Map(NewsArticle a, bool includeContent) => new()
     {
         Id = a.Id,
         Source = a.Source,
         SourceUrl = a.SourceUrl,
         Title = a.Title,
         Summary = a.Summary,
+        Content = includeContent ? a.Content : null,
         ImageUrl = a.ImageUrl,
         PublishedAt = a.PublishedAt,
         Tags = a.Tags,

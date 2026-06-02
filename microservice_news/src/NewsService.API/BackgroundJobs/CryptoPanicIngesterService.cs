@@ -131,12 +131,34 @@ public sealed class CryptoPanicIngesterService : BackgroundService
         using var scope = _scopes.CreateScope();
         var repo = scope.ServiceProvider.GetRequiredService<INewsRepository>();
         var bus = scope.ServiceProvider.GetRequiredService<INewsEventBus>();
+        var enricher = scope.ServiceProvider.GetRequiredService<IArticleContentEnricher>();
 
         var created = 0;
+        var enriched = 0;
         foreach (var article in unique)
         {
             try
             {
+                // Only brand-new stories are enriched — scraping the source page
+                // is a one-time cost paid on first appearance, never re-run for
+                // articles already in the DB (that's what builds the history).
+                if (await repo.ExistsByUrlAsync(article.SourceUrl, ct)) continue;
+
+                // Pull the full readable body + a hero image from the source
+                // page, time-boxed so one slow site can't stall the tick. Best
+                // effort: on failure the article still lands with its RSS summary.
+                try
+                {
+                    using var enrichCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    enrichCts.CancelAfter(TimeSpan.FromSeconds(12));
+                    var enrichment = await enricher.EnrichAsync(article.SourceUrl, enrichCts.Token);
+                    if (article.ApplyEnrichment(enrichment.Content, enrichment.ImageUrl)) enriched++;
+                }
+                catch (Exception ex)
+                {
+                    _log.LogDebug(ex, "Enrichment skipped for {Url}", article.SourceUrl);
+                }
+
                 var inserted = await repo.UpsertAsync(article, ct);
                 if (inserted)
                 {
@@ -150,8 +172,8 @@ public sealed class CryptoPanicIngesterService : BackgroundService
             }
         }
 
-        _log.LogInformation("News tick: fetched={Fetched} unique={Unique} new={Created}",
-            articles.Count, unique.Count, created);
+        _log.LogInformation("News tick: fetched={Fetched} unique={Unique} new={Created} enriched={Enriched}",
+            articles.Count, unique.Count, created, enriched);
     }
 
     // ── RSS parsing ────────────────────────────────────────────────────────
