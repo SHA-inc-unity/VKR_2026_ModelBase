@@ -35,7 +35,7 @@ public sealed class MarketConfigService : IMarketConfigService
     {
         var normalized = NormalizeExchange(exchange);
         var ttl = TimeSpan.FromSeconds(_settings.ConfigCacheTtlSeconds);
-        var key = $"market:config:full:{normalized}:v4";
+        var key = $"market:config:full:{normalized}:v5";
 
         var cached = await _cache.GetAsync<MarketConfigResponse>(key, ct);
         if (cached is { Symbols.Count: > 0 })
@@ -117,7 +117,7 @@ public sealed class MarketConfigService : IMarketConfigService
     private async Task<IReadOnlyList<string>> GetOrFetchSymbolsAsync(string exchange, IReadOnlyList<string> centerFallback, CancellationToken ct)
     {
         var ttl = TimeSpan.FromSeconds(_settings.SymbolsCacheTtlSeconds);
-        var key = $"market:config:symbols:{exchange}:v2";
+        var key = $"market:config:symbols:{exchange}:v3";
 
         // Fast path: hit cache.
         var cached = await _cache.GetAsync<SymbolListWrapper>(key, ct);
