@@ -138,26 +138,28 @@ public sealed class MarketConfigService : IMarketConfigService
 
     private async Task<IReadOnlyList<string>> FetchSymbolsForExchangeAsync(string exchange, IReadOnlyList<string> centerFallback, CancellationToken ct)
     {
-        // 1) Try MW (what's actually being tracked live — itself driven by the
-        //    currency-pairs center).
-        var mwSymbols = await TryFetchTrackedFromMarketWatcherAsync(exchange, ct);
-        if (mwSymbols.Count > 0)
-        {
-            return mwSymbols;
-        }
-
-        // 2) Fall back to the currency-pairs center directly (same authoritative
-        //    source MW uses) so the dropdown reflects configured pairs even while
-        //    MW is mid-startup.
+        // 1) Prefer the currency-pairs center — the single source of truth for
+        //    the pairs MW is *configured* to track (e.g. 92). MW's live-row set
+        //    is only the subset that has already produced a tick (e.g. 85), so
+        //    using it under-reported the tracked-pairs count and dropped freshly
+        //    added pairs from the list until their first candle landed.
         if (centerFallback.Count > 0)
         {
-            _log.LogInformation(
-                "MW empty for {Exchange}; using currency-pairs center fallback ({Count} symbols)",
-                exchange, centerFallback.Count);
             return centerFallback
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+        }
+
+        // 2) Center unavailable (mid-startup / outage) → fall back to MW's
+        //    live-tracked rows so the dropdown is never empty.
+        var mwSymbols = await TryFetchTrackedFromMarketWatcherAsync(exchange, ct);
+        if (mwSymbols.Count > 0)
+        {
+            _log.LogInformation(
+                "Currency-pairs center empty for {Exchange}; using MW live-tracked fallback ({Count} symbols)",
+                exchange, mwSymbols.Count);
+            return mwSymbols;
         }
 
         // 3) Last resort (total center+MW outage): Bybit live instrument list
