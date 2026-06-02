@@ -149,20 +149,28 @@ public sealed class CryptoPanicIngesterService : BackgroundService
                 // articles already in the DB (that's what builds the history).
                 if (await repo.ExistsByUrlAsync(article.SourceUrl, ct)) continue;
 
-                // Pull the full readable body + a hero image from the source
-                // page, time-boxed so one slow site can't stall the tick. Best
-                // effort: on failure the article still lands with its RSS summary.
-                article.MarkEnrichmentAttempted();
-                try
+                // Only scrape when the feed itself left a gap. Full-text feeds
+                // (content:encoded) already give us body + image, so skip the
+                // costly 12s page fetch entirely — otherwise a tick full of
+                // such articles would crawl. Scraping is reserved for headline
+                // feeds that ship only a short description and/or no image.
+                if (string.IsNullOrWhiteSpace(article.Content) ||
+                    string.IsNullOrWhiteSpace(article.ImageUrl))
                 {
-                    using var enrichCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    enrichCts.CancelAfter(TimeSpan.FromSeconds(12));
-                    var enrichment = await enricher.EnrichAsync(article.SourceUrl, enrichCts.Token);
-                    if (article.ApplyEnrichment(enrichment.Content, enrichment.ImageUrl)) enriched++;
-                }
-                catch (Exception ex)
-                {
-                    _log.LogDebug(ex, "Enrichment skipped for {Url}", article.SourceUrl);
+                    // Time-boxed, best-effort: on failure the article still lands
+                    // with whatever the feed provided.
+                    article.MarkEnrichmentAttempted();
+                    try
+                    {
+                        using var enrichCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        enrichCts.CancelAfter(TimeSpan.FromSeconds(12));
+                        var enrichment = await enricher.EnrichAsync(article.SourceUrl, enrichCts.Token);
+                        if (article.ApplyEnrichment(enrichment.Content, enrichment.ImageUrl)) enriched++;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogDebug(ex, "Enrichment skipped for {Url}", article.SourceUrl);
+                    }
                 }
 
                 var inserted = await repo.UpsertAsync(article, ct);
