@@ -396,14 +396,25 @@ public sealed class MarketController : ControllerBase
         var safePoints = Math.Clamp(points, 2, 96);
         var exchangeKey = DataServiceClient.NormalizeExchange(exchange);
 
+        // The chart service only accepts limits from the server-authoritative
+        // grid (smallest is 50). Fetch the smallest valid window, then keep the
+        // most recent [safePoints] closes for a compact sparkline.
+        var tfId = TimeframeMap.IsValid(timeframe) ? timeframe : "60m";
+        var tfClass = TimeframeMap.GetById(tfId).Class;
+        var fetchLimit = CandleCountGrid.ForClass(tfClass)[0];
+
         var tasks = capped.Select(async symbol =>
         {
             try
             {
-                var r = await _chart.GetChartAsync(symbol, timeframe, safePoints, exchangeKey, ct);
+                var r = await _chart.GetChartAsync(symbol, tfId, fetchLimit, exchangeKey, ct);
                 var closes = (r.IsSuccess && r.Value is not null)
                     ? r.Value.Candles.Select(c => c.C).ToList()
                     : new List<decimal>();
+                if (closes.Count > safePoints)
+                {
+                    closes = closes.GetRange(closes.Count - safePoints, safePoints);
+                }
                 return new SparklineDto { Symbol = symbol, Points = closes };
             }
             catch
