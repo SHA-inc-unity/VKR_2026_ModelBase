@@ -63,7 +63,8 @@ public sealed class NewsArticle
         string summary,
         string? imageUrl,
         DateTime publishedAt,
-        IEnumerable<string> tags)
+        IEnumerable<string> tags,
+        string? content = null)
     {
         return new NewsArticle
         {
@@ -72,6 +73,10 @@ public sealed class NewsArticle
             SourceUrl = sourceUrl.Trim(),
             Title = title.Trim(),
             Summary = (summary ?? string.Empty).Trim(),
+            // Full body from the feed's own content:encoded / atom:content when
+            // present — the primary, most reliable source. Scraping only fills
+            // this in later if the feed gave nothing.
+            Content = string.IsNullOrWhiteSpace(content) ? null : content.Trim(),
             ImageUrl = string.IsNullOrWhiteSpace(imageUrl) ? null : imageUrl.Trim(),
             PublishedAt = publishedAt.ToUniversalTime(),
             Tags = (tags ?? Enumerable.Empty<string>())

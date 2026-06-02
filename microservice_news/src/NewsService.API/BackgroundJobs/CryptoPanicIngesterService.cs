@@ -33,6 +33,11 @@ public sealed class CryptoPanicIngesterService : BackgroundService
         new("\\s+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex InlineImgRegex =
         new("<img[^>]+src=\"([^\"]+)\"", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // Block-level tags whose boundary should become a paragraph break in the
+    // plain-text body (so content:encoded reads as paragraphs, not one blob).
+    private static readonly Regex BlockBreakRegex =
+        new("</(p|div|li|h[1-6]|section|article|blockquote|tr)>|<br\\s*/?>",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private readonly IServiceScopeFactory _scopes;
     private readonly IHttpClientFactory _http;
@@ -294,11 +299,21 @@ public sealed class CryptoPanicIngesterService : BackgroundService
         }
         if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link)) return null;
 
+        // content:encoded carries the full article HTML on most feeds
+        // (Cointelegraph, CoinDesk, …). It's the primary, reliable full-text
+        // source — far more robust than scraping the live page.
+        var contentEncodedRaw = item.Element(ContentNs + "encoded")?.Value;
         var descriptionRaw =
             item.Element("description")?.Value
-            ?? item.Element(ContentNs + "encoded")?.Value
+            ?? contentEncodedRaw
             ?? string.Empty;
         var summary = StripHtml(descriptionRaw);
+
+        // Full body from content:encoded when present (paragraphs preserved);
+        // null otherwise → the enrichment scrape will try to fill it later.
+        var content = !string.IsNullOrWhiteSpace(contentEncodedRaw)
+            ? HtmlToText(contentEncodedRaw)
+            : null;
 
         var publishedAt = ParseDate(item.Element("pubDate")?.Value)
                           ?? ParseDate(item.Element(DcNs + "date")?.Value)
@@ -310,7 +325,9 @@ public sealed class CryptoPanicIngesterService : BackgroundService
             source = defaultSource;
         }
 
-        var imageUrl = ExtractImageUrl(item, descriptionRaw);
+        // Pass the richest HTML we have (content:encoded preferred) so the
+        // inline-<img> image fallback has the best chance of finding a picture.
+        var imageUrl = ExtractImageUrl(item, contentEncodedRaw ?? descriptionRaw);
         var tags = ExtractTags(item);
 
         return NewsArticle.Create(
@@ -320,7 +337,8 @@ public sealed class CryptoPanicIngesterService : BackgroundService
             summary: Truncate(summary, 2000),
             imageUrl: imageUrl,
             publishedAt: publishedAt,
-            tags: tags);
+            tags: tags,
+            content: content);
     }
 
     private static NewsArticle? ParseAtomEntry(XElement entry, string defaultSource)
@@ -331,17 +349,23 @@ public sealed class CryptoPanicIngesterService : BackgroundService
             .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
         if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link)) return null;
 
+        var atomContentRaw = entry.Element(AtomNs + "content")?.Value;
         var summaryRaw =
             entry.Element(AtomNs + "summary")?.Value
-            ?? entry.Element(AtomNs + "content")?.Value
+            ?? atomContentRaw
             ?? string.Empty;
         var summary = StripHtml(summaryRaw);
+
+        // Full body from atom:content when present; null otherwise → scrape later.
+        var content = !string.IsNullOrWhiteSpace(atomContentRaw)
+            ? HtmlToText(atomContentRaw)
+            : null;
 
         var publishedAt = ParseDate(entry.Element(AtomNs + "published")?.Value)
                           ?? ParseDate(entry.Element(AtomNs + "updated")?.Value)
                           ?? DateTime.UtcNow;
 
-        var imageUrl = ExtractImageUrl(entry, summaryRaw);
+        var imageUrl = ExtractImageUrl(entry, atomContentRaw ?? summaryRaw);
 
         var tags = entry.Elements(AtomNs + "category")
             .Select(c => c.Attribute("term")?.Value)
@@ -356,7 +380,8 @@ public sealed class CryptoPanicIngesterService : BackgroundService
             summary: Truncate(summary, 2000),
             imageUrl: imageUrl,
             publishedAt: publishedAt,
-            tags: tags);
+            tags: tags,
+            content: content);
     }
 
     private static string? ExtractImageUrl(XElement item, string? descriptionHtml)
@@ -453,6 +478,32 @@ public sealed class CryptoPanicIngesterService : BackgroundService
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
         var withoutTags = HtmlTagRegex.Replace(raw, " ");
         return NormalizeText(withoutTags);
+    }
+
+    /// <summary>
+    /// Converts an HTML article body (content:encoded / atom:content) to clean
+    /// plain text with paragraph breaks preserved: block-level tag boundaries
+    /// become blank lines, remaining tags are stripped, entities decoded, and
+    /// intra-line whitespace collapsed. Capped so a huge body can't bloat a row.
+    /// </summary>
+    private static string HtmlToText(string? rawHtml)
+    {
+        if (string.IsNullOrWhiteSpace(rawHtml)) return string.Empty;
+
+        // 1) Block boundaries → newlines (before tags are stripped).
+        var text = BlockBreakRegex.Replace(rawHtml, "\n");
+        // 2) Strip remaining (inline) tags.
+        text = HtmlTagRegex.Replace(text, " ");
+        // 3) Decode HTML entities.
+        text = WebUtility.HtmlDecode(text);
+        // 4) Per-line: collapse whitespace, trim, drop blanks → clean paragraphs.
+        var lines = text
+            .Replace("\r\n", "\n")
+            .Split('\n')
+            .Select(l => WhitespaceRegex.Replace(l, " ").Trim())
+            .Where(l => l.Length > 0);
+        var joined = string.Join("\n\n", lines).Trim();
+        return Truncate(joined, 24000);
     }
 
     private static string Truncate(string value, int maxLength)

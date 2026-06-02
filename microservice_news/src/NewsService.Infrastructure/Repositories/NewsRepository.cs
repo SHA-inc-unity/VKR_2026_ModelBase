@@ -13,7 +13,12 @@ public sealed class NewsRepository : INewsRepository
 
     public async Task<NewsPage> ListAsync(string? symbol, int page, int pageSize, CancellationToken ct)
     {
-        IQueryable<NewsArticle> q = _db.NewsArticles.AsNoTracking();
+        // Product rule: "no picture, no publish" — never surface imageless
+        // articles in the feed. They stay in the DB (and may gain an image
+        // later via the og:image enrichment backfill, at which point they
+        // appear), but are hidden until then.
+        IQueryable<NewsArticle> q = _db.NewsArticles.AsNoTracking()
+            .Where(x => x.ImageUrl != null && x.ImageUrl != "");
         if (!string.IsNullOrWhiteSpace(symbol))
         {
             var s = symbol.Trim().ToUpperInvariant();
