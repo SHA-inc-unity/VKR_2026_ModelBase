@@ -13,6 +13,7 @@ using GatewayService.API.Frontend;
 using GatewayService.API.Kafka;
 using GatewayService.API.Market;
 using GatewayService.API.Settings;
+using GatewayService.API.Updates;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -124,6 +125,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ChartService>();
         // ChartRequestQueue is the IChartService — provides coalescing + concurrency limits.
         services.AddSingleton<IChartService, ChartRequestQueue>();
+        // App updates / changelog — Kafka-backed (cmd.data.updates.list), passes the
+        // data-service reply through verbatim for the public GET /api/updates endpoint.
+        services.AddSingleton<IUpdatesService, UpdatesService>();
 
         // Account client — Kafka-backed (no HttpClient)
         services.AddScoped<IAccountServiceClient, AccountServiceClient>();

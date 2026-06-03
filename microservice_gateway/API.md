@@ -85,6 +85,7 @@
 | `GET /api/v1/market/converter/quote` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/v1/market/convert` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/news` and `GET /api/news/home` | `Cache-Control: public, max-age=30, stale-while-revalidate=300` |
+| `GET /api/updates` | `Cache-Control: public, max-age=120, stale-while-revalidate=600` (only on success) |
 
 ETag/If-None-Match сейчас реализованы только для `GET /api/v1/market/chart`. Остальные public routes по-прежнему опираются на `Cache-Control` и timestamps/snapshot markers внутри payload.
 
@@ -305,6 +306,7 @@ UID в теле запроса не используется как источн
 | PATCH | `/api/services/toggles` | Required | частично обновить service toggles |
 | GET | `/api/news` | None | лента новостей |
 | GET | `/api/news/home` | None | compact home-screen news feed |
+| GET | `/api/updates` | None | app updates / changelog (releases list) из microservice_data через Kafka |
 | GET | `/api/social/sentiment` | Optional | community sentiment (bullish/bearish) для монеты; токен опционален и влияет только на `myVote` |
 | POST | `/api/social/sentiment` | Required | проголосовать bullish/bearish или снять голос (`none`); возвращает свежий aggregate |
 | GET | `/api/notifications` | Required | уведомления пользователя |
@@ -1767,6 +1769,44 @@ GET /api/news/home?limit=3&tag=market
 ```
 
 Авторизация не требуется. Query semantics совпадают с `GET /api/news`: доступны `limit` и optional `tag`, а response shape остаётся тем же.
+
+---
+
+## GET /api/updates
+
+### Updates: назначение
+
+Public app-updates / changelog endpoint. Отдаёт список релизов приложения для экрана «что нового». Авторизация не требуется (`[AllowAnonymous]`).
+
+### Updates: how it works
+
+`UpdatesController` → `IUpdatesService` (`UpdatesService`, singleton) делает Kafka request/reply в microservice_data на topic `cmd.data.updates.list` с пустым payload `{}` (таймаут — `Market:KafkaTimeoutSeconds`). Ответ data-service (`{ "releases": [ ... ] }`) проксируется клиенту **verbatim** — gateway не парсит и не переформатирует структуру. Если reply содержит свойство `error`, либо запрос упал по таймауту/ошибке — это трактуется как downstream-сбой.
+
+### Updates: request
+
+```http
+GET /api/updates
+```
+
+### Updates: response example (success)
+
+```json
+{
+  "releases": [
+    { "version": "1.4.0", "date": "2026-06-01", "notes": ["..."] }
+  ]
+}
+```
+
+Точная форма элементов `releases[]` определяется microservice_data — gateway её не валидирует.
+
+### Updates: caching
+
+При успехе ставится `Cache-Control: public, max-age=120, stale-while-revalidate=600`. На сбое заголовок не выставляется.
+
+### Updates: errors
+
+При таймауте/ошибке Kafka или `error` в reply — `503` с телом `{ "error": "updates_unavailable" }` (плоский envelope, **не** стандартный `ErrorResponse`).
 
 ---
 

@@ -67,6 +67,7 @@ try
     builder.Services.AddSingleton<DatasetRepository>();
     builder.Services.AddSingleton<DatasetJobsRepository>();
     builder.Services.AddSingleton<CurrencyPairsRepository>();
+    builder.Services.AddSingleton<AppUpdatesRepository>();
     builder.Services.AddSingleton<DatasetJobsMutator>();
     builder.Services.AddSingleton<MarketWatchRepository>();
     builder.Services.AddSingleton<MarketWatcherRuntimeState>();
@@ -118,6 +119,9 @@ try
     // ── Phase B: dataset job runner (scheduler + lock + recovery) ─────────
     builder.Services.AddHostedService<DatasetJobRunner>();
     builder.Services.AddHostedService<MarketWatcherService>();
+
+    // ── Append-only app-updates store schema bootstrap ───────────────────
+    builder.Services.AddHostedService<AppUpdatesBootstrapService>();
 
     // ── Health checks ─────────────────────────────────────────────────────
     builder.Services.AddHealthChecks()

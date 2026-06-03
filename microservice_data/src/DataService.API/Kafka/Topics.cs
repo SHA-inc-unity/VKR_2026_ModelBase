@@ -63,6 +63,12 @@ public static class Topics
     public const string CmdDataPairsRemove    = "cmd.data.pairs.remove";
     public const string CmdDataPairsSetActive = "cmd.data.pairs.set_active";
 
+    // ── App updates / changelog (append-only store) ──────────────────────
+    // Serves the in-app "What's New" history (releases → builds → changes)
+    // from the immutable app_update_release/app_update_change tables. Request
+    // payload is empty {}; reply is { releases: [...] }, newest release first.
+    public const string CmdDataUpdatesList    = "cmd.data.updates.list";
+
     // ── Events (fire-and-forget, no correlation round-trip) ──────────────
     public const string EvtDataIngestProgress         = "events.data.ingest.progress";
     public const string EvtDataDatasetJobProgress     = "events.data.dataset.job.progress";
@@ -113,5 +119,6 @@ public static class Topics
         CmdDataPairsAdd,
         CmdDataPairsRemove,
         CmdDataPairsSetActive,
+        CmdDataUpdatesList,
     ];
 }

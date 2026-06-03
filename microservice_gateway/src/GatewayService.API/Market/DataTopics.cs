@@ -16,4 +16,6 @@ public static class DataTopics
     public const string CmdDataMarketWatcherTracked = "cmd.data.market_watcher.tracked_symbols";
     // Currency pairs center (single source of truth) — base/quote vocabularies + cross-product symbols.
     public const string CmdDataPairsList = "cmd.data.pairs.list";
+    // App updates / changelog — releases list for the public GET /api/updates endpoint.
+    public const string CmdDataUpdatesList = "cmd.data.updates.list";
 }

@@ -8,6 +8,13 @@ Data-сервис на .NET, владелец датасета, Kafka-коман
 в `dataset_jobs`, а поднимается как hosted service внутри data-service и
 управляется через Kafka topics `cmd.data.market_watcher.{status,set_enabled,rows,logs}`.
 
+Также владеет append-only «app updates / changelog» store-ом (источник истины для
+in-app истории обновлений «Что нового»): immutable таблицы `app_update_release` /
+`app_update_change` с DB-level триггер-гардом против UPDATE/DELETE/TRUNCATE,
+seed из bundled changelog Flutter-клиента, чтение по Kafka `cmd.data.updates.list`
+(пустой payload → `{ releases: [...] }`, newest-first). Схема поднимается на старте
+hosted service-ом `AppUpdatesBootstrapService` (retry с backoff, не блокирует boot).
+
 ## Что читать перед кодом
 
 - [../../../microservice_data/README.md](../../../microservice_data/README.md)

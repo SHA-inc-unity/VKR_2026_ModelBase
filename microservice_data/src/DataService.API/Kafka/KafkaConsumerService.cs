@@ -24,6 +24,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
     private readonly DatasetRepository          _repo;
     private readonly DatasetJobsRepository      _jobsRepo;
     private readonly CurrencyPairsRepository    _pairsRepo;
+    private readonly AppUpdatesRepository        _appUpdatesRepo;
     private readonly MarketWatchRepository      _marketWatchRepo;
     private readonly MarketWatcherRuntimeState  _marketWatcher;
     private readonly MarketDataClientFactory    _markets;
@@ -94,6 +95,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         DatasetRepository repo,
         DatasetJobsRepository jobsRepo,
         CurrencyPairsRepository pairsRepo,
+        AppUpdatesRepository appUpdatesRepo,
         MarketWatchRepository marketWatchRepo,
         MarketWatcherRuntimeState marketWatcher,
         MarketDataClientFactory markets,
@@ -106,6 +108,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
         _repo                    = repo;
         _jobsRepo                = jobsRepo;
         _pairsRepo               = pairsRepo;
+        _appUpdatesRepo          = appUpdatesRepo;
         _marketWatchRepo         = marketWatchRepo;
         _marketWatcher           = marketWatcher;
         _markets                 = markets;
@@ -378,6 +381,7 @@ public sealed partial class KafkaConsumerService : BackgroundService
             Topics.CmdDataPairsAdd       => await HandlePairsAddAsync(payload, ct),
             Topics.CmdDataPairsRemove    => await HandlePairsRemoveAsync(payload, ct),
             Topics.CmdDataPairsSetActive => await HandlePairsSetActiveAsync(payload, ct),
+            Topics.CmdDataUpdatesList    => await HandleUpdatesListAsync(ct),
             _                                => new { error = $"Unknown topic: {topic}" },
         };
 
