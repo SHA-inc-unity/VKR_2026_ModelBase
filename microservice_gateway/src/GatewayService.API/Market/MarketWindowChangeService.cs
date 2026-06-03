@@ -41,14 +41,12 @@ public sealed class MarketWindowChangeService : IMarketWindowChangeService
     private const int DailyLimit = 34;
     private const int HourlyLimit = 2;
 
-    // Only the close + timestamp are needed; project just those two columns so the
-    // Kafka payload stays tiny (mirrors ChartProjectionColumns minus the OHLCV
-    // columns we don't use here).
-    private static readonly IReadOnlyList<string> CloseColumns = new[]
-    {
-        "timestamp_utc",
-        "close_price",
-    };
+    // Must request the FULL OHLCV projection: the shared row parser (ParseRows)
+    // reads `timestamp_ms` and DROPS any row where open_price/close_price == 0, so
+    // a close-only projection yields zero usable rows (every row gets skipped).
+    // Reuse the proven chart projection; 34 daily rows × 7 cols is still tiny.
+    private static readonly IReadOnlyList<string> CloseColumns =
+        DataServiceClient.ChartProjectionColumns;
 
     // Cap fan-out concurrency so a full-universe (~92 symbols) snapshot rebuild
     // doesn't flood the shared Kafka request client. Each symbol issues 2 queries.
