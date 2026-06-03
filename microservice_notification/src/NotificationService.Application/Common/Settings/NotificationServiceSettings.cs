@@ -38,6 +38,17 @@ public sealed class PriceWatcherSettings
 }
 
 /// <summary>
+/// Cadence / kill-switch for <c>PriceAlertEvaluatorService</c>, the watcher that
+/// evaluates user-defined price alerts against live prices.
+/// </summary>
+public sealed class AlertWatcherSettings
+{
+    public const string SectionName = "AlertWatcher";
+    public int PollIntervalSeconds { get; set; } = 60;
+    public bool Enabled { get; set; } = true;
+}
+
+/// <summary>
 /// Self-hosted Web Push (VAPID) configuration. The public key is safe to commit
 /// and is served to browsers; the private key is a secret injected via env only.
 /// </summary>

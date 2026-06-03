@@ -65,3 +65,27 @@ public sealed class PushSubscriptionConfiguration : IEntityTypeConfiguration<Pus
         b.HasIndex(x => x.UserId).HasDatabaseName("ix_push_subscriptions_user_id");
     }
 }
+
+public sealed class PriceAlertConfiguration : IEntityTypeConfiguration<PriceAlert>
+{
+    public void Configure(EntityTypeBuilder<PriceAlert> b)
+    {
+        b.ToTable("price_alerts");
+        b.HasKey(x => x.Id).HasName("pk_price_alerts");
+
+        b.Property(x => x.Id).HasColumnName("id");
+        b.Property(x => x.UserId).HasColumnName("user_id");
+        b.Property(x => x.Symbol).HasColumnName("symbol").HasMaxLength(32).IsRequired();
+        b.Property(x => x.Condition).HasColumnName("condition").HasMaxLength(8).IsRequired();
+        b.Property(x => x.TargetPrice).HasColumnName("target_price").HasColumnType("numeric");
+        b.Property(x => x.IsEnabled).HasColumnName("is_enabled");
+        b.Property(x => x.IsArmed).HasColumnName("is_armed");
+        b.Property(x => x.LastTriggeredAt).HasColumnName("last_triggered_at");
+        b.Property(x => x.LastObservedPrice).HasColumnName("last_observed_price").HasColumnType("numeric");
+        b.Property(x => x.CreatedAt).HasColumnName("created_at");
+        b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+
+        b.HasIndex(x => x.UserId).HasDatabaseName("ix_price_alerts_user_id");
+        b.HasIndex(x => x.IsEnabled).HasDatabaseName("ix_price_alerts_is_enabled");
+    }
+}

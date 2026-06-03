@@ -88,6 +88,7 @@ public sealed class NotificationsAppService : INotificationsAppService
             "comment.reply" => s.EnableReply,
             "news.favorite" => s.EnableNews,
             "price.favorite" => s.EnablePrice,
+            "price.alert" => s.EnablePrice,
             _ => true,
         };
         if (!allowed) return false;

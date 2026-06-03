@@ -28,8 +28,6 @@ public sealed class FrontendContractState : IFrontendContractState
     private readonly ILogger<FrontendContractState> _log;
     private readonly Dictionary<string, Dictionary<string, LinkedExchangeDto>> _linkedByUser =
         new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, Dictionary<string, PriceAlertDto>> _alertsByUser =
-        new(StringComparer.OrdinalIgnoreCase);
 
     private ServiceTogglesDto _serviceToggles;
 
@@ -187,85 +185,6 @@ public sealed class FrontendContractState : IFrontendContractState
         }
     }
 
-    public IReadOnlyList<PriceAlertDto> GetAlerts(string userId)
-    {
-        lock (_gate)
-        {
-            HydrateFromCacheUnsafe();
-            if (!_alertsByUser.TryGetValue(userId, out var alerts))
-            {
-                return [];
-            }
-
-            return alerts.Values
-                .OrderByDescending(item => item.CreatedAt)
-                .ToArray();
-        }
-    }
-
-    public PriceAlertDto CreateAlert(string userId, CreateAlertRequest request)
-    {
-        lock (_gate)
-        {
-            HydrateFromCacheUnsafe();
-            var alerts = GetOrCreate(_alertsByUser, userId);
-            var alert = new PriceAlertDto
-            {
-                Id = Guid.NewGuid().ToString("N"),
-                Symbol = request.Symbol.Trim().ToUpperInvariant(),
-                Condition = request.Condition.Trim().ToLowerInvariant(),
-                TargetPrice = request.TargetPrice,
-                IsEnabled = request.IsEnabled,
-                CreatedAt = DateTimeOffset.UtcNow,
-            };
-
-            alerts[alert.Id] = alert;
-            PersistUnsafe();
-            return alert;
-        }
-    }
-
-    public PriceAlertDto? UpdateAlert(string userId, string id, UpdateAlertRequest request)
-    {
-        lock (_gate)
-        {
-            HydrateFromCacheUnsafe();
-            if (!_alertsByUser.TryGetValue(userId, out var alerts)
-                || !alerts.TryGetValue(id, out var alert))
-            {
-                return null;
-            }
-
-            alert = alert with
-            {
-                Symbol = string.IsNullOrWhiteSpace(request.Symbol) ? alert.Symbol : request.Symbol.Trim().ToUpperInvariant(),
-                Condition = string.IsNullOrWhiteSpace(request.Condition) ? alert.Condition : request.Condition.Trim().ToLowerInvariant(),
-                TargetPrice = request.TargetPrice ?? alert.TargetPrice,
-                IsEnabled = request.IsEnabled ?? alert.IsEnabled,
-            };
-
-            alerts[id] = alert;
-            PersistUnsafe();
-            return alert;
-        }
-    }
-
-    public bool DeleteAlert(string userId, string id)
-    {
-        lock (_gate)
-        {
-            HydrateFromCacheUnsafe();
-            var removed = _alertsByUser.TryGetValue(userId, out var alerts)
-                && alerts.Remove(id);
-            if (removed)
-            {
-                PersistUnsafe();
-            }
-
-            return removed;
-        }
-    }
-
     public ServiceTogglesDto GetServiceToggles()
     {
         lock (_gate)
@@ -298,14 +217,13 @@ public sealed class FrontendContractState : IFrontendContractState
         lock (_gate)
         {
             HydrateFromCacheUnsafe();
-            var userKeys = _linkedByUser.Keys
-                .Union(_alertsByUser.Keys, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
 
             return new FrontendAdminSnapshot(
-                UsersCount: userKeys.Length,
+                UsersCount: _linkedByUser.Keys.Count,
                 LinkedExchangesCount: _linkedByUser.Values.Sum(item => item.Count),
-                AlertsCount: _alertsByUser.Values.Sum(item => item.Count),
+                // TODO: re-source alert count from notification service
+                // Alerts now live in microservice_notification, not the gateway.
+                AlertsCount: 0,
                 AvailableExchangesCount: ExchangeCatalog.Length,
                 ServiceToggles: _serviceToggles);
         }
@@ -377,13 +295,6 @@ public sealed class FrontendContractState : IFrontendContractState
                     .ToDictionary(item => item.Slug, StringComparer.OrdinalIgnoreCase);
             }
 
-            _alertsByUser.Clear();
-            foreach (var (userId, alerts) in persisted.AlertsByUser)
-            {
-                _alertsByUser[userId] = alerts
-                    .ToDictionary(item => item.Id, StringComparer.OrdinalIgnoreCase);
-            }
-
             _serviceToggles = persisted.ServiceToggles;
         }
         catch (Exception ex)
@@ -402,10 +313,6 @@ public sealed class FrontendContractState : IFrontendContractState
                     pair => pair.Key,
                     pair => (IReadOnlyList<LinkedExchangeDto>)pair.Value.Values.ToArray(),
                     StringComparer.OrdinalIgnoreCase),
-                AlertsByUser = _alertsByUser.ToDictionary(
-                    pair => pair.Key,
-                    pair => (IReadOnlyList<PriceAlertDto>)pair.Value.Values.ToArray(),
-                    StringComparer.OrdinalIgnoreCase),
                 ServiceToggles = _serviceToggles,
             };
 
@@ -420,9 +327,6 @@ public sealed class FrontendContractState : IFrontendContractState
     private sealed record PersistedFrontendContractState
     {
         public Dictionary<string, IReadOnlyList<LinkedExchangeDto>> LinkedByUser { get; init; } =
-            new(StringComparer.OrdinalIgnoreCase);
-
-        public Dictionary<string, IReadOnlyList<PriceAlertDto>> AlertsByUser { get; init; } =
             new(StringComparer.OrdinalIgnoreCase);
 
         public ServiceTogglesDto ServiceToggles { get; init; } = new();

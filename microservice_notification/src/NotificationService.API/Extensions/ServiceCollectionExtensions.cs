@@ -27,6 +27,7 @@ public static class ServiceCollectionExtensions
         services.Configure<SocialServiceSettings>(config.GetSection(SocialServiceSettings.SectionName));
         services.Configure<GatewaySettings>(config.GetSection(GatewaySettings.SectionName));
         services.Configure<PriceWatcherSettings>(config.GetSection(PriceWatcherSettings.SectionName));
+        services.Configure<AlertWatcherSettings>(config.GetSection(AlertWatcherSettings.SectionName));
         services.Configure<PushSettings>(config.GetSection(PushSettings.SectionName));
 
         services.AddDbContext<NotificationDbContext>(opt =>
@@ -38,8 +39,10 @@ public static class ServiceCollectionExtensions
         services.AddScoped<INotificationRepository, NotificationRepository>();
         services.AddScoped<INotificationSettingsRepository, NotificationSettingsRepository>();
         services.AddScoped<IPushSubscriptionRepository, PushSubscriptionRepository>();
+        services.AddScoped<IPriceAlertRepository, PriceAlertRepository>();
         services.AddScoped<IWebPushSender, WebPushSender>();
         services.AddScoped<INotificationsAppService, NotificationsAppService>();
+        services.AddScoped<IPriceAlertsAppService, PriceAlertsAppService>();
 
         services.AddSingleton<SseDispatcher>();
         services.AddSingleton<ISseDispatcher>(sp => sp.GetRequiredService<SseDispatcher>());
@@ -63,6 +66,7 @@ public static class ServiceCollectionExtensions
 
         services.AddHostedService<KafkaConsumerService>();
         services.AddHostedService<PriceDriftWatcherService>();
+        services.AddHostedService<PriceAlertEvaluatorService>();
 
         var jwtSection = config.GetSection(JwtSettings.SectionName);
         var key = Encoding.UTF8.GetBytes(jwtSection["SecretKey"] ?? string.Empty);

@@ -10,6 +10,7 @@ public sealed class NotificationDbContext : DbContext
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<NotificationSettings> NotificationSettings => Set<NotificationSettings>();
     public DbSet<PushSubscription> PushSubscriptions => Set<PushSubscription>();
+    public DbSet<PriceAlert> PriceAlerts => Set<PriceAlert>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

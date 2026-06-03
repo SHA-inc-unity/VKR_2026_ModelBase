@@ -24,6 +24,8 @@ services:
       Gateway__BaseUrl: ${GATEWAY_BASE_URL:-http://exchange-gateway:5000}
       PriceWatcher__PollIntervalSeconds: ${PRICE_WATCHER_POLL_SECONDS:-300}
       PriceWatcher__Enabled: ${PRICE_WATCHER_ENABLED:-true}
+      AlertWatcher__PollIntervalSeconds: ${ALERT_WATCHER_POLL_SECONDS:-60}
+      AlertWatcher__Enabled: ${ALERT_WATCHER_ENABLED:-true}
       Push__VapidPublicKey: ${PUSH_VAPID_PUBLIC_KEY:-BCUdvlH58kkkWyQyCVT7SxSDcQYbkS2XW8QLuELAaN1bnTHrDYrTmCLNh1ldxkB6MbUphogzbGzo_i6Xw8VHYcg}
       Push__VapidPrivateKey: ${PUSH_VAPID_PRIVATE_KEY:-}
       Push__VapidSubject: ${PUSH_VAPID_SUBJECT:-mailto:admin@sha-trade.tech}

@@ -180,14 +180,15 @@ Frontend должен различать эти сценарии.
 
 - `GET /api/portfolio/summary`;
 - `/api/exchanges/*`;
-- `/api/alerts/*`;
 - `/api/services/toggles`;
 - `GET /api/admin/{summary,users,services,statistics}`.
+
+> `/api/alerts/*` **больше не** в этом списке: алерты переехали в microservice_notification, и gateway теперь только форвардит их CRUD туда (см. раздел `/api/alerts/*`). `IFrontendContractState` больше не хранит алерты.
 
 Практические последствия:
 
 - state хранится через `IFrontendContractState` в `IDistributedCache`;
-- если настроен Redis, linked exchanges / alerts / toggles и lightweight mobile-admin counters переживают restart и становятся доступны другим gateway instances;
+- если настроен Redis, linked exchanges / toggles и lightweight mobile-admin counters переживают restart и становятся доступны другим gateway instances;
 - если Redis не настроен, gateway использует `AddDistributedMemoryCache`, и тогда поведение остаётся локальным для текущего процесса;
 - записи маленькие, а model обновления intentionally простая: last-write-wins.
 
@@ -1639,6 +1640,8 @@ GET /api/v1/market/chart?symbol=BTCUSDT&timeframe=5m&limit=200
 | PATCH | `/api/alerts/{id}` | частично обновляет алерт |
 | DELETE | `/api/alerts/{id}` | удаляет алерт, успешный ответ = `204 No Content` |
 
+> **Источник истины — microservice_notification.** Эти routes больше **не** обслуживаются gateway-local cache-backed state: gateway теперь прозрачно форвардит `/api/alerts` CRUD в notification service (`api/alerts[...]`) с тем же raw bearer token, body и querystring и возвращает downstream-ответ verbatim (`ContentResult{StatusCode,Content,ContentType}`), ровно как `/api/notifications/*`. userId notification re-derive-ит из forwarded bearer — gateway его не вычисляет и не хранит алерты. Публичный контракт (request/response shape, нормализация, коды) идентичен прежнему, поэтому Flutter-экран алертов не меняется. Durable-хранение, дедупликация и evaluator живут в notification service.
+
 Request shape для create:
 
 ```json
@@ -1650,11 +1653,16 @@ Request shape для create:
 }
 ```
 
-Runtime normalization:
+Runtime normalization (выполняется теперь в notification service, контракт прежний):
 
 - `symbol` нормализуется в uppercase;
 - `condition` нормализуется в lowercase;
-- `id` генерируется gateway как строковый GUID без разделителей.
+- `id` — строковый идентификатор алерта.
+
+Ошибки:
+
+- если notification service недоступен (network/downstream-unavailable), gateway возвращает `503 { "error": "notification_service_unavailable" }` (по образцу `SocialController`);
+- остальные статусы (`200`/`204`/`404`/...) приходят от notification service verbatim.
 
 ### /api/services/toggles
 
@@ -1671,7 +1679,7 @@ Runtime normalization:
 
 - `GET /api/admin/users` сейчас возвращает snapshot только вызывающего admin-user, а не полный user directory;
 - `GET /api/admin/services` строится из текущих service toggles;
-- `summary` и `statistics` считают linked exchanges/alerts/users только внутри gateway-owned cache-backed state, а не из отдельного admin owner-service.
+- `summary` и `statistics` считают linked exchanges/users только внутри gateway-owned cache-backed state, а не из отдельного admin owner-service; поле `alertsCount` сейчас всегда `0`, потому что алерты переехали в notification service (TODO: re-source из notification).
 
 Использовать эти routes как mobile-facing contract можно уже сейчас, но не как cross-instance persistent admin truth.
 

@@ -110,7 +110,19 @@ User identity comes from the `sub` / `nameid` / NameIdentifier claim.
 | `POST` | `/api/notifications/push/unsubscribe` | Remove a Web Push subscription by `{ endpoint }` |
 | `GET` | `/api/notification-settings` | Read per-user toggles (auto-creates defaults) |
 | `PUT` | `/api/notification-settings` | Update toggles / threshold |
+| `GET` | `/api/alerts` | List the current user's price alerts (newest first) |
+| `POST` | `/api/alerts` | Create a price alert (`{ symbol, condition, targetPrice, isEnabled? }`) |
+| `PATCH` | `/api/alerts/{id}` | Partial-update an alert (`404` if not owned) |
+| `DELETE` | `/api/alerts/{id}` | Delete an alert (`204` / `404` if not owned) |
 | `GET` | `/health` | Liveness + EF `DbContext` check |
+
+**Price alerts (`/api/alerts`).** Durable per-user target alerts persisted in this
+service's Postgres (`price_alerts`). The gateway forwards `/api/alerts` CRUD here.
+The wire shape matches the gateway's historical `PriceAlertDto` JSON byte-for-byte
+so the Flutter client is unaffected: `{ "id", "symbol", "condition", "targetPrice",
+"isEnabled", "createdAt" }`, where `id` is the alert's Guid in `"N"` form (32-char
+hex) and `condition` ∈ `{ "above", "below" }`. Everything is ownership-scoped by the
+JWT user id; an invalid condition is a `400`.
 
 ---
 
@@ -121,6 +133,7 @@ User identity comes from the `sub` / `nameid` / NameIdentifier claim.
 | `comment.reply` | Kafka `events.social.v1` `comment.created` | Someone replied to your comment (recipient resolved from social `/internal/comments/{parentId}/author`; never notifies the author of their own reply) | `EnableReply` |
 | `news.favorite` | Kafka `events.news.v1` `news.created` | News tagged with a symbol you favorited (recipients from social `/internal/favorites/users-by-symbol/{tag}`) | `EnableNews` |
 | `price.favorite` | `PriceDriftWatcherService` | A symbol you favorited moved beyond your `%` threshold | `EnablePrice` |
+| `price.alert` | `PriceAlertEvaluatorService` | One of your `/api/alerts` rows crossed its target (`above`/`below`) at the live price | `EnablePrice` (reuses the price toggle) |
 
 Per-user settings (`notification_settings`, one row/user, defaults `true` /
 `true` / `true` / `5%`): `EnableReply`, `EnableNews`, `EnablePrice`,
@@ -138,10 +151,27 @@ compares against the **last in-memory snapshot** it holds. If a symbol moved by
 per symbol+direction). It is **O(symbols)**, not O(users). There is a **single
 `%` threshold per user** — no per-symbol or target-price rules.
 
-> **Known gap.** Price alerts come **only** from this watcher over favorited
-> symbols. The gateway's `/api/alerts` rows (`AlertsController` →
-> `IFrontendContractState`) are **stored but never evaluated** by this service —
-> they do not produce notifications today.
+### Price alerts (target rules)
+
+`PriceAlertEvaluatorService` evaluates the user-defined `/api/alerts` rows
+(table `price_alerts`) against live prices — the durable counterpart to the
+favorite-drift watcher. It polls on an interval (default
+`AlertWatcher:PollIntervalSeconds` = 60 s, floored at 30 s; 30 s warm-up; disable
+with `AlertWatcher:Enabled=false`). Each tick it loads **all enabled** alerts,
+fetches one price snapshot from the gateway (`/api/v1/market/snapshot`, the same
+`IMarketSnapshotService` the drift watcher uses) for their distinct symbols, and
+for each alert checks `met = condition=="above" ? price>=target : price<=target`.
+
+- `met && IsArmed` → fire `price.alert` (`Notification.PushAsync` fan-out → inbox
+  + SSE + Web Push), then `MarkFired` (disarm + stamp `last_triggered_at` /
+  `last_observed_price`). **Fire-once** — a sustained breach does not spam.
+- `!met && !IsArmed` → `ReArm`, so it can fire again once the price crosses back to
+  the non-triggering side. (A reconfigured target/condition or a re-enable also
+  re-arms via `PriceAlert.Update`.)
+
+Dedup key is `alert:{id}:{firedEpoch}` (a fresh epoch each fire). The tick is
+**soft-fail** (logged, continue) on any error. This closes the former gap where
+`/api/alerts` rows were stored but never evaluated.
 
 ---
 
@@ -159,6 +189,7 @@ Wired through `docker-compose.yml` env (`Section__Key` → `appsettings`):
 | `SocialService__BaseUrl` / `SocialService__InternalApiKey` | `SocialService` | `http://social_service_api:5000` / — | Social `/internal/*` directory lookups (`X-Internal-Api-Key`) |
 | `Gateway__BaseUrl` | `Gateway` | `http://exchange-gateway:5000` | Market snapshot source |
 | `PriceWatcher__PollIntervalSeconds` / `PriceWatcher__Enabled` | `PriceWatcher` | `300` / `true` | Drift-watcher cadence / kill-switch |
+| `AlertWatcher__PollIntervalSeconds` / `AlertWatcher__Enabled` | `AlertWatcher` | `60` / `true` | Price-alert evaluator cadence (floored at 30 s) / kill-switch |
 | `Push__VapidPublicKey` | `Push` | committed default | Public VAPID key served to browsers (safe to commit) |
 | `Push__VapidPrivateKey` | `Push` | **empty** | Secret VAPID private key. **Never committed** — injected via host-only `.env` (`PUSH_VAPID_PRIVATE_KEY`). Empty ⇒ push disabled (soft, logged once) |
 | `Push__VapidSubject` | `Push` | `mailto:admin@sha-trade.tech` | VAPID `sub` contact (mailto/URL) |
@@ -168,7 +199,7 @@ Wired through `docker-compose.yml` env (`Section__Key` → `appsettings`):
 ## Rules & constraints
 
 - **Build/run on backend or Docker** — no .NET SDK on the admin host; `TreatWarningsAsErrors=true`.
-- **EF auto-migrate on boot** (`MigrateAndSeedAsync`): applies pending migrations, then a `RequiredTables` whitelist (`notifications`, `notification_settings`, `push_subscriptions`) sanity-check — if the schema is fully empty after migrate it recreates tables from the model; a *partial* schema is a hard-fail.
+- **EF auto-migrate on boot** (`MigrateAndSeedAsync`): applies pending migrations, then a `RequiredTables` whitelist (`notifications`, `notification_settings`, `push_subscriptions`, `price_alerts`) sanity-check — if the schema is fully empty after migrate it recreates tables from the model; a *partial* schema is a hard-fail.
 - **Web Push secret is never committed.** `appsettings.json` ships an empty `Push:VapidPrivateKey`; the secret is provided only via the host `.env` (`PUSH_VAPID_PRIVATE_KEY`) → `Push__VapidPrivateKey`. With no private key, push is disabled (logged once), inbox/SSE keep working.
 - **Kafka is consume-only** here (`redpanda:29092`). The envelope contract (`type` + `payload`) is reimplemented in C# and hand-synced with the rest of the repo — see root `CLAUDE.md` on the two communication planes and the hand-synced topic constants.
 - **SSE is in-process** — a single replica; horizontal scale-out would need a shared bus, because `SseDispatcher` only knows about clients connected to *this* instance.

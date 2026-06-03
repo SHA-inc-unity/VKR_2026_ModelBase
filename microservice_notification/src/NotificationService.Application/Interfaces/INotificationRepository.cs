@@ -75,3 +75,22 @@ public interface IWebPushSender
 {
     Task SendAsync(Guid userId, Notification n, CancellationToken ct);
 }
+
+/// <summary>
+/// Persistence for user-defined price alerts. CRUD reads/writes are ownership-scoped
+/// (user id), while <see cref="ListEnabledAsync"/> returns the cross-user batch the
+/// evaluator polls.
+/// </summary>
+public interface IPriceAlertRepository
+{
+    Task<IReadOnlyList<PriceAlert>> ListByUserAsync(Guid userId, CancellationToken ct);
+    Task<PriceAlert?> GetAsync(Guid id, Guid userId, CancellationToken ct);
+    Task AddAsync(PriceAlert alert, CancellationToken ct);
+    Task UpdateAsync(PriceAlert alert, CancellationToken ct);
+
+    /// <summary>Delete an alert owned by the user; returns false if not found / not owned.</summary>
+    Task<bool> DeleteAsync(Guid id, Guid userId, CancellationToken ct);
+
+    /// <summary>All enabled alerts across every user — the evaluator's per-tick batch.</summary>
+    Task<IReadOnlyList<PriceAlert>> ListEnabledAsync(CancellationToken ct);
+}
