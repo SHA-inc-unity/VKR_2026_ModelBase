@@ -36,6 +36,7 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         string? sortDir = null,
         IReadOnlyList<string>? symbols = null,
         string? collection = null,
+        string? category = null,
         CancellationToken ct = default)
     {
         var snapshot = await LoadSnapshotAsync(ct);
@@ -53,6 +54,16 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
                 .Select(static item => item.Trim().ToUpperInvariant())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             filtered = filtered.Where(item => filter.Contains(item.Symbol));
+        }
+
+        // Curated category ("sector") filter — pure static map lookup baked into the
+        // snapshot (CoinCategoryMap), no external call. Keeps only tickers whose
+        // category slug set contains the requested slug (OrdinalIgnoreCase).
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            var categorySlug = category.Trim();
+            filtered = filtered.Where(item =>
+                item.Categories.Contains(categorySlug, StringComparer.OrdinalIgnoreCase));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -95,6 +106,39 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
                 UpdatedAt = snapshot.UpdatedAt,
                 DegradedFields = snapshot.DegradedFields,
             }
+        });
+    }
+
+    public async Task<ServiceResult<MarketCategoriesResponse>> GetCategoriesAsync(CancellationToken ct = default)
+    {
+        var snapshot = await LoadSnapshotAsync(ct);
+
+        // Count how many CURRENTLY-tracked snapshot tickers carry each category
+        // slug, so the frontend can render only non-empty sectors. Categories are
+        // the static CoinCategoryMap canonical list (no external call); the count is
+        // the only live, snapshot-derived part. All canonical categories are
+        // returned (count 0 included) so the frontend can show/grey them consistently.
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in snapshot.Items)
+        {
+            foreach (var slug in item.Categories)
+            {
+                counts[slug] = counts.TryGetValue(slug, out var current) ? current + 1 : 1;
+            }
+        }
+
+        var items = CoinCategoryMap.Categories
+            .Select(category => new MarketCategoryDto
+            {
+                Slug = category.Slug,
+                DisplayName = category.DisplayName,
+                Count = counts.TryGetValue(category.Slug, out var count) ? count : 0,
+            })
+            .ToArray();
+
+        return ServiceResult<MarketCategoriesResponse>.Ok(new MarketCategoriesResponse
+        {
+            Items = items,
         });
     }
 
@@ -278,6 +322,7 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
             ExchangeCount = item.ExchangeCount,
             UpdatedAt = item.UpdatedAt,
             IsTrending = item.IsTrending,
+            Categories = item.Categories,
         };
     }
 }

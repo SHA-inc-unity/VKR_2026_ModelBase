@@ -120,7 +120,8 @@ Gateway now also exposes a lightweight frontend-contract layer for routes that d
 | GET | `/api/account/me` | Required | Current user profile |
 | GET | `/api/dashboard` | Optional | Aggregated main screen data; guest gets only public sections, user also gets personal sections |
 | GET | `/api/v1/market/overview` | None | Public market overview for the home screen |
-| GET | `/api/v1/market/tickers` | None | Searchable, sortable, paginated market snapshot list with optional `collection` and `snapshotId` |
+| GET | `/api/v1/market/tickers` | None | Searchable, sortable, paginated market snapshot list with optional `collection`, `category` (curated sector slug) and `snapshotId` |
+| GET | `/api/v1/market/categories` | None | Curated coin categories (sectors) + live count of tracked tickers per slug |
 | GET | `/api/v1/market/trending` | None | Dedicated backend feed for home Trending cards |
 | GET | `/api/v1/market/top-movers` | None | Dedicated backend feed for home Top movers cards |
 | POST | `/api/v1/market/quotes/batch` | None | Lightweight quote refresh for a symbol set |

@@ -115,6 +115,7 @@ public sealed class MarketController : ControllerBase
         [FromQuery] string? sortDir = null,
         [FromQuery] string? symbols = null,
         [FromQuery] string? collection = null,
+        [FromQuery] string? category = null,
         CancellationToken ct = default)
     {
         var filteredSymbols = string.IsNullOrWhiteSpace(symbols)
@@ -126,13 +127,38 @@ public sealed class MarketController : ControllerBase
         var safePage = Math.Max(1, page);
         var safePageSize = Math.Clamp(pageSize, 1, 100);
 
-        var result = await _market.GetTickersAsync(safePage, safePageSize, search, sortBy, sortDir, filteredSymbols, collection, ct);
+        var result = await _market.GetTickersAsync(safePage, safePageSize, search, sortBy, sortDir, filteredSymbols, collection, category, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid tickers request", HttpContext.GetCorrelationId()));
         }
 
         Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// Lists the curated coin categories ("sectors") with a live count of how many
+    /// currently-tracked snapshot tickers fall into each. Categories are OUR own
+    /// static map (<c>CoinCategoryMap</c>) — no external/CoinGecko call; only the
+    /// per-category count is derived from the live market snapshot. The frontend
+    /// uses this to render the sector filter chips and drive
+    /// <c>GET /api/v1/market/tickers?category=&lt;slug&gt;</c>.
+    /// </summary>
+    [HttpGet("categories")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetCategories(CancellationToken ct = default)
+    {
+        var result = await _market.GetCategoriesAsync(ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                ErrorResponse.ServiceUnavailable("market_categories", HttpContext.GetCorrelationId()));
+        }
+
+        // Categories are static; only the counts move with the snapshot. Same short
+        // public cache window as the other snapshot-backed market list routes.
+        Response.Headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=120";
         return Ok(result.Value);
     }
 
@@ -148,7 +174,7 @@ public sealed class MarketController : ControllerBase
             ? Array.Empty<string>()
             : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "trending", ct);
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "trending", null, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid trending request", HttpContext.GetCorrelationId()));
@@ -170,7 +196,7 @@ public sealed class MarketController : ControllerBase
             ? Array.Empty<string>()
             : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "top-movers", ct);
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "top-movers", null, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid top movers request", HttpContext.GetCorrelationId()));
@@ -197,7 +223,7 @@ public sealed class MarketController : ControllerBase
             ? Array.Empty<string>()
             : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "gainers", ct);
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "gainers", null, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid gainers request", HttpContext.GetCorrelationId()));
@@ -224,7 +250,7 @@ public sealed class MarketController : ControllerBase
             ? Array.Empty<string>()
             : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "losers", ct);
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "losers", null, ct);
         if (!result.IsSuccess || result.Value is null)
         {
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid losers request", HttpContext.GetCorrelationId()));

@@ -14,6 +14,30 @@ public sealed record MarketTickersResponse
     public FrontendResponseMetaDto Meta { get; init; } = new();
 }
 
+/// <summary>
+/// Response body for <c>GET /api/v1/market/categories</c>: the canonical curated
+/// category ("sector") list with a live count of how many CURRENTLY-tracked
+/// snapshot tickers fall into each category. Lets the frontend render only
+/// non-empty sectors (or grey out empty ones). Counts come from the live gateway
+/// snapshot — categories themselves are static (no external call).
+/// </summary>
+public sealed record MarketCategoriesResponse
+{
+    public IReadOnlyList<MarketCategoryDto> Items { get; init; } = [];
+}
+
+public sealed record MarketCategoryDto
+{
+    /// <summary>Stable machine slug the frontend localizes by (e.g. <c>layer1</c>).</summary>
+    public string Slug { get; init; } = string.Empty;
+
+    /// <summary>Neutral English fallback label (frontend may override per-slug).</summary>
+    public string DisplayName { get; init; } = string.Empty;
+
+    /// <summary>Number of currently-tracked snapshot tickers carrying this category.</summary>
+    public int Count { get; init; }
+}
+
 public sealed record MarketTickerItemDto
 {
     public string Symbol { get; init; } = string.Empty;
@@ -74,6 +98,15 @@ public sealed record MarketTickerItemDto
     public int ExchangeCount { get; init; }
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
     public bool IsTrending { get; init; }
+
+    /// <summary>
+    /// Curated category ("sector") slugs (e.g. <c>["layer1","solana"]</c>) from the
+    /// gateway's static <c>CoinCategoryMap</c> — OUR own data, no external call. A
+    /// coin may carry <c>0..N</c> slugs; the array is empty (never null) for an
+    /// unmapped base. The frontend localizes by slug and can filter the list via
+    /// <c>GET /api/v1/market/tickers?category=&lt;slug&gt;</c>.
+    /// </summary>
+    public IReadOnlyList<string> Categories { get; init; } = [];
 }
 
 public sealed record MarketBatchQuotesResponse

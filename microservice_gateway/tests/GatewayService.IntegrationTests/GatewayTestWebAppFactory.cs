@@ -332,7 +332,7 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
         }));
     }
 
-    public Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(int page = 1, int pageSize = 25, string? search = null, string? sortBy = null, string? sortDir = null, IReadOnlyList<string>? symbols = null, string? collection = null, CancellationToken ct = default)
+    public Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(int page = 1, int pageSize = 25, string? search = null, string? sortBy = null, string? sortDir = null, IReadOnlyList<string>? symbols = null, string? collection = null, string? category = null, CancellationToken ct = default)
     {
         var normalizedCollection = collection?.Trim().ToLowerInvariant() switch
         {
@@ -351,6 +351,11 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
         {
             var filter = symbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
             items = items.Where(item => filter.Contains(item.Symbol));
+        }
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            items = items.Where(item => item.Categories.Contains(category, StringComparer.OrdinalIgnoreCase));
         }
 
         items = normalizedCollection switch
@@ -377,6 +382,32 @@ internal sealed class FakeMarketServiceClient : IMarketServiceClient
                 GeneratedAt = UpdatedAt,
                 UpdatedAt = UpdatedAt,
             }
+        }));
+    }
+
+    public Task<ServiceResult<MarketCategoriesResponse>> GetCategoriesAsync(CancellationToken ct = default)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in Items)
+        {
+            foreach (var slug in item.Categories)
+            {
+                counts[slug] = counts.TryGetValue(slug, out var current) ? current + 1 : 1;
+            }
+        }
+
+        var items = CoinCategoryMap.Categories
+            .Select(category => new MarketCategoryDto
+            {
+                Slug = category.Slug,
+                DisplayName = category.DisplayName,
+                Count = counts.TryGetValue(category.Slug, out var count) ? count : 0,
+            })
+            .ToArray();
+
+        return Task.FromResult(ServiceResult<MarketCategoriesResponse>.Ok(new MarketCategoriesResponse
+        {
+            Items = items,
         }));
     }
 

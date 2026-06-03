@@ -73,6 +73,7 @@
 | `GET /api/v1/market/config` | `Cache-Control: public, max-age=60, stale-while-revalidate=3540` |
 | `GET /api/v1/market/overview` | `Cache-Control: public, max-age=30, stale-while-revalidate=120` |
 | `GET /api/v1/market/tickers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
+| `GET /api/v1/market/categories` | `Cache-Control: public, max-age=30, stale-while-revalidate=120` |
 | `GET /api/v1/market/trending` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/top-movers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/gainers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
@@ -277,7 +278,8 @@ UID в теле запроса не используется как источн
 | GET | `/api/account/me` | Required | профиль текущего пользователя |
 | GET | `/api/dashboard` | Optional | главный экран с агрегированными данными; guest получает только public sections |
 | GET | `/api/v1/market/overview` | None | публичный home-screen overview |
-| GET | `/api/v1/market/tickers` | None | searchable/sortable/paginated market snapshot list |
+| GET | `/api/v1/market/tickers` | None | searchable/sortable/paginated/category-filterable market snapshot list |
+| GET | `/api/v1/market/categories` | None | curated coin categories (sectors) + live tracked-ticker count per slug |
 | GET | `/api/v1/market/trending` | None | curated backend feed для home trending cards |
 | GET | `/api/v1/market/top-movers` | None | pre-ranked backend feed по 24h move |
 | GET | `/api/v1/market/gainers` | None | top GAINERS feed: положительные 24h movers, отсортированы по 24h change DESC |
@@ -917,7 +919,7 @@ List-screen endpoint для market watch / asset directory / search results.
 ### Market Tickers: request
 
 ```http
-GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDir=desc&symbols=BTCUSDT,ETHUSDT&collection=market
+GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDir=desc&symbols=BTCUSDT,ETHUSDT&collection=market&category=layer1
 ```
 
 Авторизация не требуется.
@@ -933,6 +935,7 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 | `sortDir` | string | collection-dependent | `asc` or `desc`; для обычного `rank` default = `asc`, для feed-style сортировок default = `desc` |
 | `symbols` | string | `null` | comma-separated whitelist of symbols |
 | `collection` | string | `market` | one of `market`, `trending`, `top-movers`, `gainers`, `losers` |
+| `category` | string | `null` | curated sector slug (см. `GET /api/v1/market/categories`). Если задан, оставляет только тикеры, чей `categories[]` содержит этот slug (OrdinalIgnoreCase). Применяется ДО sort/paging; комбинируется с `search`/`symbols`/`collection`. Это наша собственная static-карта — **без** external/CoinGecko вызова |
 
 ### Market Tickers: response example
 
@@ -964,7 +967,8 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
       "logoUrl": "https://cdn.test/btc.svg",
       "exchangeCount": 1,
       "updatedAt": "2026-05-24T03:45:00Z",
-      "isTrending": true
+      "isTrending": true,
+      "categories": ["layer1"]
     }
   ],
   "total": 1,
@@ -993,7 +997,67 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 - `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными (`marketCap` попадает сюда, когда у любой tracked-монеты cap = `null`; аналогично `change1h`/`change7d`/`change30d` попадают сюда, когда у любой tracked-монеты соответствующее окно = `null`);
 - `snapshotId` — cheap polling marker: если он не изменился между запросами, клиент может считать, что это тот же server snapshot;
 - `collection=trending`, `collection=top-movers`, `collection=gainers` и `collection=losers` дают тот же item contract, что и обычный market list, но с backend-owned feed ordering;
+- `categories` — массив curated sector slug-ов монеты (напр. `["layer1"]`, `["layer1","solana"]`) из нашей **собственной** static-карты `CoinCategoryMap` — **без** external/CoinGecko вызова. Монета может иметь `0..N` слогов; для немаппленной базы массив пустой (`[]`, никогда не `null`). Frontend локализует по slug. Чтобы отфильтровать список по сектору, добавь `?category=<slug>`; чтобы узнать доступные слоги и их counts — `GET /api/v1/market/categories`;
 - route рассчитан на короткий public cache: `max-age=15, stale-while-revalidate=45`.
+
+---
+
+## GET /api/v1/market/categories
+
+### Market Categories: назначение
+
+Возвращает canonical curated список coin-категорий ("секторов") с **живым счётчиком** того, сколько из CURRENTLY-tracked snapshot-тикеров попадает в каждую категорию. Frontend использует это, чтобы показать только непустые секторы (или приглушить пустые) и построить sector-фильтр для `GET /api/v1/market/tickers?category=<slug>`.
+
+### Market Categories: how it works
+
+- Сам список категорий — это наша **собственная** static-карта (`CoinCategoryMap`), **без** external/CoinGecko/Bybit вызова, **без** Kafka topic и **без** правок data-service.
+- Live-частью является только `count`: gateway считает его из текущего market snapshot (`LoadSnapshotAsync`) по полю `categories` каждого тикера.
+- Возвращаются **все** canonical категории, включая `count = 0`, чтобы frontend мог показывать/приглушать их консистентно.
+- `displayName` — neutral-English fallback; frontend может переопределить локализацию по `slug`.
+
+### Market Categories: request
+
+```http
+GET /api/v1/market/categories
+```
+
+Авторизация не требуется.
+
+### Market Categories: response example
+
+```json
+{
+  "items": [
+    { "slug": "layer1", "displayName": "Layer 1", "count": 33 },
+    { "slug": "layer2", "displayName": "Layer 2", "count": 7 },
+    { "slug": "defi", "displayName": "DeFi", "count": 17 },
+    { "slug": "ai", "displayName": "AI & Big Data", "count": 13 },
+    { "slug": "meme", "displayName": "Meme", "count": 11 },
+    { "slug": "rwa", "displayName": "Real World Assets", "count": 7 },
+    { "slug": "staking", "displayName": "Staking & Liquid Staking", "count": 3 },
+    { "slug": "solana", "displayName": "Solana Ecosystem", "count": 13 },
+    { "slug": "exchange", "displayName": "Exchange Tokens", "count": 4 },
+    { "slug": "stable", "displayName": "Stablecoins", "count": 2 },
+    { "slug": "gaming", "displayName": "Gaming & NFT", "count": 3 },
+    { "slug": "oracle", "displayName": "Oracle", "count": 1 }
+  ]
+}
+```
+
+### Market Categories: field reference
+
+| Поле | Тип | Смысл |
+| ---- | --- | ----- |
+| `items[].slug` | string | стабильный machine slug; frontend локализует по нему и передаёт в `?category=<slug>` |
+| `items[].displayName` | string | neutral-English fallback-метка |
+| `items[].count` | number | сколько currently-tracked snapshot-тикеров несут этот slug (может быть `0`) |
+
+### Market Categories: frontend behavior
+
+- использовать как источник истины для sector-фильтра (chips/dropdown);
+- скрывать или приглушать категории с `count = 0`;
+- для фильтрации market-листа передавать выбранный slug в `GET /api/v1/market/tickers?category=<slug>`;
+- counts двигаются вместе со snapshot, поэтому route использует тот же короткий public cache, что и overview: `max-age=30, stale-while-revalidate=120`.
 
 ---
 

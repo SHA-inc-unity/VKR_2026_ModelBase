@@ -193,7 +193,9 @@ public sealed partial class MarketServiceClient
             ExchangeCount: 1,
             UpdatedAt: updatedAt,
             IsTrending: false,
-            TrendingScore: ComputeTrendingScore(price24hPcnt, turnover24h));
+            TrendingScore: ComputeTrendingScore(price24hPcnt, turnover24h),
+            // Pure static lookup of our curated category map — no external call.
+            Categories: CoinCategoryMap.CategoriesFor(baseAsset));
     }
 
     private static SnapshotTicker BuildFallbackTicker(string symbol, DateTimeOffset updatedAt)
@@ -225,7 +227,10 @@ public sealed partial class MarketServiceClient
             ExchangeCount: 1,
             UpdatedAt: updatedAt,
             IsTrending: false,
-            TrendingScore: 0);
+            TrendingScore: 0,
+            // Categories are static (base-derived), so even a zero/fallback ticker
+            // still carries its curated sectors. Empty when the base is unmapped.
+            Categories: CoinCategoryMap.CategoriesFor(baseAsset));
     }
 
     /// <summary>
@@ -395,5 +400,9 @@ public sealed partial class MarketServiceClient
         int ExchangeCount,
         DateTimeOffset UpdatedAt,
         bool IsTrending,
-        decimal TrendingScore);
+        decimal TrendingScore,
+        // Curated category ("sector") slugs from CoinCategoryMap — OUR own static
+        // data, no external call. Defaulted to an empty list (never null) so the
+        // overlay/serialization stays null-ref free under Nullable enable.
+        IReadOnlyList<string> Categories);
 }

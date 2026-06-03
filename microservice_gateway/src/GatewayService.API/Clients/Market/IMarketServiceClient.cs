@@ -16,7 +16,12 @@ public interface IMarketServiceClient
         string? sortDir = null,
         IReadOnlyList<string>? symbols = null,
         string? collection = null,
+        string? category = null,
         CancellationToken ct = default);
+    /// Canonical curated category ("sector") list with a live count of currently
+    /// tracked snapshot tickers per category. Categories are a static map
+    /// (CoinCategoryMap); only the per-category count is snapshot-derived.
+    Task<ServiceResult<MarketCategoriesResponse>> GetCategoriesAsync(CancellationToken ct = default);
     Task<ServiceResult<MarketBatchQuotesResponse>> GetQuotesAsync(IReadOnlyList<string> symbols, CancellationToken ct = default);
     Task<ServiceResult<MarketRealtimeQuotesResponse>> GetRealtimeQuotesAsync(IReadOnlyList<string> symbols, string? exchange = null, CancellationToken ct = default);
     Task<ServiceResult<MarketConverterQuoteResponse>> GetConverterQuoteAsync(
