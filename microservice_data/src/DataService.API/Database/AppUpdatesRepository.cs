@@ -87,6 +87,11 @@ public sealed class AppUpdatesRepository
         CREATE INDEX IF NOT EXISTS app_update_change_ver_idx
             ON app_update_change(version, build_number DESC, sort_index);
 
+        -- Natural key for idempotent append: lets the seeder INSERT ... ON CONFLICT
+        -- DO NOTHING, so it re-runs every boot and adds only NEW change rows.
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_app_update_change
+            ON app_update_change(version, build_number, sort_index);
+
         -- Append-only guard: block UPDATE/DELETE/TRUNCATE even for the owner.
         CREATE OR REPLACE FUNCTION app_updates_block_mutations() RETURNS trigger AS $$
         BEGIN
@@ -122,19 +127,23 @@ public sealed class AppUpdatesRepository
             if (_schemaReady) return;
             await using var conn = await _pg.OpenAsync(ct);
             await conn.ExecuteAsync(new CommandDefinition(CreateSchemaSql, cancellationToken: ct));
-            await SeedIfEmptyAsync(conn, ct);
+            await SeedAsync(conn, ct);
             _schemaReady = true;
             _log.LogInformation("app_update_release/app_update_change schema ensured");
         }
         finally { _schemaGate.Release(); }
     }
 
-    private async Task SeedIfEmptyAsync(NpgsqlConnection conn, CancellationToken ct)
+    /// <summary>
+    /// Idempotently APPEND the bundled seed rows. Runs on every boot: releases insert
+    /// ON CONFLICT (version) DO NOTHING and changes ON CONFLICT (version, build_number,
+    /// sort_index) DO NOTHING, so only rows not already present are added. Editing an
+    /// existing entry in <see cref="AppUpdatesSeed"/> never rewrites a stored row
+    /// (history is immutable — the trigger guard would block an UPDATE anyway). Adding
+    /// a NEW release/build to the seed + redeploy is how new updates get published.
+    /// </summary>
+    private async Task SeedAsync(NpgsqlConnection conn, CancellationToken ct)
     {
-        var count = await conn.ExecuteScalarAsync<long>(
-            new CommandDefinition("SELECT count(*) FROM app_update_release", cancellationToken: ct));
-        if (count > 0) return;
-
         var releaseRows = 0;
         var changeRows = 0;
         foreach (var rel in AppUpdatesSeed.Releases)
@@ -163,6 +172,7 @@ public sealed class AppUpdatesRepository
                     await conn.ExecuteAsync(new CommandDefinition("""
                         INSERT INTO app_update_change(version, build_number, build_date, change_type, scope, change_text, sort_index)
                         VALUES (@version, @build_number, @build_date, @change_type, @scope, @change_text, @sort_index)
+                        ON CONFLICT (version, build_number, sort_index) DO NOTHING
                         """,
                         new
                         {
@@ -179,7 +189,7 @@ public sealed class AppUpdatesRepository
             }
         }
 
-        _log.LogInformation("Seeded app updates: {Releases} releases, {Changes} change rows",
+        _log.LogInformation("App-updates seed ensured (append-only): {Releases} releases, {Changes} change rows seen",
             releaseRows, changeRows);
     }
 

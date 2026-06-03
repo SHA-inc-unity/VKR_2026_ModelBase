@@ -27,6 +27,10 @@ public sealed class WebPushSender : IWebPushSender
     private readonly ILogger<WebPushSender> _logger;
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
 
+    // WebPushClient is reusable and thread-safe; construct once and share to avoid
+    // leaking the underlying HttpClient/socket handler on every SendAsync call.
+    private readonly WebPushClient _client = new();
+
     // Log the "push disabled" warning only once per process to avoid log spam.
     private int _disabledWarned;
 
@@ -74,7 +78,6 @@ public sealed class WebPushSender : IWebPushSender
             JsonOpts);
 
         var vapid = new VapidDetails(_settings.VapidSubject, _settings.VapidPublicKey, _settings.VapidPrivateKey);
-        var client = new WebPushClient();
 
         foreach (var sub in subscriptions)
         {
@@ -83,7 +86,7 @@ public sealed class WebPushSender : IWebPushSender
             {
                 var libSub = new LibPushSubscription(sub.Endpoint, sub.P256dh, sub.Auth);
                 // WebPush 1.0.12's async overload does not accept a CancellationToken.
-                await client.SendNotificationAsync(libSub, payload, vapid);
+                await _client.SendNotificationAsync(libSub, payload, vapid);
             }
             catch (WebPushException ex)
             {

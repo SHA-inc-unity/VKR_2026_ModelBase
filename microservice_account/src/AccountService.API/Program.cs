@@ -12,6 +12,7 @@ builder.Host.UseSerilog((ctx, cfg) =>
 
 // ── Services ─────────────────────────────────────────────────────────────────
 builder.Services.AddAccountServices(builder.Configuration);
+builder.Services.AddAccountRateLimiting();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddAccountSwagger();
@@ -29,6 +30,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Account Service v1"));
 }
 
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();

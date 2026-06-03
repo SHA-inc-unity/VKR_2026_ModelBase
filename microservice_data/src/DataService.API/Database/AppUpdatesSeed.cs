@@ -70,6 +70,15 @@ public static class AppUpdatesSeed
             SortIndex: 3,
             Builds: new[]
             {
+                new SeedBuild(56, "2026-06-03", Changes(
+                    (TypeFix, ScopeBackend,
+                        "Пакет исправлений по аудиту: устранены гонки (social — лайки/избранное/сентимент, notification — push-подписки), утечка Web Push-клиента; добавлены rate-limit и отзыв access-токена (account)"),
+                    (TypeFix, ScopeBackend,
+                        "Аудит: news больше не теряет длинные заголовки, analitic — починен плановый ретрейн и /retrain больше не блокирует сервис, data — увеличен пул соединений"),
+                    (TypeFix, ScopeFrontend,
+                        "Аудит: устойчивость экранов (нет сбоя при выходе во время загрузки), прогноз и портфель идут через слой репозитория (кеш + корректный профиль пользователя)"),
+                    (TypeImprovement, ScopeInternal,
+                        "Аудит: admin больше не отключает проверку TLS глобально; append-only хранилище обновлений теперь поддерживает дозапись новых записей"))),
                 new SeedBuild(55, "2026-06-03", Changes(
                     (TypeFeature, ScopeBackend,
                         "«Обновления» переехали в append-only таблицу data-сервиса (две таблицы + запрет UPDATE/DELETE/TRUNCATE на уровне Postgres): историю релизов нельзя стереть или переписать — только добавлять"),

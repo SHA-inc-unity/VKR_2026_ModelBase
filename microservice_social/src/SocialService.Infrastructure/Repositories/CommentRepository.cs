@@ -110,7 +110,16 @@ public sealed class CommentLikeRepository : ICommentLikeRepository
     public async Task AddAsync(CommentLike like, CancellationToken ct)
     {
         await _db.CommentLikes.AddAsync(like, ct);
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (DbExceptions.IsUniqueViolation(ex))
+        {
+            // A concurrent like for the same (comment, user) won the race against
+            // the prior Exists check. The like already exists, so treat as a no-op.
+            _db.Entry(like).State = EntityState.Detached;
+        }
     }
 
     public async Task<bool> RemoveAsync(Guid commentId, Guid userId, CancellationToken ct)

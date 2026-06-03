@@ -1,4 +1,7 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Text;
+using System.Threading.RateLimiting;
 using AccountService.API.Kafka;
 using AccountService.Application.Common.Settings;
 using AccountService.Application.Crypto;
@@ -13,6 +16,7 @@ using AccountService.Infrastructure.Repositories;
 using FluentValidation;
 using FluentValidation.AspNetCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -106,9 +110,56 @@ public static class ServiceCollectionExtensions
                     ValidateLifetime = true,
                     ClockSkew = TimeSpan.FromSeconds(30)
                 };
+
+                // Consult the access-token revocation denylist (populated on
+                // logout). No-op with NullTokenCacheService when Redis is off.
+                opt.Events = new JwtBearerEvents
+                {
+                    OnTokenValidated = async context =>
+                    {
+                        var jti = context.Principal?.FindFirstValue(JwtRegisteredClaimNames.Jti);
+                        if (string.IsNullOrEmpty(jti)) return;
+
+                        var cache = context.HttpContext.RequestServices
+                            .GetRequiredService<ITokenCacheService>();
+                        if (await cache.IsAccessTokenRevokedAsync(jti, context.HttpContext.RequestAborted))
+                            context.Fail("Access token has been revoked.");
+                    }
+                };
             });
 
         services.AddAuthorization();
+
+        return services;
+    }
+
+    /// <summary>Policy name applied to the unauthenticated auth endpoints (login/refresh).</summary>
+    public const string AuthRateLimitPolicy = "auth";
+
+    /// <summary>
+    /// Conservative brute-force throttle on login/refresh. Fixed window keyed by
+    /// client IP with generous limits (60/min) so legitimate users are never
+    /// affected; over-limit callers get HTTP 429.
+    /// </summary>
+    public static IServiceCollection AddAccountRateLimiting(this IServiceCollection services)
+    {
+        services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+            options.AddPolicy(AuthRateLimitPolicy, httpContext =>
+            {
+                var clientKey = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                return RateLimitPartition.GetFixedWindowLimiter(clientKey, _ =>
+                    new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 60,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        QueueLimit = 0
+                    });
+            });
+        });
 
         return services;
     }

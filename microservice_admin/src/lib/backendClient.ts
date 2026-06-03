@@ -13,6 +13,7 @@
 
 import { Topics } from './topics';
 import { randomUUID } from 'crypto';
+import { Agent as HttpsAgent, request as httpsRequest } from 'https';
 import { writeAdminRuntimeLog } from './adminRuntimeLog';
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -27,12 +28,27 @@ export const ADMIN_BACKEND_TLS_INSECURE =
 /** True when the admin should use the HTTP facade instead of direct Kafka. */
 export const isSplitMode = ADMIN_BACKEND_BASE_URL.length > 0;
 
-if (
+/**
+ * Whether the backend-facade request(s) should skip TLS certificate
+ * verification. This stays SCOPED to the backend call below via a dedicated
+ * https.Agent — we must never disable TLS verification process-wide (that
+ * would weaken every other outbound TLS connection in this Node process).
+ */
+const useInsecureBackendTls =
   isSplitMode &&
   ADMIN_BACKEND_TLS_INSECURE &&
-  ADMIN_BACKEND_BASE_URL.startsWith('https://')
-) {
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  ADMIN_BACKEND_BASE_URL.startsWith('https://');
+
+/**
+ * Per-request agent that accepts the backend's self-signed certificate.
+ * Created lazily and reused across calls; scoped to backendCall() only.
+ */
+let insecureBackendAgent: HttpsAgent | undefined;
+function getInsecureBackendAgent(): HttpsAgent {
+  if (!insecureBackendAgent) {
+    insecureBackendAgent = new HttpsAgent({ rejectUnauthorized: false });
+  }
+  return insecureBackendAgent;
 }
 
 // ── Topic → path mapping ──────────────────────────────────────────────────────
@@ -113,6 +129,74 @@ const TOPIC_PATH: Readonly<Record<string, string>> = {
   [Topics.CMD_ANALYTICS_MODEL_LOAD]:    'analytics/model/load',
   [Topics.CMD_ANALYTICS_PREDICT]:       'analytics/predict',
 };
+
+/**
+ * Performs the backend-facade POST.
+ *
+ * In the normal case this is just the global `fetch`. When the operator has
+ * opted into the self-signed split-deploy mode (ADMIN_BACKEND_TLS_INSECURE),
+ * the request is sent through node:https with a dedicated, cert-skipping
+ * Agent so that the relaxed TLS policy is confined to this single backend
+ * call — the rest of the process keeps full certificate verification.
+ *
+ * The returned value is a standard `Response`, so the caller can treat both
+ * paths identically (`ok`/`status`/`headers.get`/`text`/`json`). Network/abort
+ * failures are surfaced with the same `name`/`cause.code` shape that global
+ * fetch produces, so the existing error handling keeps working.
+ */
+function backendFetch(
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal },
+): Promise<Response> {
+  if (!useInsecureBackendTls || !url.startsWith('https://')) {
+    return fetch(url, init);
+  }
+
+  return new Promise<Response>((resolve, reject) => {
+    const req = httpsRequest(
+      url,
+      {
+        method: init.method,
+        headers: init.headers,
+        agent: getInsecureBackendAgent(),
+        signal: init.signal,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(chunk as Buffer));
+        res.on('end', () => {
+          const headers = new Headers();
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (Array.isArray(value)) {
+              for (const v of value) headers.append(key, v);
+            } else if (value !== undefined) {
+              headers.set(key, value);
+            }
+          }
+          resolve(
+            new Response(chunks.length ? Buffer.concat(chunks) : null, {
+              status: res.statusCode ?? 502,
+              statusText: res.statusMessage ?? '',
+              headers,
+            }),
+          );
+        });
+        res.on('error', reject);
+      },
+    );
+    // Mirror undici/fetch error shape: expose the system code under `.cause`.
+    req.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.name === 'AbortError') {
+        reject(err);
+        return;
+      }
+      const wrapped = new TypeError(`fetch failed`);
+      (wrapped as Error & { cause?: unknown }).cause = err;
+      reject(wrapped);
+    });
+    req.end(init.body);
+  });
+}
 
 // ── Core call ─────────────────────────────────────────────────────────────────
 
@@ -274,7 +358,7 @@ export async function backendCall(
 
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await backendFetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload ?? {}),

@@ -137,6 +137,8 @@ public sealed class AccountAppService : IAccountService
     public async Task LogoutAsync(
         LogoutRequest request,
         Guid userId,
+        string? accessTokenJti = null,
+        DateTimeOffset? accessTokenExpiresAt = null,
         CancellationToken ct = default)
     {
         var tokenHash = HashToken(request.RefreshToken);
@@ -146,6 +148,17 @@ public sealed class AccountAppService : IAccountService
             await _tokenRepo.RevokeAsync(stored.Id, ct);
 
         await _tokenRepo.SaveChangesAsync(ct);
+
+        // Blacklist the still-valid access token so a stolen copy cannot be
+        // reused until its natural expiry. No-op when Redis is not configured
+        // (NullTokenCacheService) — the short access-token TTL is the fallback.
+        if (!string.IsNullOrEmpty(accessTokenJti) && accessTokenExpiresAt is { } expiresAt)
+        {
+            var remaining = expiresAt - DateTimeOffset.UtcNow;
+            if (remaining > TimeSpan.Zero)
+                await _tokenCache.RevokeAccessTokenAsync(accessTokenJti, remaining, ct);
+        }
+
         _logger.LogInformation("User {UserId} logged out", userId);
     }
 

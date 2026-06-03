@@ -41,15 +41,26 @@ public sealed class AssetSentimentRepository : IAssetSentimentRepository
 
         if (existing is null)
         {
-            await _db.AssetSentiments.AddAsync(
-                AssetSentiment.Create(userId, targetType, targetId, vote), ct);
+            var entity = AssetSentiment.Create(userId, targetType, targetId, vote);
+            await _db.AssetSentiments.AddAsync(entity, ct);
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException ex) when (DbExceptions.IsUniqueViolation(ex))
+            {
+                // A concurrent first vote for the same (user, target) won the race
+                // against the prior read. The composite PK already holds a row, so
+                // treat this insert as an idempotent no-op.
+                _db.Entry(entity).State = EntityState.Detached;
+            }
         }
         else
         {
             existing.Change(vote);
             _db.AssetSentiments.Update(existing);
+            await _db.SaveChangesAsync(ct);
         }
-        await _db.SaveChangesAsync(ct);
     }
 
     public async Task<bool> DeleteAsync(Guid userId, string targetType, string targetId, CancellationToken ct)

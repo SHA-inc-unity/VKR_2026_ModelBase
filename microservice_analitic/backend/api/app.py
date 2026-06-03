@@ -191,6 +191,7 @@ async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
     Возвращает немедленно; следите за статусом через /registry или /metrics.
     """
     try:
+        import asyncio
         from backend import data_client as _dc
         from backend.dataset.core import make_table_name
         from backend.model import load_training_data_from_rows
@@ -203,10 +204,12 @@ async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
         prefix    = f"catboost_{symbol.lower()}_{timeframe}"
         table_name = make_table_name(symbol, timeframe)
 
-        # Загружаем данные через Kafka (microservice_data)
+        # Загружаем данные через Kafka (microservice_data).
+        # Блокирующий вызов выносим в отдельный поток, чтобы не замораживать
+        # event loop FastAPI на время round-trip к microservice_data (до ~30s).
         import time as _time
         end_ms   = int(_time.time() * 1000) + 86_400_000  # now + 1 day buffer
-        rows = _dc.get_rows(table_name, 0, end_ms)
+        rows = await asyncio.to_thread(_dc.get_rows, table_name, 0, end_ms)
         X, y, feature_cols, timestamps = load_training_data_from_rows(
             rows, target_col=req.target_col
         )
@@ -266,7 +269,7 @@ async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
                     prefix=prefix, target_col=req.target_col,
                 )
 
-                cbm_path = MODELS_DIR / f"{symbol}_{timeframe}.cbm"
+                cbm_path = MODELS_DIR / f"{prefix}.cbm"
                 mlflow_run_id = log_session_to_mlflow(
                     enabled=req.mlflow_enabled,
                     tracking_uri=req.mlflow_uri,

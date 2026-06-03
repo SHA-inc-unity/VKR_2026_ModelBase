@@ -8,7 +8,7 @@ public interface IAccountService
     Task<AuthResponse> RegisterAsync(RegisterRequest request, string? ipAddress = null, string? userAgent = null, CancellationToken ct = default);
     Task<AuthResponse> LoginAsync(LoginRequest request, string? ipAddress = null, string? userAgent = null, CancellationToken ct = default);
     Task<AuthResponse> RefreshAsync(RefreshTokenRequest request, string? ipAddress = null, string? userAgent = null, CancellationToken ct = default);
-    Task LogoutAsync(LogoutRequest request, Guid userId, CancellationToken ct = default);
+    Task LogoutAsync(LogoutRequest request, Guid userId, string? accessTokenJti = null, DateTimeOffset? accessTokenExpiresAt = null, CancellationToken ct = default);
     Task<UserProfileResponse> GetCurrentUserAsync(Guid userId, CancellationToken ct = default);
     Task<UserProfileResponse> UpdateProfileAsync(Guid userId, UpdateProfileRequest request, CancellationToken ct = default);
     Task<UserSettingsResponse> GetSettingsAsync(Guid userId, CancellationToken ct = default);

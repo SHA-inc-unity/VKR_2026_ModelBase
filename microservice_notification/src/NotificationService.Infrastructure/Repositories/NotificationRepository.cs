@@ -107,16 +107,30 @@ public sealed class PushSubscriptionRepository : IPushSubscriptionRepository
     public async Task UpsertAsync(PushSubscription sub, CancellationToken ct)
     {
         var existing = await _db.PushSubscriptions.FirstOrDefaultAsync(x => x.Endpoint == sub.Endpoint, ct);
-        if (existing is null)
-        {
-            await _db.PushSubscriptions.AddAsync(sub, ct);
-        }
-        else
+        if (existing is not null)
         {
             // Same endpoint can be re-subscribed under a (possibly) new user/keys.
             existing.Refresh(sub.P256dh, sub.Auth, sub.UserAgent);
+            await _db.SaveChangesAsync(ct);
+            return;
         }
-        await _db.SaveChangesAsync(ct);
+
+        await _db.PushSubscriptions.AddAsync(sub, ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Concurrent double-submit raced us on the unique endpoint index:
+            // detach our insert and refresh the row that won instead.
+            _db.Entry(sub).State = EntityState.Detached;
+            existing = await _db.PushSubscriptions.FirstOrDefaultAsync(x => x.Endpoint == sub.Endpoint, ct);
+            if (existing is null) throw;
+
+            existing.Refresh(sub.P256dh, sub.Auth, sub.UserAgent);
+            await _db.SaveChangesAsync(ct);
+        }
     }
 
     public async Task DeleteByEndpointAsync(Guid userId, string endpoint, CancellationToken ct)

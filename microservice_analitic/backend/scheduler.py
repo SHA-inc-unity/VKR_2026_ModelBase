@@ -205,7 +205,7 @@ class Scheduler:
         import time as _time
         end_ms   = int(_time.time() * 1000) + 86_400_000  # now + 1 day buffer
         start_ms = 0  # load all available history
-        rows = _get_rows(table_name, start_ms, end_ms)
+        rows = _dc.get_rows(table_name, start_ms, end_ms)
         if not rows:
             _LOG.warning("[scheduler] нет данных для %s — пропуск", table_name)
             return
@@ -271,7 +271,7 @@ class Scheduler:
         )
 
         # 5. MLflow
-        _cbm_path = models_dir / f"{symbol}_{timeframe}.cbm"
+        _cbm_path = models_dir / f"{prefix}.cbm"
         mlflow_run_id = log_session_to_mlflow(
             enabled=job.mlflow_enabled,
             tracking_uri=job.mlflow_uri,

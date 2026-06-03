@@ -24,7 +24,16 @@ public sealed class FavoriteRepository : IFavoriteRepository
     public async Task AddAsync(Favorite favorite, CancellationToken ct)
     {
         await _db.Favorites.AddAsync(favorite, ct);
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (DbExceptions.IsUniqueViolation(ex))
+        {
+            // A concurrent add for the same (user, symbol) won the race against
+            // the prior Exists check. The favorite already exists; treat as a no-op.
+            _db.Entry(favorite).State = EntityState.Detached;
+        }
     }
 
     public async Task<bool> RemoveAsync(Guid userId, string symbol, CancellationToken ct)

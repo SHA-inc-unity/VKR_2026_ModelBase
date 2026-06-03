@@ -51,7 +51,9 @@ public sealed class SmartReaderContentEnricher : IArticleContentEnricher
             }
 
             var reader = new SmartReader.Reader(sourceUrl, html);
-            var article = reader.GetArticle();
+            // GetArticle() is a synchronous, CPU/IO-heavy parse; offload it so a
+            // large page can't block a thread-pool thread on the async ingest path.
+            var article = await Task.Run(() => reader.GetArticle(), ct);
 
             if (article is null || !article.IsReadable)
             {

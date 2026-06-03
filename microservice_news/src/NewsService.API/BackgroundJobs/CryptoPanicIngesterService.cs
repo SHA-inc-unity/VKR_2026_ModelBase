@@ -341,9 +341,9 @@ public sealed class CryptoPanicIngesterService : BackgroundService
         return NewsArticle.Create(
             source: source,
             sourceUrl: link!,
-            title: title,
+            title: Truncate(title, 512),
             summary: Truncate(summary, 2000),
-            imageUrl: imageUrl,
+            imageUrl: TruncateNullable(imageUrl, 1024),
             publishedAt: publishedAt,
             tags: tags,
             content: content);
@@ -384,9 +384,9 @@ public sealed class CryptoPanicIngesterService : BackgroundService
         return NewsArticle.Create(
             source: defaultSource,
             sourceUrl: link!.Trim(),
-            title: title,
+            title: Truncate(title, 512),
             summary: Truncate(summary, 2000),
-            imageUrl: imageUrl,
+            imageUrl: TruncateNullable(imageUrl, 1024),
             publishedAt: publishedAt,
             tags: tags,
             content: content);
@@ -517,7 +517,19 @@ public sealed class CryptoPanicIngesterService : BackgroundService
     private static string Truncate(string value, int maxLength)
     {
         if (value.Length <= maxLength) return value;
-        return value.Substring(0, maxLength).TrimEnd() + "…";
+        // Reserve one char for the ellipsis so the result never exceeds
+        // maxLength — required for varchar-bounded columns (title 512,
+        // image_url 1024), where an off-by-one overflow throws Postgres 22001.
+        return value.Substring(0, maxLength - 1).TrimEnd() + "…";
+    }
+
+    /// <summary>
+    /// Null-tolerant variant of <see cref="Truncate"/> for optional columns
+    /// (e.g. image_url): leaves null untouched, otherwise caps to maxLength.
+    /// </summary>
+    private static string? TruncateNullable(string? value, int maxLength)
+    {
+        return value is null ? null : Truncate(value, maxLength);
     }
 
     private static string? TryGetHost(string url)
@@ -593,7 +605,7 @@ public sealed class CryptoPanicIngesterService : BackgroundService
                 result.Add(NewsArticle.Create(
                     source: source,
                     sourceUrl: url,
-                    title: title,
+                    title: Truncate(title, 512),
                     summary: summary,
                     imageUrl: null,
                     publishedAt: publishedAt,

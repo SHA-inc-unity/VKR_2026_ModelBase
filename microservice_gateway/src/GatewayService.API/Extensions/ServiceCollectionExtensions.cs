@@ -276,7 +276,7 @@ public static class ServiceCollectionExtensions
     {
         var raw = configuration["ACCOUNT_SERVICE_URL"]
             ?? configuration["ACCOUNT_URL"]
-            ?? "http://account-api:5000";
+            ?? "http://account_service_api:5000";
 
         if (!raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
             && !raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
