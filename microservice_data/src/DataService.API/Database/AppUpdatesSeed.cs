@@ -70,6 +70,11 @@ public static class AppUpdatesSeed
             SortIndex: 3,
             Builds: new[]
             {
+                new SeedBuild(57, "2026-06-03", Changes(
+                    (TypeFix, ScopeFrontend,
+                        "Уведомления снова доступны из интерфейса: в шапке появился колокольчик с бейджем непрочитанных — открывает ленту сработавших ценовых алертов и новостей (раньше экран уведомлений был недостижим из UI)"),
+                    (TypeImprovement, ScopeFrontend,
+                        "Push-уведомления теперь можно включить (переключатель в центре уведомлений стал достижим); из ленты — быстрый переход к созданию алерта"))),
                 new SeedBuild(56, "2026-06-03", Changes(
                     (TypeFix, ScopeBackend,
                         "Пакет исправлений по аудиту: устранены гонки (social — лайки/избранное/сентимент, notification — push-подписки), утечка Web Push-клиента; добавлены rate-limit и отзыв access-токена (account)"),
