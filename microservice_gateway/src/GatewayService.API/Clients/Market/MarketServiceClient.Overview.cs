@@ -10,6 +10,16 @@ namespace GatewayService.API.Clients.Market;
 
 public sealed partial class MarketServiceClient
 {
+    // Serve-stale-on-error: the last successful global / Fear&Greed fetch.
+    // CoinGecko's free tier intermittently 429s; without this, a failed refresh
+    // cached null totalMarketCap/btcDominance for the cache window, which made
+    // the frontend's guarded tiles disappear — the global-stats card visibly
+    // collapsed from 6 tiles back to 4. We now reuse the last good values on a
+    // transient failure (null only before the first success / right after a
+    // gateway restart). Reference assignment is atomic; no locking needed.
+    private static CoinGeckoGlobalSnapshot? _lastGoodGlobal;
+    private static FearGreedSnapshot? _lastGoodFearGreed;
+
 public async Task<ServiceResult<MarketOverviewDto>> GetOverviewAsync(CancellationToken ct = default)
 {
     var canonical = await LoadCanonicalOverviewAsync(ct);
@@ -138,17 +148,26 @@ private async Task<CoinGeckoGlobalSnapshot?> TryFetchCoinGeckoGlobalAsync(Cancel
         var btcDominance = TryGetNestedDecimal(data, "market_cap_percentage", "btc");
         var activeAssets = TryGetInt32(data, "active_cryptocurrencies");
 
-        return new CoinGeckoGlobalSnapshot(
+        var snapshot = new CoinGeckoGlobalSnapshot(
             TotalMarketCapUsd: totalMarketCap > 0 ? DecimalRound(totalMarketCap.Value) : null,
             BtcDominance: btcDominance >= 0 ? DecimalRound(btcDominance.Value) : null,
             Volume24hUsd: totalVolume24h > 0 ? DecimalRound(totalVolume24h.Value) : null,
             ActiveAssets: activeAssets > 0 ? activeAssets : null,
             UpdatedAt: updatedAt);
+
+        // Cache as last-good only when the core fields came back, so a later
+        // transient failure can serve these instead of blanking the card.
+        if (snapshot.TotalMarketCapUsd is not null && snapshot.BtcDominance is not null)
+        {
+            _lastGoodGlobal = snapshot;
+        }
+
+        return snapshot;
     }
     catch (Exception ex)
     {
-        _logger.LogWarning(ex, "Failed to fetch canonical global market stats from CoinGecko");
-        return null;
+        _logger.LogWarning(ex, "Failed to fetch canonical global market stats from CoinGecko; serving last-known-good if available");
+        return _lastGoodGlobal;
     }
 }
 
@@ -176,15 +195,22 @@ private async Task<FearGreedSnapshot?> TryFetchFearGreedAsync(CancellationToken 
         var label = GetString(current, "value_classification")?.Trim();
         var updatedAt = TryGetUnixSeconds(current, "timestamp") ?? DateTimeOffset.UtcNow;
 
-        return new FearGreedSnapshot(
+        var snapshot = new FearGreedSnapshot(
             Value: value > 0 ? value : null,
             Label: string.IsNullOrWhiteSpace(label) ? null : label,
             UpdatedAt: updatedAt);
+
+        if (snapshot.Value is not null)
+        {
+            _lastGoodFearGreed = snapshot;
+        }
+
+        return snapshot;
     }
     catch (Exception ex)
     {
-        _logger.LogWarning(ex, "Failed to fetch canonical fear and greed index");
-        return null;
+        _logger.LogWarning(ex, "Failed to fetch canonical fear and greed index; serving last-known-good if available");
+        return _lastGoodFearGreed;
     }
 }
 
