@@ -156,6 +156,10 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         {
             "trending" => source.Where(item => item.IsTrending || item.TrendingScore > 0),
             "top-movers" => source.Where(item => item.Change24h != 0),
+            // Directional split of the SAME snapshot: gainers keep only positive
+            // 24h movers, losers keep only negative ones. No external call.
+            "gainers" => source.Where(item => item.Change24h > 0),
+            "losers" => source.Where(item => item.Change24h < 0),
             _ => source,
         };
     }
@@ -166,6 +170,8 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
         {
             "trending" => "trending",
             "top-movers" => "top-movers",
+            "gainers" => "gainers",
+            "losers" => "losers",
             _ => "market"
         };
     }
@@ -178,10 +184,14 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
             "symbol" or "displayname" or "price" or "change24h" or "volume24h" or "marketcap" or "high24h" or "low24h" or "rank" or "updatedat" => value,
             "trending" => "trending",
             "top-movers" or "topmovers" => "top-movers",
+            "gainers" => "gainers",
+            "losers" => "losers",
             _ => collection switch
             {
                 "trending" => "trending",
                 "top-movers" => "top-movers",
+                "gainers" => "gainers",
+                "losers" => "losers",
                 _ => "rank"
             }
         };
@@ -220,6 +230,11 @@ public async Task<ServiceResult<MarketTickersResponse>> GetTickersAsync(
             ("trending", true) => source.OrderByDescending(item => item.TrendingScore).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
             ("top-movers", false) => source.OrderBy(item => Math.Abs(item.Change24h)).ThenBy(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
             ("top-movers", true) => source.OrderByDescending(item => Math.Abs(item.Change24h)).ThenByDescending(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
+            // Gainers always lead with the largest positive 24h move (DESC),
+            // losers with the largest negative move (ASC). Direction is fixed by
+            // the feed, not by sortDir, so both branches order identically.
+            ("gainers", _) => source.OrderByDescending(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
+            ("losers", _) => source.OrderBy(item => item.Change24h).ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase),
             ("high24h", false) => source.OrderBy(item => item.High24h),
             ("high24h", true) => source.OrderByDescending(item => item.High24h),
             ("low24h", false) => source.OrderBy(item => item.Low24h),

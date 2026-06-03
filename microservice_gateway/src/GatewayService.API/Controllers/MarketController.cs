@@ -180,6 +180,60 @@ public sealed class MarketController : ControllerBase
         return Ok(result.Value);
     }
 
+    /// <summary>
+    /// Top GAINERS feed: the strongest positive 24h movers within our tracked
+    /// pair universe, ranked by 24h change descending. Reuses the existing
+    /// ticker snapshot — no extra external (CoinGecko/Bybit) call.
+    /// </summary>
+    [HttpGet("gainers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetGainers(
+        [FromQuery] int limit = 5,
+        [FromQuery] string? symbols = null,
+        CancellationToken ct = default)
+    {
+        var filteredSymbols = string.IsNullOrWhiteSpace(symbols)
+            ? Array.Empty<string>()
+            : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "gainers", ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid gainers request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// Top LOSERS feed: the steepest negative 24h movers within our tracked
+    /// pair universe, ranked by 24h change ascending. Reuses the existing
+    /// ticker snapshot — no extra external (CoinGecko/Bybit) call.
+    /// </summary>
+    [HttpGet("losers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetLosers(
+        [FromQuery] int limit = 5,
+        [FromQuery] string? symbols = null,
+        CancellationToken ct = default)
+    {
+        var filteredSymbols = string.IsNullOrWhiteSpace(symbols)
+            ? Array.Empty<string>()
+            : symbols.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        var result = await _market.GetTickersAsync(1, Math.Clamp(limit, 1, 100), null, null, null, filteredSymbols, "losers", ct);
+        if (!result.IsSuccess || result.Value is null)
+        {
+            return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid losers request", HttpContext.GetCorrelationId()));
+        }
+
+        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        return Ok(result.Value);
+    }
+
     [HttpPost("quotes/batch")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]

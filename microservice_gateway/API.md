@@ -75,6 +75,8 @@
 | `GET /api/v1/market/tickers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/trending` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/top-movers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
+| `GET /api/v1/market/gainers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
+| `GET /api/v1/market/losers` | `Cache-Control: public, max-age=15, stale-while-revalidate=45` |
 | `GET /api/v1/market/chart` | status-dependent cache policy: `ok` uses short public cache (`Heavy=10s`, `Medium=30s`, `Light=60s`), `partial=3s`, `pending=1s`; weak `ETag` + `If-None-Match` are enabled |
 | `POST /api/v1/market/quotes/batch` | `Cache-Control: public, max-age=10, stale-while-revalidate=20` |
 | `GET /api/v1/market/sparklines` | batch close-series per symbol (`?symbols=&timeframe=1h&points=24`), server-side fan-out over the chart service; `Cache-Control: public, max-age=30, stale-while-revalidate=120` |
@@ -278,6 +280,8 @@ UID в теле запроса не используется как источн
 | GET | `/api/v1/market/tickers` | None | searchable/sortable/paginated market snapshot list |
 | GET | `/api/v1/market/trending` | None | curated backend feed для home trending cards |
 | GET | `/api/v1/market/top-movers` | None | pre-ranked backend feed по 24h move |
+| GET | `/api/v1/market/gainers` | None | top GAINERS feed: положительные 24h movers, отсортированы по 24h change DESC |
+| GET | `/api/v1/market/losers` | None | top LOSERS feed: отрицательные 24h movers, отсортированы по 24h change ASC |
 | POST | `/api/v1/market/quotes/batch` | None | batch quote refresh по списку symbol-ов |
 | GET | `/api/v1/market/quotes/realtime` | None | live quote refresh через watcher rows с snapshot fallback |
 | GET | `/api/v1/market/converter/quote` | None | quote для asset-to-asset conversion |
@@ -925,10 +929,10 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 | `page` | number | `1` | minimum `1` |
 | `pageSize` | number | `25` | clamp `1..100` |
 | `search` | string | `null` | match по `symbol`, `displayName`, `baseAsset`, `quoteAsset` |
-| `sortBy` | string | collection-dependent | one of `symbol`, `displayName`, `price`, `change24h`, `volume24h`, `marketCap`, `high24h`, `low24h`, `rank`, `updatedAt`; special default feed sorts are `trending` and `top-movers` |
+| `sortBy` | string | collection-dependent | one of `symbol`, `displayName`, `price`, `change24h`, `volume24h`, `marketCap`, `high24h`, `low24h`, `rank`, `updatedAt`; special default feed sorts are `trending`, `top-movers`, `gainers`, `losers` |
 | `sortDir` | string | collection-dependent | `asc` or `desc`; для обычного `rank` default = `asc`, для feed-style сортировок default = `desc` |
 | `symbols` | string | `null` | comma-separated whitelist of symbols |
-| `collection` | string | `market` | one of `market`, `trending`, `top-movers` |
+| `collection` | string | `market` | one of `market`, `trending`, `top-movers`, `gainers`, `losers` |
 
 ### Market Tickers: response example
 
@@ -984,7 +988,7 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 - supply/FDV/ATH metadata кэшируется на стороне gateway ~6 ч (`Market:CoinMetadataCacheTtlSeconds`, soft-fail к пустой карте при недоступности CoinGecko); live price по-прежнему обновляется из 30-сек Bybit snapshot;
 - `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными (`marketCap` попадает сюда, когда у любой tracked-монеты cap = `null`);
 - `snapshotId` — cheap polling marker: если он не изменился между запросами, клиент может считать, что это тот же server snapshot;
-- `collection=trending` и `collection=top-movers` дают тот же item contract, что и обычный market list, но с backend-owned feed ordering;
+- `collection=trending`, `collection=top-movers`, `collection=gainers` и `collection=losers` дают тот же item contract, что и обычный market list, но с backend-owned feed ordering;
 - route рассчитан на короткий public cache: `max-age=15, stale-while-revalidate=45`.
 
 ---
@@ -1018,6 +1022,38 @@ GET /api/v1/market/top-movers?limit=5
 ```
 
 Авторизация не требуется. Endpoint возвращает тот же wrapper и тот же `MarketTickerItemDto`, что и `GET /api/v1/market/tickers`, но выставляет `collection = "top-movers"` и по умолчанию ранжирует items по absolute 24h move.
+
+---
+
+## GET /api/v1/market/gainers
+
+### Top Gainers: назначение
+
+Dedicated backend feed для top GAINERS — сильнейшие положительные 24h movers внутри нашего tracked-universe (~92 пары).
+
+### Top Gainers: request
+
+```http
+GET /api/v1/market/gainers?limit=5
+```
+
+Авторизация не требуется. Endpoint возвращает тот же wrapper и тот же `MarketTickerItemDto`, что и `GET /api/v1/market/tickers`, но выставляет `collection = "gainers"`, фильтрует только `change24h > 0` и ранжирует items по `change24h` **DESC** (самый большой рост сверху). Использует тот же ticker snapshot, что и `top-movers` — **никакого** дополнительного external (CoinGecko/Bybit) вызова.
+
+---
+
+## GET /api/v1/market/losers
+
+### Top Losers: назначение
+
+Dedicated backend feed для top LOSERS — сильнейшие отрицательные 24h movers внутри нашего tracked-universe (~92 пары).
+
+### Top Losers: request
+
+```http
+GET /api/v1/market/losers?limit=5
+```
+
+Авторизация не требуется. Endpoint возвращает тот же wrapper и тот же `MarketTickerItemDto`, что и `GET /api/v1/market/tickers`, но выставляет `collection = "losers"`, фильтрует только `change24h < 0` и ранжирует items по `change24h` **ASC** (самое большое падение сверху). Использует тот же ticker snapshot, что и `top-movers` — **никакого** дополнительного external (CoinGecko/Bybit) вызова.
 
 ---
 
