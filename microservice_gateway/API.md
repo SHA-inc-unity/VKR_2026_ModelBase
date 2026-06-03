@@ -948,6 +948,9 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
       "quoteAsset": "USDT",
       "price": 106500,
       "change24h": 2.5,
+      "change1h": 0.42,
+      "change7d": -3.1,
+      "change30d": 12.7,
       "volume24h": 1250000000,
       "marketCap": 2118900000000,
       "circulatingSupply": 19800000,
@@ -986,7 +989,8 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 - `fdv` = `(maxSupply ?? totalSupply) × livePrice`; `circulatingSupply`/`totalSupply`/`maxSupply`/`ath` приходят из той же metadata-карты;
 - если supply неизвестен (base не в curated карте, CoinGecko miss, или нет live price), `marketCap`/`circulatingSupply`/`totalSupply`/`maxSupply`/`fdv`/`ath` приходят `null` (graceful degrade) — **никакого** отката к старому proxy. Сортировка по `marketCap` ставит такие монеты последними (null-last);
 - supply/FDV/ATH metadata кэшируется на стороне gateway ~6 ч (`Market:CoinMetadataCacheTtlSeconds`, soft-fail к пустой карте при недоступности CoinGecko); live price по-прежнему обновляется из 30-сек Bybit snapshot;
-- `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными (`marketCap` попадает сюда, когда у любой tracked-монеты cap = `null`);
+- `change1h` / `change7d` / `change30d` — multi-window price-change %, посчитанные **в gateway из НАШЕГО собственного candle store** (microservice_data) через существующий Kafka-запрос `cmd.data.dataset.latest_rows`, **без** обращения к CoinGecko/Bybit и **без** нового Kafka topic. 24h % (`change24h`) по-прежнему берётся из Bybit snapshot и не меняется. Формула: `change = (livePrice − closeNAgo) / closeNAgo × 100`, где `livePrice` — текущая snapshot-цена, а `closeNAgo` — close ближайшей-но-не-позже свечи (для 7d/30d — дневная таблица `D`, для 1h — часовая `60m`). Если у монеты нет candle-истории, достаточно старой для окна, или anchor-close ≤ 0 → поле приходит `null` ("show what we have"). Карта окон кэшируется на `Market:WindowChangeCacheTtlSeconds` (по умолчанию 120 с) с soft-fail к пустой карте; cache-warm путь не делает ни одного Kafka-вызова;
+- `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными (`marketCap` попадает сюда, когда у любой tracked-монеты cap = `null`; аналогично `change1h`/`change7d`/`change30d` попадают сюда, когда у любой tracked-монеты соответствующее окно = `null`);
 - `snapshotId` — cheap polling marker: если он не изменился между запросами, клиент может считать, что это тот же server snapshot;
 - `collection=trending`, `collection=top-movers`, `collection=gainers` и `collection=losers` дают тот же item contract, что и обычный market list, но с backend-owned feed ordering;
 - route рассчитан на короткий public cache: `max-age=15, stale-while-revalidate=45`.

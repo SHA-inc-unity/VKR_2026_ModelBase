@@ -116,6 +116,10 @@ public static class ServiceCollectionExtensions
         // Per-coin supply/FDV/ATH metadata (CoinGecko /coins/markets), lazily
         // cached for hours; singleton-safe like the other market services.
         services.AddSingleton<ICoinMetadataService, CoinMetadataService>();
+        // Multi-window price-change % (1h/7d/30d) computed from our own candle store
+        // via cmd.data.dataset.latest_rows; lazily cached per snapshot, soft-fails to
+        // an empty map. Singleton-safe like the other market services.
+        services.AddSingleton<IMarketWindowChangeService, MarketWindowChangeService>();
         // ChartService registered as concrete type so ChartRequestQueue can inject it.
         services.AddSingleton<ChartService>();
         // ChartRequestQueue is the IChartService — provides coalescing + concurrency limits.

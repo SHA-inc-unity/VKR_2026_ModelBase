@@ -16,6 +16,7 @@ public sealed class MarketServiceClientOverviewTests
 {
     private readonly Mock<IMarketConfigService> _marketConfig = new();
     private readonly Mock<ICoinMetadataService> _coinMetadata = new();
+    private readonly Mock<IMarketWindowChangeService> _windowChange = new();
     private readonly Mock<IKafkaRequestClient> _kafka = new();
 
     [Fact]
@@ -209,9 +210,17 @@ public sealed class MarketServiceClientOverviewTests
                 ["SOL"] = new(CirculatingSupply: 470_000_000m, TotalSupply: 590_000_000m, MaxSupply: null, Ath: 295m),
             });
 
+        // Multi-window changes are computed from our own candle store via Kafka and
+        // are orthogonal to the overview assertions here; return an empty map so the
+        // 1h/7d/30d windows stay null (degraded) without issuing any Kafka call.
+        _windowChange.Setup(service => service.GetWindowChangesAsync(
+                It.IsAny<IReadOnlyDictionary<string, decimal>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, WindowChange>(StringComparer.OrdinalIgnoreCase));
+
         return new MarketServiceClient(
             _marketConfig.Object,
             _coinMetadata.Object,
+            _windowChange.Object,
             httpClientFactory,
             new PassthroughMarketCacheService(),
             _kafka.Object,

@@ -49,6 +49,24 @@ public sealed record MarketTickerItemDto
     /// <summary>All-time-high price (USD) per CoinGecko, or <c>null</c> when unknown.</summary>
     public decimal? Ath { get; init; }
 
+    /// <summary>
+    /// 1 h price-change %, computed in the gateway from our own candle store
+    /// (microservice_data), or <c>null</c> when there is no hourly candle ~1 h old.
+    /// </summary>
+    public decimal? Change1h { get; init; }
+
+    /// <summary>
+    /// 7 d price-change %, computed from our own daily candle store, or <c>null</c>
+    /// when there is no daily candle at/older than 7 days.
+    /// </summary>
+    public decimal? Change7d { get; init; }
+
+    /// <summary>
+    /// 30 d price-change %, computed from our own daily candle store, or <c>null</c>
+    /// when there is no daily candle at/older than 30 days.
+    /// </summary>
+    public decimal? Change30d { get; init; }
+
     public decimal High24h { get; init; }
     public decimal Low24h { get; init; }
     public int Rank { get; init; }

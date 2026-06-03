@@ -66,6 +66,17 @@ public sealed class MarketSettings
     /// </summary>
     public int CoinMetadataCacheTtlSeconds { get; init; } = 21600;
 
+    /// <summary>
+    /// How long to cache the per-snapshot multi-window price-change map
+    /// (1 h / 7 d / 30 d), computed in the gateway from our own candle store via
+    /// <c>cmd.data.dataset.latest_rows</c> (seconds). Defaults to 120 s — the daily
+    /// closes that anchor 7 d / 30 d move once per day and the hourly close once per
+    /// hour, so a slightly stale anchor is fine; the live price that drives the
+    /// percentage still comes from the 30 s Bybit snapshot. A cache-warm read issues
+    /// zero Kafka calls.
+    /// </summary>
+    public int WindowChangeCacheTtlSeconds { get; init; } = 120;
+
     /// <summary>How long to cache the per-exchange MW-tracked global summary (seconds).</summary>
     public int GlobalSummaryCacheTtlSeconds { get; init; } = 30;
 

@@ -58,6 +58,13 @@ public sealed partial class MarketServiceClient
             .Select(ticker => EnrichWithMetadata(ticker, metadata))
             .ToArray();
 
+        // Overlay the multi-window price-change % (1h/7d/30d) AFTER the tickers
+        // (with live Price) are built. Computed in the gateway from OUR OWN candle
+        // store via cmd.data.dataset.latest_rows; soft-fails to an empty map so a
+        // missing window simply renders null ("show what we have"). One call over
+        // all symbols, keyed by the gateway symbol with the snapshot's live Price.
+        items = await EnrichWithWindowChangesAsync(items, ct);
+
         // If neither category yielded anything the whole snapshot is fallback.
         var allFallback = linear.Count == 0 && spot.Count == 0;
         if (allFallback)
@@ -176,6 +183,9 @@ public sealed partial class MarketServiceClient
             MaxSupply: null,
             Fdv: null,
             Ath: null,
+            Change1h: null,
+            Change7d: null,
+            Change30d: null,
             High24h: DecimalRound(high24h),
             Low24h: DecimalRound(low24h),
             Rank: 0,
@@ -205,6 +215,9 @@ public sealed partial class MarketServiceClient
             MaxSupply: null,
             Fdv: null,
             Ath: null,
+            Change1h: null,
+            Change7d: null,
+            Change30d: null,
             High24h: 0,
             Low24h: 0,
             Rank: 0,
@@ -257,12 +270,53 @@ public sealed partial class MarketServiceClient
         };
     }
 
+    /// <summary>
+    /// Overlays the gateway-computed 1h/7d/30d windows onto freshly-built tickers.
+    /// The window service is keyed by the gateway symbol and takes the snapshot's
+    /// live Price as the current-price reference; it soft-fails to an empty map, so
+    /// any symbol/window it does not return keeps its null window. Coins with no
+    /// live price (fallback tickers, Price &lt;= 0) are not sent at all.
+    /// </summary>
+    private async Task<SnapshotTicker[]> EnrichWithWindowChangesAsync(SnapshotTicker[] items, CancellationToken ct)
+    {
+        var priceBySymbol = items
+            .Where(item => item.Price > 0m)
+            .GroupBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().Price, StringComparer.OrdinalIgnoreCase);
+
+        if (priceBySymbol.Count == 0)
+        {
+            return items;
+        }
+
+        var windows = await _windowChangeService.GetWindowChangesAsync(priceBySymbol, ct);
+        if (windows.Count == 0)
+        {
+            return items;
+        }
+
+        for (var i = 0; i < items.Length; i++)
+        {
+            if (windows.TryGetValue(items[i].Symbol, out var window))
+            {
+                items[i] = items[i] with
+                {
+                    Change1h = window.Change1h,
+                    Change7d = window.Change7d,
+                    Change30d = window.Change30d,
+                };
+            }
+        }
+
+        return items;
+    }
+
     private static IReadOnlyList<string> BuildDegradedFields(IReadOnlyList<SnapshotTicker> items, bool allFallback)
     {
         var degraded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (allFallback)
         {
-            degraded.UnionWith(["price", "change24h", "volume24h", "marketCap", "high24h", "low24h"]);
+            degraded.UnionWith(["price", "change24h", "volume24h", "marketCap", "high24h", "low24h", "change1h", "change7d", "change30d"]);
             return degraded.ToArray();
         }
 
@@ -274,6 +328,11 @@ public sealed partial class MarketServiceClient
         if (items.Any(item => item.MarketCap is null)) degraded.Add("marketCap");
         if (items.Any(item => item.High24h <= 0)) degraded.Add("high24h");
         if (items.Any(item => item.Low24h <= 0)) degraded.Add("low24h");
+        // The multi-window changes come from our own candle store and stay null when
+        // a tracked coin lacks candle history old enough for that window.
+        if (items.Any(item => item.Change1h is null)) degraded.Add("change1h");
+        if (items.Any(item => item.Change7d is null)) degraded.Add("change7d");
+        if (items.Any(item => item.Change30d is null)) degraded.Add("change30d");
         return degraded.ToArray();
     }
 
@@ -322,6 +381,13 @@ public sealed partial class MarketServiceClient
         decimal? MaxSupply,
         decimal? Fdv,
         decimal? Ath,
+        // Multi-window price-change % computed in the gateway from OUR OWN candle
+        // store (microservice_data) via cmd.data.dataset.latest_rows — overlaid
+        // after the snapshot tickers are built (see EnrichWithWindowChanges). Each
+        // is null when we lack candle history old enough for that window.
+        decimal? Change1h,
+        decimal? Change7d,
+        decimal? Change30d,
         decimal High24h,
         decimal Low24h,
         int Rank,

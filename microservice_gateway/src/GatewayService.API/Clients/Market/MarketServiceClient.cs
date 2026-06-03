@@ -20,6 +20,7 @@ public sealed partial class MarketServiceClient : IMarketServiceClient
 
     private readonly IMarketConfigService _marketConfig;
     private readonly ICoinMetadataService _coinMetadata;
+    private readonly IMarketWindowChangeService _windowChangeService;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IMarketCacheService _cache;
     private readonly IKafkaRequestClient _kafka;
@@ -29,6 +30,7 @@ public sealed partial class MarketServiceClient : IMarketServiceClient
     public MarketServiceClient(
         IMarketConfigService marketConfig,
         ICoinMetadataService coinMetadata,
+        IMarketWindowChangeService windowChangeService,
         IHttpClientFactory httpClientFactory,
         IMarketCacheService cache,
         IKafkaRequestClient kafka,
@@ -37,6 +39,7 @@ public sealed partial class MarketServiceClient : IMarketServiceClient
     {
         _marketConfig = marketConfig;
         _coinMetadata = coinMetadata;
+        _windowChangeService = windowChangeService;
         _httpClientFactory = httpClientFactory;
         _cache = cache;
         _kafka = kafka;

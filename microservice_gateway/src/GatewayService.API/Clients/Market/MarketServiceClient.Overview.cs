@@ -47,9 +47,20 @@ public async Task<ServiceResult<PublicMarketOverviewResponse>> GetPublicOverview
 
     var overviewDegradedFields = new HashSet<string>(canonical.DegradedFields, StringComparer.OrdinalIgnoreCase);
     var degradedFields = new HashSet<string>(overviewDegradedFields, StringComparer.OrdinalIgnoreCase);
-    if (snapshot.DegradedFields.Count > 0)
+
+    // The multi-window changes (change1h/7d/30d) are a tickers/list concern, not
+    // part of the overview's trending projection (which only surfaces the trending
+    // assets' price/24h move). Exclude them so they don't leak into the overview
+    // payload as `trending.change1h` etc.
+    var trendingDegradedFields = snapshot.DegradedFields
+        .Where(static field =>
+            !field.Equals("change1h", StringComparison.OrdinalIgnoreCase) &&
+            !field.Equals("change7d", StringComparison.OrdinalIgnoreCase) &&
+            !field.Equals("change30d", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    if (trendingDegradedFields.Length > 0)
     {
-        degradedFields.UnionWith(snapshot.DegradedFields.Select(field => $"trending.{field}"));
+        degradedFields.UnionWith(trendingDegradedFields.Select(field => $"trending.{field}"));
     }
 
     var degradedSections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -58,7 +69,7 @@ public async Task<ServiceResult<PublicMarketOverviewResponse>> GetPublicOverview
         degradedSections.Add("marketOverview");
     }
 
-    if (snapshot.DegradedFields.Count > 0)
+    if (trendingDegradedFields.Length > 0)
     {
         degradedSections.Add("trendingAssets");
     }
