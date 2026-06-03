@@ -22,15 +22,18 @@ public sealed class NotificationsAppService : INotificationsAppService
     private readonly INotificationRepository _repo;
     private readonly INotificationSettingsRepository _settings;
     private readonly ISseDispatcher _sse;
+    private readonly IWebPushSender _push;
 
     public NotificationsAppService(
         INotificationRepository repo,
         INotificationSettingsRepository settings,
-        ISseDispatcher sse)
+        ISseDispatcher sse,
+        IWebPushSender push)
     {
         _repo = repo;
         _settings = settings;
         _sse = sse;
+        _push = push;
     }
 
     public async Task<NotificationListResponse> ListAsync(Guid userId, bool unreadOnly, int page, int pageSize, CancellationToken ct)
@@ -98,6 +101,13 @@ public sealed class NotificationsAppService : INotificationsAppService
 
         await _repo.AddAsync(n, ct);
         await _sse.PushAsync(n.UserId, n);
+
+        // Web Push mirrors the SSE path so the notification still arrives when the
+        // tab/app is closed. It is best-effort and respects the per-kind opt-out
+        // above (we already returned early if the user opted out). Never break inbox/SSE.
+        try { await _push.SendAsync(n.UserId, n, ct); }
+        catch { /* push is best-effort, never break inbox/SSE */ }
+
         return true;
     }
 

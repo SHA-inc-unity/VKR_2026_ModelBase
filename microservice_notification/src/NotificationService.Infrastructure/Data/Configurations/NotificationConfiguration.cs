@@ -43,3 +43,25 @@ public sealed class NotificationSettingsConfiguration : IEntityTypeConfiguration
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
     }
 }
+
+public sealed class PushSubscriptionConfiguration : IEntityTypeConfiguration<PushSubscription>
+{
+    public void Configure(EntityTypeBuilder<PushSubscription> b)
+    {
+        b.ToTable("push_subscriptions");
+        b.HasKey(x => x.Id).HasName("pk_push_subscriptions");
+
+        b.Property(x => x.Id).HasColumnName("id");
+        b.Property(x => x.UserId).HasColumnName("user_id");
+        b.Property(x => x.Endpoint).HasColumnName("endpoint").HasMaxLength(2048).IsRequired();
+        b.Property(x => x.P256dh).HasColumnName("p256dh").HasMaxLength(256).IsRequired();
+        b.Property(x => x.Auth).HasColumnName("auth").HasMaxLength(256).IsRequired();
+        b.Property(x => x.UserAgent).HasColumnName("user_agent").HasMaxLength(512);
+        b.Property(x => x.CreatedAt).HasColumnName("created_at");
+        b.Property(x => x.LastSeenAt).HasColumnName("last_seen_at");
+        b.Property(x => x.FailureCount).HasColumnName("failure_count");
+
+        b.HasIndex(x => x.Endpoint).IsUnique().HasDatabaseName("ux_push_subscriptions_endpoint");
+        b.HasIndex(x => x.UserId).HasDatabaseName("ix_push_subscriptions_user_id");
+    }
+}

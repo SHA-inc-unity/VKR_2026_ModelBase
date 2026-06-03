@@ -98,3 +98,52 @@ public sealed class NotificationSettingsRepository : INotificationSettingsReposi
         await _db.SaveChangesAsync(ct);
     }
 }
+
+public sealed class PushSubscriptionRepository : IPushSubscriptionRepository
+{
+    private readonly NotificationDbContext _db;
+    public PushSubscriptionRepository(NotificationDbContext db) => _db = db;
+
+    public async Task UpsertAsync(PushSubscription sub, CancellationToken ct)
+    {
+        var existing = await _db.PushSubscriptions.FirstOrDefaultAsync(x => x.Endpoint == sub.Endpoint, ct);
+        if (existing is null)
+        {
+            await _db.PushSubscriptions.AddAsync(sub, ct);
+        }
+        else
+        {
+            // Same endpoint can be re-subscribed under a (possibly) new user/keys.
+            existing.Refresh(sub.P256dh, sub.Auth, sub.UserAgent);
+        }
+        await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task DeleteByEndpointAsync(Guid userId, string endpoint, CancellationToken ct)
+    {
+        await _db.PushSubscriptions
+            .Where(x => x.UserId == userId && x.Endpoint == endpoint)
+            .ExecuteDeleteAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<PushSubscription>> ListByUserAsync(Guid userId, CancellationToken ct)
+    {
+        return await _db.PushSubscriptions.AsNoTracking()
+            .Where(x => x.UserId == userId)
+            .ToListAsync(ct);
+    }
+
+    public async Task DeleteAsync(Guid id, CancellationToken ct)
+    {
+        await _db.PushSubscriptions
+            .Where(x => x.Id == id)
+            .ExecuteDeleteAsync(ct);
+    }
+
+    public async Task IncrementFailureAsync(Guid id, CancellationToken ct)
+    {
+        await _db.PushSubscriptions
+            .Where(x => x.Id == id)
+            .ExecuteUpdateAsync(set => set.SetProperty(x => x.FailureCount, x => x.FailureCount + 1), ct);
+    }
+}

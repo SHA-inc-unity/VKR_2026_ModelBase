@@ -8,7 +8,7 @@ namespace NotificationService.API.Extensions;
 
 public static class MigrationExtensions
 {
-    private static readonly string[] RequiredTables = ["notifications", "notification_settings"];
+    private static readonly string[] RequiredTables = ["notifications", "notification_settings", "push_subscriptions"];
 
     public static async Task MigrateAndSeedAsync(this WebApplication app)
     {

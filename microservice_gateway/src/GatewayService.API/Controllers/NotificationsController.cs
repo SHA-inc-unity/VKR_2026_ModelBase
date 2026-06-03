@@ -101,6 +101,37 @@ public sealed class NotificationsController : ControllerBase
         }
     }
 
+    // ----- Web Push (VAPID) -----
+
+    [AllowAnonymous]
+    [HttpGet("push/public-key")]
+    public async Task<IActionResult> PushPublicKey(CancellationToken ct)
+    {
+        var token = GetRawToken();
+        var resp = await _proxy.ForwardAsync(HttpMethod.Get, "api/notifications/push/public-key", bearerToken: token, ct: ct);
+        return new ContentResult { StatusCode = resp.StatusCode, Content = resp.Content, ContentType = resp.ContentType };
+    }
+
+    [Authorize]
+    [HttpPost("push/subscribe")]
+    public async Task<IActionResult> PushSubscribe([FromBody] JsonElement body, CancellationToken ct)
+    {
+        var token = GetRawToken();
+        if (token is null) return Unauthorized();
+        var resp = await _proxy.ForwardAsync(HttpMethod.Post, "api/notifications/push/subscribe", body: body, bearerToken: token, ct: ct);
+        return new ContentResult { StatusCode = resp.StatusCode, Content = resp.Content, ContentType = resp.ContentType };
+    }
+
+    [Authorize]
+    [HttpPost("push/unsubscribe")]
+    public async Task<IActionResult> PushUnsubscribe([FromBody] JsonElement body, CancellationToken ct)
+    {
+        var token = GetRawToken();
+        if (token is null) return Unauthorized();
+        var resp = await _proxy.ForwardAsync(HttpMethod.Post, "api/notifications/push/unsubscribe", body: body, bearerToken: token, ct: ct);
+        return new ContentResult { StatusCode = resp.StatusCode, Content = resp.Content, ContentType = resp.ContentType };
+    }
+
     [Authorize]
     [HttpGet("/api/notification-settings")]
     public async Task<IActionResult> GetSettings(CancellationToken ct)

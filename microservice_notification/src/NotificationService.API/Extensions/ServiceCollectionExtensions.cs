@@ -11,6 +11,7 @@ using NotificationService.Application.Common.Settings;
 using NotificationService.Application.Interfaces;
 using NotificationService.Application.Services;
 using NotificationService.Infrastructure.Data;
+using NotificationService.Infrastructure.PushNotifications;
 using NotificationService.Infrastructure.Repositories;
 
 namespace NotificationService.API.Extensions;
@@ -26,6 +27,7 @@ public static class ServiceCollectionExtensions
         services.Configure<SocialServiceSettings>(config.GetSection(SocialServiceSettings.SectionName));
         services.Configure<GatewaySettings>(config.GetSection(GatewaySettings.SectionName));
         services.Configure<PriceWatcherSettings>(config.GetSection(PriceWatcherSettings.SectionName));
+        services.Configure<PushSettings>(config.GetSection(PushSettings.SectionName));
 
         services.AddDbContext<NotificationDbContext>(opt =>
             opt.UseNpgsql(
@@ -35,6 +37,8 @@ public static class ServiceCollectionExtensions
 
         services.AddScoped<INotificationRepository, NotificationRepository>();
         services.AddScoped<INotificationSettingsRepository, NotificationSettingsRepository>();
+        services.AddScoped<IPushSubscriptionRepository, PushSubscriptionRepository>();
+        services.AddScoped<IWebPushSender, WebPushSender>();
         services.AddScoped<INotificationsAppService, NotificationsAppService>();
 
         services.AddSingleton<SseDispatcher>();

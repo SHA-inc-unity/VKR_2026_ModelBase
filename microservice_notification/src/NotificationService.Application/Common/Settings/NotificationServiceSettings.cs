@@ -36,3 +36,20 @@ public sealed class PriceWatcherSettings
     public int PollIntervalSeconds { get; set; } = 300;
     public bool Enabled { get; set; } = true;
 }
+
+/// <summary>
+/// Self-hosted Web Push (VAPID) configuration. The public key is safe to commit
+/// and is served to browsers; the private key is a secret injected via env only.
+/// </summary>
+public sealed class PushSettings
+{
+    public const string SectionName = "Push";
+
+    public string VapidPublicKey { get; set; } = string.Empty;
+    public string VapidPrivateKey { get; set; } = string.Empty;
+    public string VapidSubject { get; set; } = "mailto:admin@sha-trade.tech";
+
+    /// <summary>Push delivery is only active once both VAPID keys are present.</summary>
+    public bool Enabled =>
+        !string.IsNullOrWhiteSpace(VapidPublicKey) && !string.IsNullOrWhiteSpace(VapidPrivateKey);
+}

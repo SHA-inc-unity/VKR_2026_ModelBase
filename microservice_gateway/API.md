@@ -307,6 +307,9 @@ UID в теле запроса не используется как источн
 | GET | `/api/social/sentiment` | Optional | community sentiment (bullish/bearish) для монеты; токен опционален и влияет только на `myVote` |
 | POST | `/api/social/sentiment` | Required | проголосовать bullish/bearish или снять голос (`none`); возвращает свежий aggregate |
 | GET | `/api/notifications` | Required | уведомления пользователя |
+| GET | `/api/notifications/push/public-key` | None | VAPID public key для browser Web Push |
+| POST | `/api/notifications/push/subscribe` | Required | сохранить/обновить browser push subscription |
+| POST | `/api/notifications/push/unsubscribe` | Required | удалить browser push subscription |
 | GET | `/api/admin/summary` | Admin JWT | lightweight mobile-admin summary |
 | GET | `/api/admin/users` | Admin JWT | lightweight mobile-admin users view |
 | GET | `/api/admin/services` | Admin JWT | lightweight mobile-admin services view |
@@ -1817,6 +1820,67 @@ Authorization: Bearer <access-token>
 ### Notifications: current implementation note
 
 Текущий fallback path возвращает успешный пустой inbox для текущего user, поэтому обычный сценарий сейчас — `items = []`, `unreadCount = 0`, `degraded = false`. `degraded = true` остаётся только для реальной ошибки notifications client.
+
+---
+
+## Web Push (VAPID) — `/api/notifications/push/*`
+
+### Web Push: назначение
+
+Self-hosted browser Web Push (VAPID, **без Firebase**). Доставляет уведомление в браузер даже когда вкладка/приложение закрыты — это закрывает gap SSE (который достаёт только подключённых клиентов). Push зеркалит SSE-путь и автоматически уважает per-kind opt-out пользователя (`/api/notification-settings`); "master toggle" = наличие хотя бы одной push-подписки. Gateway проксирует эти три route-а в `microservice_notification` (`_proxy.ForwardAsync`), как и остальной `/api/notifications/*`.
+
+| Method | Path | Auth | Назначение |
+| ------ | ---- | ---- | ---------- |
+| GET | `/api/notifications/push/public-key` | None | VAPID public key для `PushManager.subscribe` |
+| POST | `/api/notifications/push/subscribe` | Required | сохранить/обновить browser push subscription текущего user |
+| POST | `/api/notifications/push/unsubscribe` | Required | удалить push subscription текущего user по endpoint |
+
+### Web Push: GET /api/notifications/push/public-key
+
+Анонимный. Возвращает публичный VAPID-ключ, который браузер передаёт в `PushManager.subscribe({ applicationServerKey })`.
+
+```json
+{ "publicKey": "BCUdvlH58kkkWyQyCVT7SxSDcQYbkS2XW8QLuELAaN1bnTHrDYrTmCLNh1ldxkB6MbUphogzbGzo_i6Xw8VHYcg" }
+```
+
+### Web Push: POST /api/notifications/push/subscribe
+
+Требует `Authorization: Bearer <JWT>`. Body — стандартный сериализованный `PushSubscription` браузера (+ optional `userAgent`):
+
+```http
+POST /api/notifications/push/subscribe
+Authorization: Bearer <access-token>
+Content-Type: application/json
+
+{
+  "endpoint": "https://fcm.googleapis.com/fcm/send/abc123...",
+  "keys": { "p256dh": "<base64url>", "auth": "<base64url>" },
+  "userAgent": "Mozilla/5.0 ..."
+}
+```
+
+Upsert по `endpoint` (повторный subscribe обновляет ключи и сбрасывает счётчик ошибок). Успех — `200 OK`. Невалидное тело (нет `endpoint` или `keys.{p256dh,auth}`) — `400`.
+
+### Web Push: POST /api/notifications/push/unsubscribe
+
+Требует JWT. Удаляет подписку текущего user по `endpoint` (идемпотентно).
+
+```http
+POST /api/notifications/push/unsubscribe
+Authorization: Bearer <access-token>
+Content-Type: application/json
+
+{ "endpoint": "https://fcm.googleapis.com/fcm/send/abc123..." }
+```
+
+Успех — `200 OK`.
+
+### Web Push: frontend behavior
+
+- на старте получить `publicKey`, через service worker сделать `PushManager.subscribe`, отправить результат в `push/subscribe`;
+- payload push-сообщения (то, что приходит в service worker `push` event): `{ "title", "body", "deeplink", "kind", "id" }`;
+- push отключён на сервере (soft, логируется), если VAPID private key не сконфигурирован — в этом случае подписки сохраняются, но сообщения не уходят;
+- мёртвые подписки (push service ответил `404`/`410 Gone`) сервер удаляет автоматически, повторный subscribe нужен после смены браузерного endpoint.
 
 ---
 

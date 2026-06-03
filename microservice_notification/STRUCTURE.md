@@ -45,31 +45,33 @@ price-drift watcher. Своя PostgreSQL. Контейнер `notification_servi
 
 - `Entities/Notification.cs` — inbox-запись (`Id`, `UserId`, `Kind`, `Title`, `Body`, `Deeplink`, `PayloadJson`, `DedupKey`, `CreatedAt`, `ReadAt`); фабрика `Create(...)`, `MarkRead()`
 - `Entities/NotificationSettings.cs` — per-user toggles (`EnableReply`/`EnableNews`/`EnablePrice` = `true`, `PriceThresholdPct` = `5`, clamp `0.0001..100`); `Default(userId)`, `Update(...)`
+- `Entities/PushSubscription.cs` — browser Web Push (VAPID) subscription (`Id`, `UserId`, `Endpoint` unique, `P256dh`, `Auth`, `UserAgent?`, `CreatedAt`, `LastSeenAt`, `FailureCount`); `Create(...)`, `Refresh(...)`
 
 ### `NotificationService.Application/`
 
 Слой use-case, контрактов и DTO.
 
-- `Services/NotificationsAppService.cs` — `INotificationsAppService`; **единственная точка fan-out** `PushAsync` (opt-out → dedup → persist → SSE), плюс list/unread-count/mark-read/mark-all + get/update settings
-- `Interfaces/INotificationRepository.cs` — контракты репозиториев (`INotificationRepository`, `INotificationSettingsRepository`), `ISseDispatcher`, `ISocialDirectoryService`, `IMarketSnapshotService`, `NotificationListPage`
-- `DTOs/NotificationDtos.cs` — list/unread/settings request-response модели
-- `Common/Settings/NotificationServiceSettings.cs` — `JwtSettings`, `NotificationKafkaSettings`, `SocialServiceSettings`, `GatewaySettings`, `PriceWatcherSettings`
+- `Services/NotificationsAppService.cs` — `INotificationsAppService`; **единственная точка fan-out** `PushAsync` (opt-out → dedup → persist → SSE → **Web Push best-effort**), плюс list/unread-count/mark-read/mark-all + get/update settings
+- `Interfaces/INotificationRepository.cs` — контракты репозиториев (`INotificationRepository`, `INotificationSettingsRepository`, `IPushSubscriptionRepository`), `ISseDispatcher`, `IWebPushSender`, `ISocialDirectoryService`, `IMarketSnapshotService`, `NotificationListPage`
+- `DTOs/NotificationDtos.cs` — list/unread/settings request-response модели + push DTO (`PushPublicKeyResponse`, `PushSubscribeRequest`/`PushSubscriptionKeysDto`, `PushUnsubscribeRequest`)
+- `Common/Settings/NotificationServiceSettings.cs` — `JwtSettings`, `NotificationKafkaSettings`, `SocialServiceSettings`, `GatewaySettings`, `PriceWatcherSettings`, `PushSettings` (VAPID public/private/subject + computed `Enabled`)
 
 ### `NotificationService.Infrastructure/`
 
 Интеграция с PostgreSQL.
 
-- `Data/NotificationDbContext.cs` — `DbSet<Notification>`, `DbSet<NotificationSettings>`
-- `Data/Configurations/NotificationConfiguration.cs` — EF-маппинг таблиц `notifications` (индексы user+created, user+read, dedup; `payload_json` = jsonb) и `notification_settings` (PK = `user_id`)
-- `Repositories/NotificationRepository.cs` — `NotificationRepository` (list/count/mark/dedup-exists) + `NotificationSettingsRepository` (`GetOrCreateAsync` с защитой от гонки insert, `SaveAsync`)
-- `Migrations/` — EF Core миграции (`20260524000003_InitialCreate`) + snapshot
+- `Data/NotificationDbContext.cs` — `DbSet<Notification>`, `DbSet<NotificationSettings>`, `DbSet<PushSubscription>`
+- `Data/Configurations/NotificationConfiguration.cs` — EF-маппинг таблиц `notifications` (индексы user+created, user+read, dedup; `payload_json` = jsonb), `notification_settings` (PK = `user_id`) и `push_subscriptions` (`PushSubscriptionConfiguration`: PK `id`, UNIQUE `endpoint`, индекс `user_id`)
+- `Repositories/NotificationRepository.cs` — `NotificationRepository` (list/count/mark/dedup-exists) + `NotificationSettingsRepository` (`GetOrCreateAsync` с защитой от гонки insert, `SaveAsync`) + `PushSubscriptionRepository` (`UpsertAsync` by endpoint, `DeleteByEndpointAsync`, `ListByUserAsync`, `DeleteAsync`, `IncrementFailureAsync`)
+- `PushNotifications/WebPushSender.cs` — `IWebPushSender` impl на `WebPush` NuGet (`WebPushClient`+`VapidDetails`); payload `{title,body,deeplink,kind,id}`; best-effort, never throws; dead-sub cleanup на `404`/`410`, `failure_count`++ на прочих ошибках; disabled (logged once) при пустом private key
+- `Migrations/` — EF Core миграции (`20260524000003_InitialCreate`, `20260603000002_AddPushSubscriptions`) + snapshot
 
 ### `NotificationService.API/`
 
 HTTP-, SSE-, Kafka- и background-входные точки.
 
 - `Program.cs` — bootstrap, Serilog, middleware, `MapControllers` + `/health`, `await MigrateAndSeedAsync()`
-- `Controllers/NotificationsController.cs` — `/api/notifications` (list, unread-count, `{id}/read`, read-all) + `GET stream` (SSE, `[AllowAnonymous]`, ручная валидация `access_token`)
+- `Controllers/NotificationsController.cs` — `/api/notifications` (list, unread-count, `{id}/read`, read-all) + `GET stream` (SSE, `[AllowAnonymous]`, ручная валидация `access_token`) + Web Push (`GET push/public-key` `[AllowAnonymous]`, `POST push/subscribe`, `POST push/unsubscribe`)
 - `Controllers/NotificationSettingsController.cs` — `/api/notification-settings` (GET/PUT)
 - `Sse/SseDispatcher.cs` — **in-memory** singleton `ConcurrentDictionary<userId, clients>`; пишет `event: notification`; достаёт только подключённых клиентов
 - `Kafka/KafkaConsumerService.cs` — `BackgroundService`, подписан на social+news topics; `comment.created` → `comment.reply`, `news.created` → `news.favorite`; парсит envelope `type`+`payload`, разрешает получателей через social `/internal/*`
@@ -77,8 +79,8 @@ HTTP-, SSE-, Kafka- и background-входные точки.
 - `Services/HttpSocialDirectoryService.cs` — social `/internal/comments/{id}/author`, `/internal/favorites/users-by-symbol/{sym}`, `/internal/favorites/symbols` (`X-Internal-Api-Key`)
 - `Services/HttpMarketSnapshotService.cs` — gateway `GET /api/v1/market/snapshot?symbols=...`, soft-fail к пустой карте
 - `Services/JwtTokenValidator.cs` — `IJwtTokenValidator.ResolveUserId(token)` для query-token пути SSE
-- `Extensions/ServiceCollectionExtensions.cs` — DI: DbContext, репозитории, app-service, `SseDispatcher` singleton, HttpClients (social/gateway), оба hosted services, JWT bearer, Swagger, health checks
-- `Extensions/MigrationExtensions.cs` — `MigrateAndSeedAsync`: `MigrateAsync` + `RequiredTables` whitelist (`notifications`, `notification_settings`); пустая схема → recreate from model, partial → hard-fail
+- `Extensions/ServiceCollectionExtensions.cs` — DI: DbContext, репозитории (вкл. `IPushSubscriptionRepository`), `IWebPushSender`, `PushSettings`, app-service, `SseDispatcher` singleton, HttpClients (social/gateway), оба hosted services, JWT bearer, Swagger, health checks
+- `Extensions/MigrationExtensions.cs` — `MigrateAndSeedAsync`: `MigrateAsync` + `RequiredTables` whitelist (`notifications`, `notification_settings`, `push_subscriptions`); пустая схема → recreate from model, partial → hard-fail
 - `Middleware/GlobalExceptionMiddleware.cs` — единый обработчик исключений
 - `appsettings*.json` — конфигурация окружений
 
@@ -92,9 +94,10 @@ HTTP-, SSE-, Kafka- и background-входные точки.
 
 ## Что считать изменением структуры
 
-- новые/изменённые HTTP endpoints или SSE-контракт
-- новые notification kinds или изменение `PushAsync` fan-out (opt-out / dedup / persist / push)
+- новые/изменённые HTTP endpoints, SSE-контракт или Web Push contract (`push/*`)
+- новые notification kinds или изменение `PushAsync` fan-out (opt-out / dedup / persist / SSE / Web Push)
 - изменение consumed Kafka topics или формата envelope (`type`/`payload`)
-- изменение схемы таблиц `notifications` / `notification_settings`, индексов, миграций
+- изменение схемы таблиц `notifications` / `notification_settings` / `push_subscriptions`, индексов, миграций
 - изменение price-watcher логики, источников символов или порогов
+- изменение Web Push sender (payload, dead-sub cleanup, VAPID config) или `PushSettings`
 - изменение config-секций, health-flow или зависимостей (social/gateway)

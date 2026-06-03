@@ -48,3 +48,30 @@ public interface ISseDispatcher
 {
     Task PushAsync(Guid userId, Notification n);
 }
+
+public interface IPushSubscriptionRepository
+{
+    /// <summary>Insert a new subscription, or update the existing one (keyed by Endpoint):
+    /// refresh keys + user agent, bump LastSeenAt, reset FailureCount.</summary>
+    Task UpsertAsync(PushSubscription sub, CancellationToken ct);
+
+    /// <summary>Remove a subscription owned by the user, identified by endpoint (idempotent).</summary>
+    Task DeleteByEndpointAsync(Guid userId, string endpoint, CancellationToken ct);
+
+    Task<IReadOnlyList<PushSubscription>> ListByUserAsync(Guid userId, CancellationToken ct);
+
+    /// <summary>Hard-delete a single subscription by id (dead-subscription cleanup).</summary>
+    Task DeleteAsync(Guid id, CancellationToken ct);
+
+    /// <summary>Increment FailureCount for a subscription after a transient push failure.</summary>
+    Task IncrementFailureAsync(Guid id, CancellationToken ct);
+}
+
+/// <summary>
+/// Best-effort browser Web Push (VAPID) sender. Never throws: push delivery must
+/// never break the inbox/SSE path. Disabled (soft, logged) when no private key is set.
+/// </summary>
+public interface IWebPushSender
+{
+    Task SendAsync(Guid userId, Notification n, CancellationToken ct);
+}
