@@ -27,7 +27,11 @@ public sealed class HttpMarketSnapshotService : IMarketSnapshotService
         try
         {
             var qs = "symbols=" + string.Join(',', distinct);
-            using var resp = await _client.GetAsync($"/api/v1/market/snapshot?{qs}", ct);
+            // The gateway has no /snapshot route; quotes/realtime is the live per-symbol
+            // price endpoint (source "market-watch-live"). Response is { items: [{symbol,
+            // price}], missingSymbols, meta } — handled by the parser below. Fixing the
+            // path here also un-breaks the favorite price-drift watcher, which shares this service.
+            using var resp = await _client.GetAsync($"/api/v1/market/quotes/realtime?{qs}", ct);
             if (!resp.IsSuccessStatusCode)
             {
                 _log.LogDebug("Market snapshot returned {Status}", (int)resp.StatusCode);
