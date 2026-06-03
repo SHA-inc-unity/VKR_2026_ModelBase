@@ -854,7 +854,7 @@ GET /api/dashboard
 
 Gateway теперь разделяет `marketOverview` и `trendingAssets` по источникам:
 
-- `marketOverview.totalMarketCap`, `marketOverview.volume24h`, `marketOverview.btcDominance`, `marketOverview.activeAssets` приходят из canonical global market feed (`CoinGecko /global`), а не из gateway snapshot universe;
+- `marketOverview.totalMarketCap`, `marketOverview.volume24h`, `marketOverview.btcDominance`, `marketOverview.activeAssets` приходят из canonical global market feed (`CoinGecko /global`), а не из gateway snapshot universe (HTTP-клиент шлёт `User-Agent`/`Accept: application/json` — без UA Cloudflare CoinGecko отвечает 403 и поля деградируют в `null`);
 - `marketOverview.fearGreedValue` / `marketOverview.fearGreedLabel` приходят из внешнего Fear & Greed feed (`alternative.me/fng`), а не из gateway-local breadth heuristic;
 - `trendingAssets` по-прежнему ранжируются по gateway snapshot universe и `TrendingScore`, который учитывает magnitude 24h change и liquidity proxy.
 

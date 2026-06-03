@@ -95,7 +95,16 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient(nameof(BybitSymbolProvider))
                 .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(15));
         services.AddHttpClient(nameof(MarketServiceClient))
-            .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(15));
+            .ConfigureHttpClient(c =>
+            {
+                c.Timeout = TimeSpan.FromSeconds(15);
+                // CoinGecko's Cloudflare returns 403 when no User-Agent is sent
+                // (a default HttpClient sends none), which silently nulled out
+                // totalMarketCap/btcDominance/volume24h on /api/v1/market/overview.
+                // A real UA + Accept header gets us a 200.
+                c.DefaultRequestHeaders.UserAgent.ParseAdd("SHATrade/1.0 (+https://sha-trade.tech)");
+                c.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+            });
 
         // Market API — services
         // All market services are singletons: they delegate to singleton Redis/Kafka,
