@@ -13,6 +13,7 @@ public static class MigrationExtensions
         "favorites",
         "comments",
         "comment_likes",
+        "asset_sentiment",
     ];
 
     public static async Task MigrateAndSeedAsync(this WebApplication app)

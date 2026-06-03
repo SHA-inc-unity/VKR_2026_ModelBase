@@ -298,6 +298,8 @@ UID в теле запроса не используется как источн
 | PATCH | `/api/services/toggles` | Required | частично обновить service toggles |
 | GET | `/api/news` | None | лента новостей |
 | GET | `/api/news/home` | None | compact home-screen news feed |
+| GET | `/api/social/sentiment` | Optional | community sentiment (bullish/bearish) для монеты; токен опционален и влияет только на `myVote` |
+| POST | `/api/social/sentiment` | Required | проголосовать bullish/bearish или снять голос (`none`); возвращает свежий aggregate |
 | GET | `/api/notifications` | Required | уведомления пользователя |
 | GET | `/api/admin/summary` | Admin JWT | lightweight mobile-admin summary |
 | GET | `/api/admin/users` | Admin JWT | lightweight mobile-admin users view |
@@ -943,7 +945,12 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
       "price": 106500,
       "change24h": 2.5,
       "volume24h": 1250000000,
-      "marketCap": 820000000,
+      "marketCap": 2118900000000,
+      "circulatingSupply": 19800000,
+      "totalSupply": 19800000,
+      "maxSupply": 21000000,
+      "fdv": 2236500000000,
+      "ath": 126000,
       "high24h": 107200,
       "low24h": 103800,
       "rank": 1,
@@ -971,8 +978,11 @@ GET /api/v1/market/tickers?page=1&pageSize=25&search=btc&sortBy=change24h&sortDi
 ### Market Tickers: frontend behavior
 
 - использовать для list/table/grid screens вместо многократных `chart` запросов;
-- `marketCap` остаётся proxy-derived полем и может быть `null`, если snapshot не смог вычислить proxy;
-- `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными;
+- `marketCap` теперь **реальная** капитализация = `circulatingSupply × livePrice` (circulating supply из CoinGecko `/coins/markets` по curated `base → coingecko_id` карте; live price из Bybit snapshot). Раньше это был open-interest/turnover **proxy** (BTC показывал ~$4B) — proxy больше **не** используется как отображаемый cap;
+- `fdv` = `(maxSupply ?? totalSupply) × livePrice`; `circulatingSupply`/`totalSupply`/`maxSupply`/`ath` приходят из той же metadata-карты;
+- если supply неизвестен (base не в curated карте, CoinGecko miss, или нет live price), `marketCap`/`circulatingSupply`/`totalSupply`/`maxSupply`/`fdv`/`ath` приходят `null` (graceful degrade) — **никакого** отката к старому proxy. Сортировка по `marketCap` ставит такие монеты последними (null-last);
+- supply/FDV/ATH metadata кэшируется на стороне gateway ~6 ч (`Market:CoinMetadataCacheTtlSeconds`, soft-fail к пустой карте при недоступности CoinGecko); live price по-прежнему обновляется из 30-сек Bybit snapshot;
+- `meta.degradedFields` показывает, какие числовые поля snapshot считает частично деградированными (`marketCap` попадает сюда, когда у любой tracked-монеты cap = `null`);
 - `snapshotId` — cheap polling marker: если он не изменился между запросами, клиент может считать, что это тот же server snapshot;
 - `collection=trending` и `collection=top-movers` дают тот же item contract, что и обычный market list, но с backend-owned feed ordering;
 - route рассчитан на короткий public cache: `max-age=15, stale-while-revalidate=45`.

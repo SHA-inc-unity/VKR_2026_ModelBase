@@ -33,3 +33,19 @@ public interface ICommentsAppService
     Task<bool> UnlikeAsync(Guid userId, Guid commentId, CancellationToken ct);
     Task<Guid?> GetAuthorAsync(Guid commentId, CancellationToken ct);
 }
+
+public interface IAssetSentimentAppService
+{
+    /// <summary>
+    /// Aggregate sentiment for a target. <paramref name="viewerUserId"/> is
+    /// optional (null for guests) and only drives <c>MyVote</c>.
+    /// </summary>
+    Task<SentimentResponse> GetAsync(string targetType, string targetId, Guid? viewerUserId, CancellationToken ct);
+
+    /// <summary>
+    /// Casts/moves/retracts the caller's vote (one row per (user, target)):
+    /// "none" deletes, "bullish"/"bearish" upsert. Returns the fresh aggregate
+    /// projected for the voter. Invalid vote → <see cref="ArgumentException"/> (400).
+    /// </summary>
+    Task<SentimentResponse> VoteAsync(Guid userId, string targetType, string targetId, string vote, CancellationToken ct);
+}

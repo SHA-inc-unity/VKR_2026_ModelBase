@@ -10,6 +10,7 @@ public sealed class SocialDbContext : DbContext
     public DbSet<Favorite> Favorites => Set<Favorite>();
     public DbSet<Comment> Comments => Set<Comment>();
     public DbSet<CommentLike> CommentLikes => Set<CommentLike>();
+    public DbSet<AssetSentiment> AssetSentiments => Set<AssetSentiment>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

@@ -38,9 +38,11 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IFavoriteRepository, FavoriteRepository>();
         services.AddScoped<ICommentRepository, CommentRepository>();
         services.AddScoped<ICommentLikeRepository, CommentLikeRepository>();
+        services.AddScoped<IAssetSentimentRepository, AssetSentimentRepository>();
 
         services.AddScoped<IFavoritesAppService, FavoritesAppService>();
         services.AddScoped<ICommentsAppService, CommentsAppService>();
+        services.AddScoped<IAssetSentimentAppService, AssetSentimentAppService>();
 
         services.AddHttpClient<IUserDirectoryService, HttpUserDirectoryService>((sp, c) =>
         {

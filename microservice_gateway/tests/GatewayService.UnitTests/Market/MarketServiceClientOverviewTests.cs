@@ -15,6 +15,7 @@ namespace GatewayService.UnitTests.Market;
 public sealed class MarketServiceClientOverviewTests
 {
     private readonly Mock<IMarketConfigService> _marketConfig = new();
+    private readonly Mock<ICoinMetadataService> _coinMetadata = new();
     private readonly Mock<IKafkaRequestClient> _kafka = new();
 
     [Fact]
@@ -196,8 +197,21 @@ public sealed class MarketServiceClientOverviewTests
 
     private MarketServiceClient CreateSut(IHttpClientFactory httpClientFactory)
     {
+        // Positive circulating supply for the tracked bases so the snapshot can
+        // compute a real (non-null) market cap and `marketCap` does NOT show up
+        // as a degraded field. Coins with no live price (fallback tickers) still
+        // yield a null cap regardless of this metadata.
+        _coinMetadata.Setup(service => service.GetMetadataAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, CoinMetadata>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["BTC"] = new(CirculatingSupply: 19_800_000m, TotalSupply: 19_800_000m, MaxSupply: 21_000_000m, Ath: 109_000m),
+                ["ETH"] = new(CirculatingSupply: 120_000_000m, TotalSupply: 120_000_000m, MaxSupply: null, Ath: 4_900m),
+                ["SOL"] = new(CirculatingSupply: 470_000_000m, TotalSupply: 590_000_000m, MaxSupply: null, Ath: 295m),
+            });
+
         return new MarketServiceClient(
             _marketConfig.Object,
+            _coinMetadata.Object,
             httpClientFactory,
             new PassthroughMarketCacheService(),
             _kafka.Object,

@@ -17,13 +17,20 @@ public sealed partial class MarketServiceClient
             TimeSpan.FromSeconds(Math.Max(1, _settings.SnapshotCacheTtlSeconds)),
             async () =>
             {
-                var config = await _marketConfig.GetConfigAsync(null, ct);
-                return await FetchSnapshotAsync(config.Symbols, ct);
+                var configTask = _marketConfig.GetConfigAsync(null, ct);
+                var metadataTask = _coinMetadata.GetMetadataAsync(ct);
+                await Task.WhenAll(configTask, metadataTask);
+                var config = await configTask;
+                var metadata = await metadataTask;
+                return await FetchSnapshotAsync(config.Symbols, metadata, ct);
             },
             ct);
     }
 
-    private async Task<SnapshotEnvelope> FetchSnapshotAsync(IReadOnlyList<string> activeSymbols, CancellationToken ct)
+    private async Task<SnapshotEnvelope> FetchSnapshotAsync(
+        IReadOnlyList<string> activeSymbols,
+        IReadOnlyDictionary<string, CoinMetadata> metadata,
+        CancellationToken ct)
     {
         var activeSet = activeSymbols
             .Where(static item => !string.IsNullOrWhiteSpace(item))
@@ -48,6 +55,7 @@ public sealed partial class MarketServiceClient
                 linear.TryGetValue(symbol, out var l) ? l
                 : spot.TryGetValue(symbol, out var s) ? s
                 : BuildFallbackTicker(symbol, updatedAt))
+            .Select(ticker => EnrichWithMetadata(ticker, metadata))
             .ToArray();
 
         // If neither category yielded anything the whole snapshot is fallback.
@@ -107,8 +115,12 @@ public sealed partial class MarketServiceClient
 
     private static SnapshotEnvelope FinalizeSnapshot(IReadOnlyList<SnapshotTicker> items, DateTimeOffset updatedAt, IReadOnlyList<string> degradedFields)
     {
+        // Rank by the REAL circulating-supply market cap, with coins of unknown
+        // supply (null cap) ordered last and broken by liquidity/symbol. We no
+        // longer rank by the old open-interest proxy — it produced wrong caps.
         var ranked = items
-            .OrderByDescending(item => item.MarketCapProxy)
+            .OrderByDescending(item => item.MarketCap.HasValue)
+            .ThenByDescending(item => item.MarketCap ?? 0m)
             .ThenByDescending(item => item.Volume24h)
             .ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase)
             .Select((item, index) => item with { Rank = index + 1 })
@@ -127,8 +139,8 @@ public sealed partial class MarketServiceClient
             ranked,
             updatedAt,
             DecimalRound(ranked.Sum(item => item.Volume24h)),
-            DecimalRound(ranked.Sum(item => item.MarketCapProxy)),
-            DecimalRound(ranked.FirstOrDefault(item => string.Equals(item.Symbol, "BTCUSDT", StringComparison.OrdinalIgnoreCase))?.MarketCapProxy ?? 0),
+            DecimalRound(ranked.Sum(item => item.MarketCap ?? 0m)),
+            DecimalRound(ranked.FirstOrDefault(item => string.Equals(item.Symbol, "BTCUSDT", StringComparison.OrdinalIgnoreCase))?.MarketCap ?? 0m),
             degradedFields);
     }
 
@@ -141,6 +153,8 @@ public sealed partial class MarketServiceClient
         var low24h = GetDecimal(item, "lowPrice24h");
         var price24hPcnt = GetDecimal(item, "price24hPcnt") * 100m;
         var turnover24h = GetDecimal(item, "turnover24h");
+        // openInterestValue/turnover kept only as an internal rank tie-breaker
+        // hint; it is NOT surfaced as the displayed market cap any more.
         var marketCapProxy = GetDecimal(item, "openInterestValue");
         if (marketCapProxy <= 0)
         {
@@ -156,6 +170,12 @@ public sealed partial class MarketServiceClient
             Change24h: DecimalRound(price24hPcnt),
             Volume24h: DecimalRound(turnover24h),
             MarketCapProxy: DecimalRound(marketCapProxy),
+            MarketCap: null,
+            CirculatingSupply: null,
+            TotalSupply: null,
+            MaxSupply: null,
+            Fdv: null,
+            Ath: null,
             High24h: DecimalRound(high24h),
             Low24h: DecimalRound(low24h),
             Rank: 0,
@@ -179,6 +199,12 @@ public sealed partial class MarketServiceClient
             Change24h: 0,
             Volume24h: 0,
             MarketCapProxy: 0,
+            MarketCap: null,
+            CirculatingSupply: null,
+            TotalSupply: null,
+            MaxSupply: null,
+            Fdv: null,
+            Ath: null,
             High24h: 0,
             Low24h: 0,
             Rank: 0,
@@ -187,6 +213,48 @@ public sealed partial class MarketServiceClient
             UpdatedAt: updatedAt,
             IsTrending: false,
             TrendingScore: 0);
+    }
+
+    /// <summary>
+    /// Overlays CoinGecko supply/ATH metadata onto a freshly-built ticker and
+    /// computes the real market cap + FDV from the LIVE Bybit price:
+    /// <c>marketCap = circulatingSupply × price</c>,
+    /// <c>fdv = (maxSupply ?? totalSupply) × price</c>.
+    /// When supply is unknown (base unmapped / CoinGecko miss) or there is no live
+    /// price, the cap/FDV fields stay null — we deliberately do NOT fall back to
+    /// the old open-interest proxy for the displayed cap.
+    /// </summary>
+    private static SnapshotTicker EnrichWithMetadata(
+        SnapshotTicker ticker,
+        IReadOnlyDictionary<string, CoinMetadata> metadata)
+    {
+        if (!metadata.TryGetValue(ticker.BaseAsset, out var meta))
+        {
+            return ticker;
+        }
+
+        decimal? marketCap = null;
+        if (meta.CirculatingSupply is > 0 && ticker.Price > 0)
+        {
+            marketCap = DecimalRound(meta.CirculatingSupply.Value * ticker.Price);
+        }
+
+        decimal? fdv = null;
+        var fdvSupply = meta.MaxSupply ?? meta.TotalSupply;
+        if (fdvSupply is > 0 && ticker.Price > 0)
+        {
+            fdv = DecimalRound(fdvSupply.Value * ticker.Price);
+        }
+
+        return ticker with
+        {
+            MarketCap = marketCap,
+            CirculatingSupply = meta.CirculatingSupply.HasValue ? DecimalRound(meta.CirculatingSupply.Value) : null,
+            TotalSupply = meta.TotalSupply.HasValue ? DecimalRound(meta.TotalSupply.Value) : null,
+            MaxSupply = meta.MaxSupply.HasValue ? DecimalRound(meta.MaxSupply.Value) : null,
+            Fdv = fdv,
+            Ath = meta.Ath.HasValue ? DecimalRound(meta.Ath.Value) : null,
+        };
     }
 
     private static IReadOnlyList<string> BuildDegradedFields(IReadOnlyList<SnapshotTicker> items, bool allFallback)
@@ -201,7 +269,9 @@ public sealed partial class MarketServiceClient
         if (items.Any(item => item.Price <= 0)) degraded.Add("price");
         if (items.Any(item => item.Change24h == 0)) degraded.Add("change24h");
         if (items.Any(item => item.Volume24h <= 0)) degraded.Add("volume24h");
-        if (items.Any(item => item.MarketCapProxy <= 0)) degraded.Add("marketCap");
+        // Real market cap is degraded when any tracked coin has no known supply
+        // (unmapped base / CoinGecko miss / missing live price) → null cap.
+        if (items.Any(item => item.MarketCap is null)) degraded.Add("marketCap");
         if (items.Any(item => item.High24h <= 0)) degraded.Add("high24h");
         if (items.Any(item => item.Low24h <= 0)) degraded.Add("low24h");
         return degraded.ToArray();
@@ -229,8 +299,10 @@ public sealed partial class MarketServiceClient
         IReadOnlyList<SnapshotTicker> Items,
         DateTimeOffset UpdatedAt,
         decimal TotalVolume24hUsd,
-        decimal TotalMarketCapProxy,
-        decimal BtcMarketCapProxy,
+        // Now summed from the REAL circulating-supply caps across the tracked
+        // universe (coins with unknown supply contribute 0), not the OI proxy.
+        decimal TotalMarketCapUsd,
+        decimal BtcMarketCapUsd,
         IReadOnlyList<string> DegradedFields);
 
     private sealed record SnapshotTicker(
@@ -241,7 +313,15 @@ public sealed partial class MarketServiceClient
         decimal Price,
         decimal Change24h,
         decimal Volume24h,
+        // Internal-only open-interest/turnover hint kept for diagnostics; never
+        // surfaced as the displayed cap (the real cap lives in MarketCap below).
         decimal MarketCapProxy,
+        decimal? MarketCap,
+        decimal? CirculatingSupply,
+        decimal? TotalSupply,
+        decimal? MaxSupply,
+        decimal? Fdv,
+        decimal? Ath,
         decimal High24h,
         decimal Low24h,
         int Rank,

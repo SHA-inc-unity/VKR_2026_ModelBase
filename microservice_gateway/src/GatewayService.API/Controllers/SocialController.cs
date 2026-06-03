@@ -64,6 +64,19 @@ public sealed class SocialController : ControllerBase
     public Task<IActionResult> UnlikeComment(Guid id, CancellationToken ct) =>
         Forward(HttpMethod.Delete, $"api/social/comments/{id}/like", requireBearer: true, ct: ct);
 
+    // ── Sentiment (per-coin bullish/bearish voting) ───────────────────────────
+    [AllowAnonymous]
+    [HttpGet("sentiment")]
+    public Task<IActionResult> GetSentiment(CancellationToken ct) =>
+        Forward(HttpMethod.Get, "api/social/sentiment", requireBearer: false,
+            query: Request.QueryString.HasValue ? Request.QueryString.Value!.TrimStart('?') : null,
+            ct: ct);
+
+    [Authorize]
+    [HttpPost("sentiment")]
+    public Task<IActionResult> PostSentiment([FromBody] JsonElement body, CancellationToken ct) =>
+        Forward(HttpMethod.Post, "api/social/sentiment", requireBearer: true, body: body, ct: ct);
+
     // ── Internals ─────────────────────────────────────────────────────────────
     private async Task<IActionResult> Forward(
         HttpMethod method,

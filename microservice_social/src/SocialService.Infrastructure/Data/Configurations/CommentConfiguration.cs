@@ -36,3 +36,21 @@ public sealed class CommentLikeConfiguration : IEntityTypeConfiguration<CommentL
         b.HasIndex(x => x.CommentId);
     }
 }
+
+public sealed class AssetSentimentConfiguration : IEntityTypeConfiguration<AssetSentiment>
+{
+    public void Configure(EntityTypeBuilder<AssetSentiment> b)
+    {
+        b.ToTable("asset_sentiment");
+        // Composite PK is the dedup guarantee: one active vote per (user, target).
+        b.HasKey(x => new { x.UserId, x.TargetType, x.TargetId });
+        b.Property(x => x.UserId).IsRequired();
+        b.Property(x => x.TargetType).HasMaxLength(16).IsRequired();
+        b.Property(x => x.TargetId).HasMaxLength(128).IsRequired();
+        b.Property(x => x.Vote).HasMaxLength(16).IsRequired();
+        b.Property(x => x.CreatedAt).IsRequired();
+        b.Property(x => x.UpdatedAt).IsRequired();
+        // Powers the GROUP BY Vote aggregate for a single (targetType, targetId).
+        b.HasIndex(x => new { x.TargetType, x.TargetId });
+    }
+}

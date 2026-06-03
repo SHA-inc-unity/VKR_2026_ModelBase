@@ -23,7 +23,32 @@ public sealed record MarketTickerItemDto
     public decimal Price { get; init; }
     public decimal Change24h { get; init; }
     public decimal Volume24h { get; init; }
+
+    /// <summary>
+    /// Real circulating-supply market cap (<c>circulatingSupply × livePrice</c>),
+    /// or <c>null</c> when supply is unknown (base unmapped / CoinGecko miss).
+    /// Replaces the former open-interest/turnover proxy.
+    /// </summary>
     public decimal? MarketCap { get; init; }
+
+    /// <summary>Circulating supply (coins in circulation), or <c>null</c> when unknown.</summary>
+    public decimal? CirculatingSupply { get; init; }
+
+    /// <summary>Total supply (minted, incl. locked), or <c>null</c> when unknown.</summary>
+    public decimal? TotalSupply { get; init; }
+
+    /// <summary>Max supply (hard cap), or <c>null</c> when uncapped/unknown.</summary>
+    public decimal? MaxSupply { get; init; }
+
+    /// <summary>
+    /// Fully-diluted valuation (<c>(maxSupply ?? totalSupply) × livePrice</c>),
+    /// or <c>null</c> when neither supply figure is known.
+    /// </summary>
+    public decimal? Fdv { get; init; }
+
+    /// <summary>All-time-high price (USD) per CoinGecko, or <c>null</c> when unknown.</summary>
+    public decimal? Ath { get; init; }
+
     public decimal High24h { get; init; }
     public decimal Low24h { get; init; }
     public int Rank { get; init; }

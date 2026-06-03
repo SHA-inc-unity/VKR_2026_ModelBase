@@ -113,6 +113,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMarketCacheService, MarketCacheService>();
         services.AddSingleton<IDataServiceClient, DataServiceClient>();
         services.AddSingleton<IMarketConfigService, MarketConfigService>();
+        // Per-coin supply/FDV/ATH metadata (CoinGecko /coins/markets), lazily
+        // cached for hours; singleton-safe like the other market services.
+        services.AddSingleton<ICoinMetadataService, CoinMetadataService>();
         // ChartService registered as concrete type so ChartRequestQueue can inject it.
         services.AddSingleton<ChartService>();
         // ChartRequestQueue is the IChartService — provides coalescing + concurrency limits.

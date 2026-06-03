@@ -15,6 +15,13 @@ public sealed class MarketSettings
     /// <summary>CoinGecko REST base URL used for canonical global market stats.</summary>
     public string CoinGeckoBaseUrl { get; init; } = "https://api.coingecko.com/api/v3";
 
+    /// <summary>
+    /// Optional CoinGecko demo-tier API key. When set it is sent as the
+    /// <c>x-cg-demo-api-key</c> header on per-coin metadata fetches to raise the
+    /// shared-IP rate limit. Empty = use the public anonymous tier.
+    /// </summary>
+    public string CoinGeckoApiKey { get; init; } = string.Empty;
+
     /// <summary>Alternative.me base URL used for the Fear &amp; Greed index.</summary>
     public string FearGreedBaseUrl { get; init; } = "https://api.alternative.me";
 
@@ -49,6 +56,15 @@ public sealed class MarketSettings
 
     /// <summary>How long to cache the canonical global overview payload (seconds).</summary>
     public int GlobalOverviewCacheTtlSeconds { get; init; } = 180;
+
+    /// <summary>
+    /// How long to cache the per-coin supply / FDV / ATH metadata fetched from
+    /// CoinGecko <c>/coins/markets</c> (seconds). Defaults to 6 h — circulating
+    /// supply moves slowly and CoinGecko's shared-IP rate limit is tight, so this
+    /// is deliberately long. The live price (which drives the displayed market
+    /// cap) still comes from the 30 s Bybit snapshot, not from this cache.
+    /// </summary>
+    public int CoinMetadataCacheTtlSeconds { get; init; } = 21600;
 
     /// <summary>How long to cache the per-exchange MW-tracked global summary (seconds).</summary>
     public int GlobalSummaryCacheTtlSeconds { get; init; } = 30;

@@ -19,6 +19,7 @@ public sealed partial class MarketServiceClient : IMarketServiceClient
     private const int RealtimeRowsLimit = 500;
 
     private readonly IMarketConfigService _marketConfig;
+    private readonly ICoinMetadataService _coinMetadata;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IMarketCacheService _cache;
     private readonly IKafkaRequestClient _kafka;
@@ -27,6 +28,7 @@ public sealed partial class MarketServiceClient : IMarketServiceClient
 
     public MarketServiceClient(
         IMarketConfigService marketConfig,
+        ICoinMetadataService coinMetadata,
         IHttpClientFactory httpClientFactory,
         IMarketCacheService cache,
         IKafkaRequestClient kafka,
@@ -34,6 +36,7 @@ public sealed partial class MarketServiceClient : IMarketServiceClient
         ILogger<MarketServiceClient> logger)
     {
         _marketConfig = marketConfig;
+        _coinMetadata = coinMetadata;
         _httpClientFactory = httpClientFactory;
         _cache = cache;
         _kafka = kafka;
