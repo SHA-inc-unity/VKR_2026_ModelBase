@@ -100,7 +100,7 @@ public sealed class MarketController : ControllerBase
 
         // Same cache window as the parent overview — server already
         // caches the heavy work in Redis at GlobalSummaryCacheTtlSeconds.
-        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        Response.Headers["Cache-Control"] = "no-store";
         return Ok(result.Value);
     }
 
@@ -133,7 +133,7 @@ public sealed class MarketController : ControllerBase
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid tickers request", HttpContext.GetCorrelationId()));
         }
 
-        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        Response.Headers["Cache-Control"] = "no-store";
         return Ok(result.Value);
     }
 
@@ -180,7 +180,7 @@ public sealed class MarketController : ControllerBase
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid trending request", HttpContext.GetCorrelationId()));
         }
 
-        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        Response.Headers["Cache-Control"] = "no-store";
         return Ok(result.Value);
     }
 
@@ -202,7 +202,7 @@ public sealed class MarketController : ControllerBase
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid top movers request", HttpContext.GetCorrelationId()));
         }
 
-        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        Response.Headers["Cache-Control"] = "no-store";
         return Ok(result.Value);
     }
 
@@ -229,7 +229,7 @@ public sealed class MarketController : ControllerBase
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid gainers request", HttpContext.GetCorrelationId()));
         }
 
-        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        Response.Headers["Cache-Control"] = "no-store";
         return Ok(result.Value);
     }
 
@@ -256,7 +256,7 @@ public sealed class MarketController : ControllerBase
             return BadRequest(ErrorResponse.BadRequest(result.Error ?? "Invalid losers request", HttpContext.GetCorrelationId()));
         }
 
-        Response.Headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=45";
+        Response.Headers["Cache-Control"] = "no-store";
         return Ok(result.Value);
     }
 
