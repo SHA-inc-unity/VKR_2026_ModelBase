@@ -21,7 +21,7 @@ services:
       Kafka__GroupId: ${KAFKA_GROUP_ID:-notification-service}
       SocialService__BaseUrl: ${SOCIAL_BASE_URL:-http://social_service_api:5000}
       SocialService__InternalApiKey: ${INTERNAL_API_KEY}
-      Gateway__BaseUrl: ${GATEWAY_BASE_URL:-http://exchange-gateway:5000}
+      Gateway__BaseUrl: ${GATEWAY_BASE_URL:-http://exchange-gateway:5020}
       PriceWatcher__PollIntervalSeconds: ${PRICE_WATCHER_POLL_SECONDS:-300}
       PriceWatcher__Enabled: ${PRICE_WATCHER_ENABLED:-true}
       AlertWatcher__PollIntervalSeconds: ${ALERT_WATCHER_POLL_SECONDS:-60}
