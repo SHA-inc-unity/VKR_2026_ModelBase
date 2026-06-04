@@ -358,42 +358,24 @@ def rebuild_rsi_and_upsert_rows_sql(
     write_start_ms: int,
     on_upsert_batch=None,
 ) -> tuple[dict, int, int]:
-    """SQL-first вариант `rebuild_rsi_and_upsert_rows` (Round 3).
+    """SQL-first вариант ingest'а — РЕТИРОВАН в Kafka-only архитектуре.
 
-    Путь:
-      1. `rebuild_rsi` в Python — для узкого окна (после Fix B — маленький объём).
-      2. `upsert_with_sql_features` — COPY raw + один SQL с window-функциями
-         для всех 42 feature-колонок + merge с IS DISTINCT FROM.
+    Раньше: RSI в Python + `upsert_with_sql_features` (COPY raw + один SQL с
+    window-функциями для feature-колонок) напрямую в PostgreSQL.
 
-    Python **не** материализует feature-DataFrame, что экономит ~1.26 ГБ RAM
-    для больших батчей. Feature-вычисления выполняет PostgreSQL на своей стороне.
-
-    Семантика feature-формул совпадает с `build_features`
-    (см. `backend.dataset.features_sql`).
+    Теперь microservice_data — единоличный владелец рыночных данных и
+    feature-инженерии; в microservice_analitic больше нет PG-соединения, поэтому
+    передать обязательный `connection` в `upsert_with_sql_features` неоткуда
+    (раньше это вызывало TypeError при любом вызове). Функция нигде не
+    вызывается, а флаг `DOWNLOAD_MISSING_USE_SQL_FEATURES` больше не читается —
+    оставляем явный fail-fast, как у `database.upsert_rows`/`upsert_dataframe`.
     """
-    from .pipeline_sql import upsert_with_sql_features
-
-    t0 = now()
-    tlog.info(
-        "rebuild_rsi_and_upsert_sql | START table=%s rows=%d tf=%s "
-        "warmup_start=%s write_start=%s",
-        table_name, len(rows), timeframe, warmup_start_ms, write_start_ms,
+    raise NotImplementedError(
+        "rebuild_rsi_and_upsert_rows_sql is not available in the Kafka-only "
+        "architecture (no direct PostgreSQL access in microservice_analitic). "
+        "Trigger ingestion via data_client.ingest(symbol, timeframe, start_ms, end_ms); "
+        "RSI/features are computed by microservice_data."
     )
-    rebuild_rsi(rows, period)
-    summary = validate_rows(rows, period)
-    inserted, updated = upsert_with_sql_features(
-        table_name=table_name,
-        raw_rows=rows,
-        warmup_start_ms=warmup_start_ms,
-        write_start_ms=write_start_ms,
-        timeframe=timeframe,
-        on_upsert_batch=on_upsert_batch,
-    )
-    tlog.info(
-        "rebuild_rsi_and_upsert_sql | DONE table=%s inserted=%d updated=%d total=%.3fs",
-        table_name, inserted, updated, now() - t0,
-    )
-    return summary, inserted, updated
 
 
 def print_summary(summary: dict, missing_ranges: list[tuple[int, int]], table_name: str) -> None:

@@ -189,13 +189,23 @@ public sealed partial class KafkaConsumerService : BackgroundService
 
             if (result is null) continue;
 
-            // Fire-and-forget with two-tier concurrency limit.
-            // The outer semaphore caps total in-flight handlers; heavy
-            // topics also acquire a dedicated slot so their fan-out cannot
-            // exhaust the PostgreSQL pool and starve light handlers.
-            _ = Task.Run(async () =>
+            // Back-pressure: acquire a worker slot BEFORE spawning the handler.
+            // Previously the wait happened inside Task.Run, so the consume loop
+            // kept reading and piling up unbounded in-flight Tasks (each holding
+            // a parsed JsonDocument); with auto-commit their offsets could be
+            // committed long before they ran, so a burst lost messages on
+            // restart. Blocking here bounds in-flight work to the slot count.
+            try
             {
                 await _concurrency.WaitAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) { break; }
+
+            // Fire-and-forget with two-tier concurrency limit. The outer slot is
+            // already held; heavy topics also acquire a dedicated slot so their
+            // fan-out cannot exhaust the PostgreSQL pool and starve light handlers.
+            _ = Task.Run(async () =>
+            {
                 bool acquiredHeavy = false;
                 JsonDocument? doc = null;
                 try

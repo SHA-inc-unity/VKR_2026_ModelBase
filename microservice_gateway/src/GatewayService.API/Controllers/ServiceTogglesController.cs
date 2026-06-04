@@ -19,7 +19,11 @@ public sealed class ServiceTogglesController : ControllerBase
     public ActionResult<ServiceTogglesDto> GetToggles() =>
         Ok(_state.GetServiceToggles());
 
+    // Writing global service toggles affects every user (News/Alerts/
+    // PortfolioSync/MarketOverview), so it must be admin-only. The GET above
+    // stays open to any authenticated user (clients read it as feature flags).
     [HttpPatch("toggles")]
+    [Authorize(Roles = "admin")]
     public ActionResult<ServiceTogglesDto> UpdateToggles([FromBody] PatchServiceTogglesRequest request) =>
         Ok(_state.UpdateServiceToggles(request));
 }
