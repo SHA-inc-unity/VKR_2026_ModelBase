@@ -20,12 +20,19 @@ services:
       Password__WorkFactor: ${BCRYPT_WORK_FACTOR:-12}
       Redis__ConnectionString: ${REDIS_URL:-}
       InternalApi__ApiKey: ${INTERNAL_API_KEY}
-      # Master key for AES-GCM of users' exchange API secrets. MUST be a
-      # dedicated value, NOT reused from INTERNAL_API_KEY — compromising the
-      # shared internal key must never decrypt stored secrets. Fail-fast if unset
-      # (was: silent fallback to ${INTERNAL_API_KEY}).
-      ACCOUNT_API_KEY_MASTER_KEY: ${ACCOUNT_API_KEY_MASTER_KEY:?ACCOUNT_API_KEY_MASTER_KEY must be set to a dedicated secret}
-      ApiKeyEncryption__MasterKey: ${ACCOUNT_API_KEY_MASTER_KEY:?ACCOUNT_API_KEY_MASTER_KEY must be set to a dedicated secret}
+      # SECURITY TODO (ops migration, NOT a pure code fix): this master key
+      # encrypts users' exchange API secrets (AES-GCM). It MUST be a dedicated
+      # secret, NOT reused from INTERNAL_API_KEY — else compromising the shared
+      # internal key decrypts every stored secret. The backend .env currently
+      # does NOT define ACCOUNT_API_KEY_MASTER_KEY, so this falls back to
+      # INTERNAL_API_KEY. Hardening to a fail-fast `:?` was reverted because it
+      # would block account startup on the live host. To harden safely:
+      #   1) generate a dedicated ACCOUNT_API_KEY_MASTER_KEY and add it to .env;
+      #   2) re-encrypt existing exchange_api_keys rows from the old key to the
+      #      new one (or have affected users re-link their exchange keys);
+      #   3) then switch the line below to `${ACCOUNT_API_KEY_MASTER_KEY:?...}`.
+      ACCOUNT_API_KEY_MASTER_KEY: ${ACCOUNT_API_KEY_MASTER_KEY:-${INTERNAL_API_KEY}}
+      ApiKeyEncryption__MasterKey: ${ACCOUNT_API_KEY_MASTER_KEY:-${INTERNAL_API_KEY}}
       Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
       AdminBootstrap__Email: ${ADMIN_BOOTSTRAP_EMAIL:-}
       AdminBootstrap__Username: ${ADMIN_BOOTSTRAP_USERNAME:-}
