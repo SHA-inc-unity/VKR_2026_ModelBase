@@ -20,8 +20,12 @@ services:
       Password__WorkFactor: ${BCRYPT_WORK_FACTOR:-12}
       Redis__ConnectionString: ${REDIS_URL:-}
       InternalApi__ApiKey: ${INTERNAL_API_KEY}
-      ACCOUNT_API_KEY_MASTER_KEY: ${ACCOUNT_API_KEY_MASTER_KEY:-${INTERNAL_API_KEY}}
-      ApiKeyEncryption__MasterKey: ${ACCOUNT_API_KEY_MASTER_KEY:-${INTERNAL_API_KEY}}
+      # Master key for AES-GCM of users' exchange API secrets. MUST be a
+      # dedicated value, NOT reused from INTERNAL_API_KEY — compromising the
+      # shared internal key must never decrypt stored secrets. Fail-fast if unset
+      # (was: silent fallback to ${INTERNAL_API_KEY}).
+      ACCOUNT_API_KEY_MASTER_KEY: ${ACCOUNT_API_KEY_MASTER_KEY:?ACCOUNT_API_KEY_MASTER_KEY must be set to a dedicated secret}
+      ApiKeyEncryption__MasterKey: ${ACCOUNT_API_KEY_MASTER_KEY:?ACCOUNT_API_KEY_MASTER_KEY must be set to a dedicated secret}
       Kafka__BootstrapServers: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:29092}
       AdminBootstrap__Email: ${ADMIN_BOOTSTRAP_EMAIL:-}
       AdminBootstrap__Username: ${ADMIN_BOOTSTRAP_USERNAME:-}

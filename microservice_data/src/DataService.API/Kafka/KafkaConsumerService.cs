@@ -119,6 +119,15 @@ public sealed partial class KafkaConsumerService : BackgroundService
         _internalDownloadBaseUrl = opts.Value.Minio.Endpoint;
         _log                     = log;
 
+        // Delivery semantics (accepted trade-off): EnableAutoCommit=true gives
+        // at-most-once for this req/reply command path. Light commands
+        // (health/coverage/list/timestamps/rows) are idempotent reads that the
+        // caller simply retries on timeout, so losing one on a restart is safe.
+        // DURABILITY for heavy/stateful operations (ingest, compute_features,
+        // detect_anomalies, clean_apply, export, import_csv, upsert_ohlcv) is NOT
+        // provided here — those must run through the persistent dataset_jobs queue
+        // (cmd.data.dataset.jobs.start → DatasetJobRunner), which survives
+        // restarts. Do not add new heavy/once-only work to this consume path.
         var cfg = new ConsumerConfig
         {
             BootstrapServers         = opts.Value.Kafka.BootstrapServers,

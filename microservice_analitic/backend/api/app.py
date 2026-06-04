@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -43,6 +45,22 @@ _LOG = logging.getLogger(__name__)
 
 # Глобальный планировщик (инициализируется при старте если нужно)
 _scheduler = None
+
+# Guard against concurrent /retrain runs for the same model prefix. A run
+# reserves its prefix here and the background thread releases it in finally.
+# (RetrainResponse already declares an "already_running" status for this.)
+_retrain_lock = threading.Lock()
+_active_retrains: set[str] = set()
+
+# Model prefixes build filesystem paths (e.g. <prefix>_predictions.json) and
+# registry keys, so they must be a strict slug — prevents path traversal.
+_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _validate_prefix(prefix: str) -> str:
+    if not _PREFIX_RE.fullmatch(prefix or ""):
+        raise HTTPException(status_code=400, detail="Invalid prefix")
+    return prefix
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +160,7 @@ async def remove_registry_entry(version_id: str) -> dict:
 
 @app.get("/predictions/{prefix}", response_model=PredictionsResponse, tags=["predictions"])
 async def get_predictions(prefix: str) -> PredictionsResponse:
+    _validate_prefix(prefix)
     pred_path = MODELS_DIR / f"{prefix}_predictions.json"
     if not pred_path.exists():
         raise HTTPException(status_code=404, detail=f"Предсказания для '{prefix}' не найдены")
@@ -167,6 +186,7 @@ async def get_predictions(prefix: str) -> PredictionsResponse:
 
 @app.get("/metrics/{prefix}", response_model=MetricsSummaryResponse, tags=["metrics"])
 async def get_metrics(prefix: str) -> MetricsSummaryResponse:
+    _validate_prefix(prefix)
     entries = load_registry(models_dir=MODELS_DIR, prefix_filter=prefix, limit=1)
     if not entries:
         raise HTTPException(status_code=404, detail=f"Нет записей реестра для prefix '{prefix}'")
@@ -294,9 +314,28 @@ async def trigger_retrain(req: RetrainRequest) -> RetrainResponse:
                 _LOG.info("[api] retrain %s завершён", prefix)
             except Exception as exc:
                 _LOG.error("[api] retrain %s ошибка: %s", prefix, exc, exc_info=True)
+            finally:
+                with _retrain_lock:
+                    _active_retrains.discard(prefix)
 
-        t = threading.Thread(target=_bg, daemon=True, name=f"api_retrain_{prefix}")
-        t.start()
+        # Reserve the prefix so a second request for the same model returns
+        # already_running instead of racing on the model files / spawning a
+        # duplicate training thread (DoS / corrupted artifacts).
+        with _retrain_lock:
+            if prefix in _active_retrains:
+                return RetrainResponse(
+                    status="already_running",
+                    prefix=prefix,
+                    message="Переобучение уже выполняется для этого префикса",
+                )
+            _active_retrains.add(prefix)
+        try:
+            t = threading.Thread(target=_bg, daemon=True, name=f"api_retrain_{prefix}")
+            t.start()
+        except Exception:
+            with _retrain_lock:
+                _active_retrains.discard(prefix)
+            raise
 
         return RetrainResponse(status="started", prefix=prefix, message="Обучение запущено в фоне")
 
